@@ -17,9 +17,18 @@ from requests.packages import urllib3
 from ..config import DANGEROUS_PORTS, MAX_CIDR_HOSTS, SERVICE_NAMES
 from ..database import get_setting
 from ..utils import parse_ports, truncate, validate_host_target
+from .authenticated import authenticated_scan
 from .base import Finding, ScanContext, ScanResult
 from .tools import run_tool, tool_path
-from .web import _title, _tls_findings
+from .web import (
+    _add_header_findings,
+    _exposed_files,
+    _injection_checks,
+    _run_nuclei,
+    _session as web_session,
+    _title,
+    _tls_findings,
+)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -77,7 +86,17 @@ def _probe_port(host: str, port: int, timeout: float) -> PortResult | None:
         return None
 
 
-def _http_service(result: ScanResult, host: str, port: int, open_ports: list[int], ctx: ScanContext) -> None:
+def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, parsed))
+
+
+def _http_service(
+    result: ScanResult, host: str, port: int, open_ports: list[int], ctx: ScanContext
+) -> tuple[str, requests.Response, str] | None:
     schemes = ["https", "http"] if port in TLS_PORTS else ["http", "https"]
     response = None
     used_scheme = schemes[0]
@@ -95,24 +114,25 @@ def _http_service(result: ScanResult, host: str, port: int, open_ports: list[int
         except requests.RequestException:
             continue
     if response is None:
-        return
+        return None
     body = (response.content or b"")[:200_000].decode(response.encoding or "utf-8", errors="replace")
     title = _title(body)
     result.add(
         Finding(
             severity="info",
-            title=f"HTTP service detected on port {port}",
+            title=f"Web server detected on port {port} — deep scan executed",
             category="network",
-            description="A web service is exposed on this port.",
+            description="An HTTP/HTTPS web service was discovered. Deep web vulnerability checks (headers, exposed paths, injection probes, Nuclei CVE scan) were performed.",
             evidence=(
                 f"URL: {used_scheme}://{host}:{port}/\n"
                 f"HTTP {response.status_code}\nTitle: {title or '(none)'}\n"
-                f"Server: {truncate(response.headers.get('server', ''), 150)}"
+                f"Server: {truncate(response.headers.get('server', ''), 150)}\n"
+                f"Scan type: deep web vulnerability assessment (headers + injection + Nuclei + exposed files)"
             ),
-            remediation="Confirm that this service is intended to be reachable from the scanned network and keep it patched.",
+            remediation="Review all web findings below. Patch web server software, remove exposed admin interfaces, and restrict access with a WAF or reverse proxy.",
             location=f"{host}:{port}",
-            key=f"http-service:{host}:{port}",
-            raw={"status": response.status_code, "title": title},
+            key=f"http-service-deep:{host}:{port}",
+            raw={"status": response.status_code, "title": title, "scan_type": "deep_web"},
         )
     )
     result.metadata.setdefault("web_services", []).append(
@@ -120,6 +140,51 @@ def _http_service(result: ScanResult, host: str, port: int, open_ports: list[int
     )
     if used_scheme == "https" or port in TLS_PORTS:
         _tls_findings(result, host, port, ctx)
+    return f"{used_scheme}://{host}:{port}/", response, body
+
+
+def _web_vulnerability_checks(
+    result: ScanResult,
+    ctx: ScanContext,
+    url: str,
+    response: requests.Response,
+    body: str,
+) -> None:
+    """Run the reusable web checks against a discovered HTTP service."""
+    session = web_session()
+    try:
+        _add_header_findings(result, url, response, body, ctx)
+        try:
+            _exposed_files(result, session, url, ctx)
+        except requests.RequestException as exc:
+            ctx.log(f"Exposed-file checks stopped on {url}: {exc}", "warning")
+        try:
+            _injection_checks(result, session, url, response, body, ctx)
+        except requests.RequestException as exc:
+            ctx.log(f"Injection probes stopped on {url}: {exc}", "warning")
+        _run_nuclei(result, url, ctx)
+        # Add a summary finding showing the deep web scan was executed and results were added.
+        web_findings = []
+        for f in result.findings:
+            cat = f.category if hasattr(f, "category") else f.get("category")
+            loc = f.location if hasattr(f, "location") else f.get("location", "")
+            if cat in ("web", "network") and url in (loc or ""):
+                web_findings.append(f)
+        result.add(
+            Finding(
+                severity="info",
+                title=f"Deep web vulnerability assessment completed on {url}",
+                category="web",
+                description=f"A deep web scan (headers, exposed files, injection probes, Nuclei CVE templates) was executed against the discovered web server. {len(web_findings)} web/network findings produced.",
+                evidence=f"Target URL: {url}\nWeb findings generated: {len(web_findings)}",
+                remediation="Review all related findings. Address critical/high web vulnerabilities before exposing this service externally.",
+                location=url,
+                key=f"deep-web-summary:{url}",
+                raw={"url": url, "findings": len(web_findings)},
+            )
+        )
+    finally:
+        session.close()
 
 
 def _add_port_findings(
@@ -345,19 +410,45 @@ def scan(ctx: ScanContext) -> ScanResult:
     _add_port_findings(result, all_open, ctx)
 
     # Web/TLS checks for likely HTTP ports.
+    web_checks = ctx.option_bool("web_checks", True)
+    web_budget = _bounded_int(ctx.option("max_web_hosts", 20), 20, 1, 200)
+    web_checked = 0
     for item in all_open:
         if item.port in HTTP_PORTS:
             ctx.check_cancel()
             try:
-                _http_service(result, item.host, item.port, [p.port for p in open_by_host[item.host]], ctx)
+                service = _http_service(
+                    result, item.host, item.port, [p.port for p in open_by_host[item.host]], ctx
+                )
             except Exception as exc:
                 ctx.log(f"HTTP probe failed on {item.host}:{item.port}: {exc}", "warning")
+                continue
+            if not service or not web_checks:
+                continue
+            if web_checked >= web_budget:
+                ctx.log(
+                    f"Deep web checks limited to {web_budget} service(s); "
+                    "remaining web ports were fingerprinted only",
+                    "warning",
+                )
+                break
+            web_checked += 1
+            url, response, body = service
+            try:
+                _web_vulnerability_checks(result, ctx, url, response, body)
+            except Exception as exc:
+                ctx.log(f"Web vulnerability checks failed on {url}: {exc}", "warning")
 
     # Nmap is optional and only used to enrich hosts with open services.
     if ctx.option_bool("external_tools", False):
         for host, items in open_by_host.items():
             if items and not ctx.cancelled():
                 _run_nmap(result, host, sorted({p.port for p in items}), ctx)
+
+    # Authenticated inventory/CVE checks use one credential per target OS.
+    if ctx.option_bool("authenticated", False):
+        ctx.progress(88, "Running authenticated host checks")
+        authenticated_scan(result, ctx, open_by_host)
 
     ctx.progress(96, "Finalizing network results")
     return result

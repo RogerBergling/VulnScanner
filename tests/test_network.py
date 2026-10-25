@@ -110,3 +110,47 @@ def test_process_agent_network_payload_network_only_failure():
     ctx = DummyContext(target="10.0.0.0/30")
     with pytest.raises(ValueError, match="probe failed"):
         process_agent_network_payload(ctx, {"error": "probe failed"})
+
+
+def test_scan_runs_authenticated_checks(monkeypatch):
+    import app.scanners.network as network
+
+    calls: list[list[str]] = []
+
+    def fake_probe(host, port, timeout):
+        return PortResult(host, port)
+
+    def fake_auth(result, ctx, open_by_host):
+        calls.append(sorted(open_by_host))
+        result.metadata["authenticated_checked"] = True
+
+    monkeypatch.setattr(network, "_probe_port", fake_probe)
+    monkeypatch.setattr(network, "authenticated_scan", fake_auth)
+    result = network.scan(
+        DummyContext({"ports": "22", "authenticated": True}, target="127.0.0.1")
+    )
+    assert calls == [["127.0.0.1"]]
+    assert result.metadata["authenticated_checked"] is True
+
+
+def test_scan_runs_web_checks_on_http_ports(monkeypatch):
+    import app.scanners.network as network
+
+    checked: list[str] = []
+
+    def fake_probe(host, port, timeout):
+        return PortResult(host, port)
+
+    def fake_http(result, host, port, open_ports, ctx):
+        return f"http://{host}:{port}/", object(), "<html>ok</html>"
+
+    def fake_web(result, ctx, url, response, body):
+        checked.append(url)
+
+    monkeypatch.setattr(network, "_probe_port", fake_probe)
+    monkeypatch.setattr(network, "_http_service", fake_http)
+    monkeypatch.setattr(network, "_web_vulnerability_checks", fake_web)
+    network.scan(
+        DummyContext({"ports": "80", "web_checks": True}, target="127.0.0.1")
+    )
+    assert checked == ["http://127.0.0.1:80/"]

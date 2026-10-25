@@ -33,8 +33,11 @@ def test_database_is_initialized_with_defaults(data_dir):
         "settings",
         "osv_cache",
         "kev_catalog",
+        "credentials",
+        "asset_credential_bindings",
+        "scan_credentials",
     }.issubset(tables)
-    assert version == 1
+    assert version == 3
     assert get_setting("product_name") == "VulnScanner"
     assert get_setting("missing", "fallback") == "fallback"
 

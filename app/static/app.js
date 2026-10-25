@@ -184,6 +184,7 @@
   const get = (path) => api(path);
   const post = (path, body) => api(path, { method: 'POST', body: body || {} });
   const patch = (path, body) => api(path, { method: 'PATCH', body: body || {} });
+  const put = (path, body) => api(path, { method: 'PUT', body: body || {} });
   const del = (path) => api(path, { method: 'DELETE' });
 
   // ---------------------------------------------------------------------------
@@ -699,8 +700,19 @@
     });
   }
 
-  function assetFormHtml(asset) {
+  function credentialSelectOptions(credentials, os, selectedId) {
+    const items = (credentials || []).filter(function (item) { return item.os === os; });
+    return '<option value="">No saved credential</option>' + items.map(function (item) {
+      const scope = item.customer_id ? '' : ' (global)';
+      const account = item.domain ? item.domain + '\\' + item.username : item.username;
+      return '<option value="' + item.id + '"' + (Number(selectedId) === Number(item.id) ? ' selected' : '') + '>' +
+        esc(item.name + ' — ' + account + scope) + '</option>';
+    }).join('');
+  }
+
+  function assetFormHtml(asset, credentials, bindings) {
     const item = asset || {};
+    const bound = bindings || {};
     const kinds = ['host', 'web', 'repo', 'github', 'domain', 'agent', 'other'];
     return '<form id="asset-form"><div class="form-grid">' +
       '<label class="field"><span>Asset name</span><input class="input" name="name" required maxlength="160" value="' + esc(item.name || '') + '" placeholder="web01"></label>' +
@@ -709,23 +721,56 @@
       '<label class="field full"><span>Target / identifier</span>' +
         '<input class="input" name="identifier" maxlength="2000" value="' + esc(item.identifier || '') + '" placeholder="https://example.com, 10.0.0.5 or owner/repo">' +
         '<span class="hint">The default target used when you start a scan from this asset.</span></label>' +
+      '<label class="field"><span>Linux scan credential</span><select class="select" name="credential_linux">' +
+        credentialSelectOptions(credentials, 'linux', bound.linux && bound.linux.id) + '</select></label>' +
+      '<label class="field"><span>Windows scan credential</span><select class="select" name="credential_windows">' +
+        credentialSelectOptions(credentials, 'windows', bound.windows && bound.windows.id) + '</select></label>' +
       '<label class="field full"><span>Description <span class="muted">(optional)</span></span>' +
         '<input class="input" name="description" maxlength="2000" value="' + esc(item.description || '') + '"></label>' +
-      '</div><div class="form-error"></div></form>';
+      '</div><div class="modal-note" style="margin-top:8px">Authenticated scans use these credentials for this asset. ' +
+      'Credentials are encrypted at rest and never returned by the API. Global and customer defaults are used when no asset credential is selected.</div>' +
+      '<div class="form-error"></div></form>';
   }
 
-  function addAssetModal(groupId) {
+  async function assetFormData(customerId) {
+    let credentials = [];
+    try { credentials = await get('/credentials' + queryString({ customer_id: customerId })); }
+    catch (ignore) { credentials = []; }
+    return credentials;
+  }
+
+  async function bindAssetCredentials(assetId, data) {
+    const body = {};
+    if (data.credential_linux !== undefined) body.linux = data.credential_linux ? Number(data.credential_linux) : null;
+    if (data.credential_windows !== undefined) body.windows = data.credential_windows ? Number(data.credential_windows) : null;
+    if (Object.keys(body).length) await put('/assets/' + assetId + '/credentials', body);
+  }
+
+  function stripAssetCredentials(data) {
+    const clean = Object.assign({}, data);
+    delete clean.credential_linux;
+    delete clean.credential_windows;
+    return clean;
+  }
+
+  async function addAssetModal(groupId) {
+    let credentials = [];
+    try {
+      const group = await get('/groups/' + groupId);
+      credentials = await assetFormData(group.customer_id);
+    } catch (error) { /* credentials are optional */ }
     openModal({
       title: 'Add asset',
       size: 'wide',
-      content: assetFormHtml(null),
+      content: assetFormHtml(null, credentials),
       actions: [
         { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
         { label: 'Create asset', class: 'btn-primary', onClick: function (ctx) {
           runWithButton(ctx.button, async function () {
             try {
               const data = Object.fromEntries(new FormData($('#asset-form', ctx.overlay)).entries());
-              await post('/groups/' + groupId + '/assets', data);
+              const asset = await post('/groups/' + groupId + '/assets', stripAssetCredentials(data));
+              await bindAssetCredentials(asset.id, data);
               ctx.close(); toast('Asset created'); router();
             } catch (error) { formError(ctx.overlay, errorText(error)); }
           });
@@ -737,17 +782,22 @@
   async function editAssetModal(assetId) {
     try {
       const asset = await get('/assets/' + assetId);
+      const [credentials, bindingData] = await Promise.all([
+        assetFormData(asset.customer_id),
+        get('/assets/' + assetId + '/credentials').catch(function () { return { bindings: {} }; })
+      ]);
       openModal({
         title: 'Edit asset',
         size: 'wide',
-        content: assetFormHtml(asset),
+        content: assetFormHtml(asset, credentials, bindingData.bindings || {}),
         actions: [
           { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
           { label: 'Save asset', class: 'btn-primary', onClick: function (ctx) {
             runWithButton(ctx.button, async function () {
               try {
                 const data = Object.fromEntries(new FormData($('#asset-form', ctx.overlay)).entries());
-                await patch('/assets/' + assetId, data);
+                await patch('/assets/' + assetId, stripAssetCredentials(data));
+                await bindAssetCredentials(assetId, data);
                 ctx.close(); toast('Asset updated'); router();
               } catch (error) { formError(ctx.overlay, errorText(error)); }
             });
@@ -908,7 +958,7 @@
       return '<div class="form-section"><h3>Network scan options</h3><div class="form-grid">' +
         '<label class="field full"><span>Run from</span><select class="select" id="opt-agent">' +
           '<option value="">VulnScanner server (local network)</option>' + (agentOptionsHtml || '') + '</select>' +
-          '<span class="hint">Choose an enrolled agent to scan from its network position. The agent must be online or reconnect before the scan starts.</span></label>' +
+          '<span class="hint">Choose an enrolled agent to scan from its network position. Authenticated checks only run from the VulnScanner server.</span></label>' +
         '<label class="field"><span>Port profile</span><select class="select" id="opt-profile">' +
           '<option value="common">Common services</option><option value="web">Web ports</option>' +
           '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
@@ -916,8 +966,41 @@
           '<input class="input" id="opt-ports" placeholder="22,80,443 or 1-1024"></label></div>' +
         '<div class="checkbox-row" style="margin-top:12px">' +
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
-        '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label></div>' +
-        '<div class="modal-note" style="margin-top:8px">CIDR ranges are limited by the server configuration (default 256 hosts). Delegated agent scans use TCP connect probes from the endpoint.</div></div>';
+        '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — headers, exposed files and Nuclei on discovered HTTP ports.</span></label></div>' +
+        '<div class="form-section" id="network-auth-fields" style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">' +
+        '<div class="checkbox-row"><label class="check"><input type="checkbox" id="opt-auth"><span><strong>Authenticated checks</strong> — log in with a high-privilege account to inventory patches, packages, users and configuration (server scans only).</span></label></div>' +
+        '<div class="form-grid" style="margin-top:10px">' +
+          '<label class="field"><span>Target operating system</span><select class="select" id="opt-target-os">' +
+            '<option value="auto">Auto-detect</option><option value="linux">Linux</option><option value="windows">Windows</option></select></label>' +
+          '<label class="field"><span>Maximum hosts to authenticate</span><input class="input" id="opt-max-auth" type="number" min="1" max="256" value="32"></label>' +
+          '<label class="field"><span>Auth timeout (seconds)</span><input class="input" id="opt-auth-timeout" type="number" min="3" max="90" value="12"></label>' +
+          '<label class="field"><span>SSH port</span><input class="input" id="opt-ssh-port" type="number" min="1" max="65535" value="22"></label>' +
+          '<label class="field"><span>WinRM port</span><input class="input" id="opt-winrm-port" type="number" min="1" max="65535" value="5985"></label>' +
+          '<label class="field"><span>WinRM transport</span><select class="select" id="opt-winrm-transport">' +
+            '<option value="ntlm">NTLM</option><option value="basic">Basic</option><option value="credssp">CredSSP</option><option value="kerberos">Kerberos</option></select></label>' +
+        '</div>' +
+        '<div class="checkbox-row" style="margin-top:10px">' +
+          '<label class="check"><input type="checkbox" id="opt-winrm-https"><span><strong>WinRM over HTTPS</strong> (default port 5986).</span></label>' +
+          '<label class="check"><input type="checkbox" id="opt-verify-tls"><span>Verify the WinRM HTTPS certificate.</span></label>' +
+        '</div>' +
+        '<div class="modal-note">Uses saved credentials from Settings, from this asset, or the per-scan credentials below. Only one authentication attempt is made per host so accounts are not locked out.</div>' +
+        '<h4 style="margin:14px 0 6px">Linux (SSH) <span class="muted small">— optional per-scan override</span></h4>' +
+        '<div class="form-grid">' +
+          '<label class="field"><span>Username</span><input class="input" id="opt-linux-user" autocomplete="off" placeholder="svc-vulnscan"></label>' +
+          '<label class="field"><span>Password</span><input class="input" id="opt-linux-password" type="password" autocomplete="new-password"></label>' +
+          '<label class="field full"><span>Private key <span class="muted">(optional, instead of a password)</span></span>' +
+            '<textarea class="textarea" id="opt-linux-key" rows="3" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>' +
+        '</div>' +
+        '<h4 style="margin:14px 0 6px">Windows (WinRM) <span class="muted small">— optional per-scan override</span></h4>' +
+        '<div class="form-grid">' +
+          '<label class="field"><span>Username</span><input class="input" id="opt-windows-user" autocomplete="off" placeholder="svc-vulnscan or DOMAIN\\svc-vulnscan"></label>' +
+          '<label class="field"><span>Password</span><input class="input" id="opt-windows-password" type="password" autocomplete="new-password"></label>' +
+          '<label class="field"><span>Domain <span class="muted">(domain accounts)</span></span><input class="input" id="opt-windows-domain" placeholder="CORP"></label>' +
+          '<label class="field"><span>Account type</span><select class="select" id="opt-windows-account">' +
+            '<option value="local">Local account</option><option value="domain">Domain account</option></select></label>' +
+        '</div></div>' +
+        '<div class="modal-note" style="margin-top:8px">CIDR ranges are limited by the server configuration (default 256 hosts). Delegated agent scans use TCP connect probes from the endpoint and never receive credentials.</div></div>';
     }
     if (type === 'repo' || type === 'github') {
       return '<div class="form-section"><h3>Repository options</h3><div class="checkbox-row">' +
@@ -999,10 +1082,52 @@
                 payload.options.profile = ($('#opt-profile', ctx.overlay) || {}).value || 'common';
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
+                payload.options.web_checks = !!($('#opt-web-checks', ctx.overlay) || {}).checked;
                 const ports = ($('#opt-ports', ctx.overlay) || {}).value || '';
                 if (ports.trim()) payload.options.ports = ports.trim();
                 const agentId = ($('#opt-agent', ctx.overlay) || {}).value || '';
                 if (agentId) payload.agent_id = agentId;
+                const authenticated = !!($('#opt-auth', ctx.overlay) || {}).checked;
+                if (authenticated && agentId) {
+                  throw new Error('Authenticated checks run from the VulnScanner server. Choose the server as “Run from”, or disable authenticated checks.');
+                }
+                payload.options.authenticated = authenticated;
+                if (authenticated) {
+                  payload.options.target_os = ($('#opt-target-os', ctx.overlay) || {}).value || 'auto';
+                  payload.options.max_auth_hosts = Number(($('#opt-max-auth', ctx.overlay) || {}).value || 32);
+                  payload.options.auth_timeout = Number(($('#opt-auth-timeout', ctx.overlay) || {}).value || 12);
+                  payload.options.ssh_port = Number(($('#opt-ssh-port', ctx.overlay) || {}).value || 22);
+                  payload.options.winrm_port = Number(($('#opt-winrm-port', ctx.overlay) || {}).value || 5985);
+                  payload.options.winrm_transport = ($('#opt-winrm-transport', ctx.overlay) || {}).value || 'ntlm';
+                  payload.options.winrm_https = !!($('#opt-winrm-https', ctx.overlay) || {}).checked;
+                  payload.options.verify_tls = !!($('#opt-verify-tls', ctx.overlay) || {}).checked;
+                  const linuxUser = (($('#opt-linux-user', ctx.overlay) || {}).value || '').trim();
+                  const linuxPassword = ($('#opt-linux-password', ctx.overlay) || {}).value || '';
+                  const linuxKey = ($('#opt-linux-key', ctx.overlay) || {}).value || '';
+                  const windowsUser = (($('#opt-windows-user', ctx.overlay) || {}).value || '').trim();
+                  const windowsPassword = ($('#opt-windows-password', ctx.overlay) || {}).value || '';
+                  if (linuxUser || linuxPassword || linuxKey) {
+                    if (!linuxUser) throw new Error('Enter a Linux username for the per-scan credential');
+                    if (!linuxPassword && !linuxKey) throw new Error('Enter a Linux password or private key');
+                    payload.credentials = payload.credentials || {};
+                    payload.credentials.linux = { username: linuxUser, account_type: 'local' };
+                    if (linuxKey.trim()) payload.credentials.linux.private_key = linuxKey;
+                    else payload.credentials.linux.password = linuxPassword;
+                  }
+                  if (windowsUser || windowsPassword) {
+                    if (!windowsUser) throw new Error('Enter a Windows username for the per-scan credential');
+                    if (!windowsPassword) throw new Error('Enter the Windows password');
+                    const accountType = ($('#opt-windows-account', ctx.overlay) || {}).value || 'local';
+                    payload.credentials = payload.credentials || {};
+                    payload.credentials.windows = {
+                      username: windowsUser,
+                      password: windowsPassword,
+                      domain: (($('#opt-windows-domain', ctx.overlay) || {}).value || '').trim(),
+                      account_type: accountType,
+                      auth_type: 'password'
+                    };
+                  }
+                }
               } else if (type === 'repo' || type === 'github') {
                 payload.options.include_secrets = !!($('#opt-secrets', ctx.overlay) || {}).checked;
                 payload.options.include_dependencies = !!($('#opt-deps', ctx.overlay) || {}).checked;
@@ -1075,6 +1200,26 @@
           const portsInput = $('#opt-ports', overlay);
           if (portsInput && previousPorts) portsInput.value = previousPorts;
           tokenField.classList.toggle('hidden', type !== 'github');
+          const authFields = $('#network-auth-fields', overlay);
+          if (authFields) {
+            const agentSelect = $('#opt-agent', overlay);
+            const authToggle = $('#opt-auth', overlay);
+            const syncAuthVisibility = function () {
+              const delegated = !!(agentSelect && agentSelect.value);
+              authFields.classList.toggle('hidden', delegated);
+              if (delegated && authToggle) authToggle.checked = false;
+            };
+            if (agentSelect) agentSelect.addEventListener('change', syncAuthVisibility);
+            syncAuthVisibility();
+            const httpsToggle = $('#opt-winrm-https', overlay);
+            const winrmPort = $('#opt-winrm-port', overlay);
+            if (httpsToggle && winrmPort) {
+              httpsToggle.addEventListener('change', function () {
+                if (httpsToggle.checked && String(winrmPort.value) === '5985') winrmPort.value = '5986';
+                if (!httpsToggle.checked && String(winrmPort.value) === '5986') winrmPort.value = '5985';
+              });
+            }
+          }
         }
         function renderAssets() {
           const groupId = groupSelect.value ? Number(groupSelect.value) : null;
@@ -2387,6 +2532,90 @@
       '<span class="switch-slider"></span></label></div>';
   }
 
+  function credentialFormHtml(item, customers) {
+    const credential = item || {};
+    const os = credential.os || 'linux';
+    return '<form id="credential-form"><div class="form-grid">' +
+      '<label class="field"><span>Name</span><input class="input" name="name" maxlength="160" value="' + esc(credential.name || '') + '" placeholder="Linux server admin"></label>' +
+      '<label class="field"><span>Operating system</span><select class="select" name="os" id="credential-os">' +
+        '<option value="linux"' + (os === 'linux' ? ' selected' : '') + '>Linux (SSH)</option>' +
+        '<option value="windows"' + (os === 'windows' ? ' selected' : '') + '>Windows (WinRM)</option></select></label>' +
+      '<label class="field"><span>Username</span><input class="input" name="username" required maxlength="200" autocomplete="off" value="' + esc(credential.username || '') + '" placeholder="svc-vulnscan"></label>' +
+      '<label class="field" id="credential-domain-field"><span>Domain <span class="muted">(domain accounts)</span></span>' +
+        '<input class="input" name="domain" maxlength="200" value="' + esc(credential.domain || '') + '" placeholder="CORP"></label>' +
+      '<label class="field" id="credential-account-field"><span>Account type</span><select class="select" name="account_type">' +
+        '<option value="local"' + ((credential.account_type || 'local') === 'local' ? ' selected' : '') + '>Local account</option>' +
+        '<option value="domain"' + (credential.account_type === 'domain' ? ' selected' : '') + '>Domain account</option></select></label>' +
+      '<label class="field" id="credential-customer-field"><span>Scope</span><select class="select" name="customer_id">' +
+        '<option value="">Global (all customers)</option>' + (customers || []).map(function (customer) {
+          return '<option value="' + customer.id + '"' + (Number(credential.customer_id) === Number(customer.id) ? ' selected' : '') + '>' + esc(customer.name) + '</option>';
+        }).join('') + '</select></label>' +
+      '<label class="field"><span>Password ' + (item ? '<span class="muted">(leave blank to keep)</span>' : '') + '</span>' +
+        '<input class="input" name="password" type="password" autocomplete="new-password"></label>' +
+      '<label class="field"><span>Private key passphrase <span class="muted">(optional)</span></span>' +
+        '<input class="input" name="passphrase" type="password" autocomplete="new-password"></label>' +
+      '<label class="field full" id="credential-key-field"><span>SSH private key <span class="muted">(optional, instead of a password)</span></span>' +
+        '<textarea class="textarea" name="private_key" rows="4" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label>' +
+      '<label class="check field full"><input type="checkbox" name="is_default"' + (credential.is_default ? ' checked' : '') + '><span><strong>Default credential</strong> for this operating system and scope.</span></label>' +
+      '</div><div class="form-error"></div></form>';
+  }
+
+  function credentialModal(item, customers) {
+    const credential = item || null;
+    const modal = openModal({
+      title: credential ? 'Edit credential' : 'Add credential',
+      size: 'wide',
+      content: credentialFormHtml(credential, customers),
+      actions: [
+        { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+        { label: credential ? 'Save credential' : 'Add credential', class: 'btn-primary', onClick: function (ctx) {
+          runWithButton(ctx.button, async function () {
+            try {
+              const form = $('#credential-form', ctx.overlay);
+              const data = Object.fromEntries(new FormData(form).entries());
+              const payload = {
+                name: (data.name || '').trim(),
+                os: data.os,
+                username: (data.username || '').trim(),
+                domain: (data.domain || '').trim(),
+                account_type: data.os === 'windows' ? (data.account_type || 'local') : 'local',
+                is_default: !!($('input[name=is_default]', form) || {}).checked
+              };
+              if (data.password) payload.password = data.password;
+              if (data.passphrase) payload.passphrase = data.passphrase;
+              if (data.private_key && data.private_key.trim() && data.os === 'linux') {
+                payload.private_key = data.private_key;
+                payload.auth_type = 'key';
+              } else if (data.password) {
+                payload.auth_type = 'password';
+              }
+              if (!credential) {
+                if (!payload.password && !payload.private_key) throw new Error('Enter a password or SSH private key');
+                payload.customer_id = data.customer_id ? Number(data.customer_id) : null;
+              }
+              if (credential) await patch('/credentials/' + credential.id, payload);
+              else await post('/credentials', payload);
+              ctx.close(); toast(credential ? 'Credential updated' : 'Credential added'); router();
+            } catch (error) { formError(ctx.overlay, errorText(error)); }
+          });
+        } }
+      ],
+      onMount: function (overlay) {
+        const osSelect = $('#credential-os', overlay);
+        function sync() {
+          const windows = osSelect.value === 'windows';
+          $('#credential-key-field', overlay).classList.toggle('hidden', windows);
+          $('#credential-domain-field', overlay).classList.toggle('hidden', !windows);
+          $('#credential-account-field', overlay).classList.toggle('hidden', !windows);
+          $('#credential-customer-field', overlay).classList.toggle('hidden', !!credential);
+        }
+        osSelect.addEventListener('change', sync);
+        sync();
+      }
+    });
+    return modal;
+  }
+
   async function renderSettings(view) {
     let settings;
     try { settings = await get('/settings'); }
@@ -2394,6 +2623,24 @@
       view.innerHTML = emptyHtml('Could not load settings', errorText(error));
       return;
     }
+    let credentials = [];
+    let customers = [];
+    try {
+      const loaded = await Promise.all([get('/credentials'), get('/customers')]);
+      credentials = loaded[0] || [];
+      customers = loaded[1] || [];
+    } catch (ignore) { /* credential management is optional */ }
+    const credentialRows = credentials.length ? credentials.map(function (item) {
+      const account = (item.domain ? item.domain + '\\' : '') + item.username;
+      const scope = item.customer_id ? 'Customer #' + item.customer_id : 'Global';
+      return '<div class="tool-row"><span class="tool-name">' + esc(item.name) + '</span>' +
+        '<span class="badge ' + (item.os === 'windows' ? 'sev-info' : 'sev-low') + '">' + esc(item.os) + '</span>' +
+        '<span class="tool-path">' + esc(account) + ' · ' + esc(item.auth_type === 'key' ? 'SSH key' : 'password') +
+        (item.account_type ? ' · ' + esc(item.account_type) : '') + '</span>' +
+        '<span class="tool-version">' + esc(scope) + (item.is_default ? ' · default' : '') + '</span>' +
+        '<span class="row-actions"><button class="btn btn-sm" data-action="edit-credential" data-credential="' + item.id + '">Edit</button>' +
+        '<button class="btn btn-sm btn-subtle danger-text" data-action="delete-credential" data-credential="' + item.id + '" data-name="' + esc(item.name) + '">Delete</button></span></div>';
+    }).join('') : '<p class="muted small" style="margin:0">No saved credentials. Add a Linux or Windows account to enable authenticated network scans.</p>';
     const tools = settings.tools || {};
     const toolRows = ['nmap', 'nuclei', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].map(function (name) {
       const tool = tools[name] || { available: false, path: '', version: '' };
@@ -2418,6 +2665,13 @@
             'Use Nmap for service detection during network scans when the nmap binary is installed.', settings.nmap_enabled) +
           '<div style="display:flex;align-items:center;gap:10px;margin-top:16px"><button class="btn btn-primary" id="save-settings">Save settings</button>' +
           '<span class="muted small">Environment-level external API access: ' + (settings.external_apis_available ? 'enabled' : 'disabled') + '</span></div>' +
+        '</div></section>' +
+        '<section class="panel settings-wide"><div class="panel-head"><h2>Target credentials</h2><span class="spacer"></span>' +
+          '<button class="btn btn-sm btn-primary" data-action="add-credential">Add credential</button></div><div class="panel-body">' +
+          '<p class="muted small" style="margin-top:0">Accounts used by authenticated network scans (SSH for Linux, WinRM for Windows). ' +
+          'Secrets are encrypted at rest with <span class="mono">VS_CREDENTIAL_KEY</span> (or <span class="mono">data/credential.key</span>) and are never returned by the API. ' +
+          'Each host receives at most one authentication attempt.</p>' +
+          credentialRows +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>CISA KEV catalogue</h2></div><div class="panel-body">' +
           '<p class="muted small" style="margin-top:0">Known Exploited Vulnerabilities data is cached in SQLite and used to flag findings that are actively exploited.</p>' +
@@ -2467,6 +2721,28 @@
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });
+    });
+    view.addEventListener('click', function (event) {
+      const add = event.target.closest('[data-action="add-credential"]');
+      if (add) { event.preventDefault(); credentialModal(null, customers); return; }
+      const edit = event.target.closest('[data-action="edit-credential"]');
+      if (edit) {
+        event.preventDefault();
+        const id = Number(edit.getAttribute('data-credential'));
+        const credential = credentials.find(function (item) { return Number(item.id) === id; });
+        if (credential) credentialModal(credential, customers);
+        return;
+      }
+      const remove = event.target.closest('[data-action="delete-credential"]');
+      if (remove) {
+        event.preventDefault();
+        const id = Number(remove.getAttribute('data-credential'));
+        confirmAction('Delete credential “' + remove.getAttribute('data-name') + '”? Scans using it will fall back to another credential or skip authenticated checks.', 'Delete credential').then(function (ok) {
+          if (!ok) return;
+          del('/credentials/' + id).then(function () { toast('Credential deleted'); router(); })
+            .catch(function (error) { toast(errorText(error), 'error'); });
+        });
+      }
     });
   }
 

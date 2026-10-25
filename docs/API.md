@@ -266,7 +266,107 @@ Returns the asset plus `group`, `customer`, the last 50 `scans`, and
 
 Returns `{"ok": true, "group_id": 2, "deleted_scan_ids": []}`.
 
-## 6. Scans
+### `GET /api/assets/{asset_id}/credentials`
+
+Returns the credentials bound to an asset, one per operating system:
+
+```json
+{
+  "asset_id": 4,
+  "bindings": {
+    "linux": {"id": 2, "name": "Linux admin", "os": "linux", "username": "svc-vulnscan", "auth_type": "password", "has_secret": true},
+    "windows": null
+  }
+}
+```
+
+Secrets are never returned. A `null` binding means the customer default, global
+default or per-scan credential is used instead.
+
+### `PUT /api/assets/{asset_id}/credentials`
+
+```json
+{"linux": 2, "windows": null}
+```
+
+Sets or clears the binding for each supplied operating system. `null` removes
+the binding. A credential whose `os` does not match the binding returns `400`.
+
+## 6. Credentials
+
+Credentials are used by authenticated network scans. They are encrypted at rest
+with Fernet (key from `VS_CREDENTIAL_KEY` or `data/credential.key`) and the API
+never returns the password, private key or passphrase.
+
+### `GET /api/credentials`
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `customer_id` | int | Include global credentials plus those for this customer. |
+| `os` | string | `linux` or `windows`. |
+
+### `POST /api/credentials`
+
+```json
+{
+  "name": "Linux server admin",
+  "os": "linux",
+  "username": "svc-vulnscan",
+  "password": "…",
+  "auth_type": "password",
+  "customer_id": 1,
+  "is_default": true
+}
+```
+
+Linux credentials may instead supply `"private_key"` (and an optional
+`"passphrase"`) with `"auth_type": "key"`. Windows WinRM credentials must use a
+password.
+
+Windows accounts:
+
+```json
+{
+  "name": "Windows local admin",
+  "os": "windows",
+  "username": "Administrator",
+  "password": "…",
+  "account_type": "local"
+}
+```
+
+```json
+{
+  "name": "Windows domain admin",
+  "os": "windows",
+  "username": "svc-vulnscan",
+  "domain": "CORP",
+  "account_type": "domain",
+  "password": "…"
+}
+```
+
+`customer_id: null` (or omitted) creates a global credential. `asset_id` can be
+supplied to create the credential and bind it to an asset in one call.
+`is_default` replaces the previous default for the same operating system and
+scope. Responses include `has_secret`, `has_passphrase` and `is_default`, but
+never the secret.
+
+### `PATCH /api/credentials/{credential_id}`
+
+Updates `name`, `os`, `username`, `domain`, `account_type`, `auth_type`,
+`is_default` and optionally the `password`/`private_key`/`passphrase`. Omitting
+the secret keeps the stored one.
+
+### `DELETE /api/credentials/{credential_id}`
+
+Returns `{"ok": true}`. Scans using the credential fall back to the next
+credential in the resolution order or skip authenticated checks.
+
+Resolution order for a scan target: per-scan credential, asset binding,
+customer default, global default.
+
+## 7. Scans
 
 ### `GET /api/scans`
 
@@ -331,7 +431,8 @@ Query parameters:
   "options": {"active": true, "external_tools": false},
   "github_token": null,
   "requested_by": "local",
-  "agent_id": null
+  "agent_id": null,
+  "credentials": null
 }
 ```
 
@@ -344,6 +445,16 @@ Notes:
 - `target` is required for every scan type; blank targets fail validation with
   `422`.
 - `github_token` is accepted only for `github` scans and is never persisted.
+- `credentials` is accepted only for `network` scans and only when `agent_id` is
+  empty. It supplies per-scan OS credentials that override saved ones for this
+  scan only:
+  `{"linux": {"username": "...", "password": "..."},
+  "windows": {"username": "...", "password": "...", "domain": "CORP",
+  "account_type": "domain"}}`. Linux also accepts `private_key` plus an optional
+  `passphrase` and `auth_type: "key"`. Supplying credentials forces
+  `options.authenticated = true`. Sending them with `agent_id` returns `400`
+  because delegated scans never receive credentials. Secrets are stored
+  encrypted and are never returned.
 - `agent_id` is accepted only for `network` scans. It delegates the scan to an
   enrolled agent that belongs to the same customer/group, is not revoked, and
   advertises the `network` capability. The scan is created with
@@ -381,7 +492,18 @@ Options are filtered per scan type:
     "profile": "common",
     "connect_timeout": 0.45,
     "external_tools": false,
-    "nmap_vulners": false
+    "nmap_vulners": false,
+    "web_checks": true,
+    "max_web_hosts": 20,
+    "authenticated": true,
+    "target_os": "auto",
+    "max_auth_hosts": 32,
+    "auth_timeout": 12,
+    "ssh_port": 22,
+    "winrm_port": 5985,
+    "winrm_https": false,
+    "winrm_transport": "ntlm",
+    "verify_tls": false
   },
   "repo": {
     "include_secrets": true,
@@ -401,7 +523,26 @@ Options are filtered per scan type:
 ```
 
 Invalid port profiles, non-numeric timeouts, missing targets and invalid URLs
-return `400`/`422`.
+return `400`/`422`. Numeric network options are clamped to safe ranges
+(`max_auth_hosts` 1-256, `auth_timeout` 3-90, `max_web_hosts` 1-200, ports
+1-65535); invalid `target_os` or `winrm_transport` values return `400`.
+
+Authenticated network options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `authenticated` | `false` | Enable SSH/WinRM inventory and vulnerability checks. |
+| `target_os` | `auto` | `auto`, `linux` or `windows`; auto-detection uses open ports and banners. |
+| `max_auth_hosts` | `32` | Maximum hosts that receive an authentication attempt. |
+| `auth_timeout` | `12` | Connection/command timeout in seconds. |
+| `ssh_port` | `22` | SSH port used for Linux hosts. |
+| `winrm_port` | `5985` (or `5986` for HTTPS) | WinRM port. |
+| `winrm_https` | `false` | Use HTTPS and certificate validation per `verify_tls`. |
+| `winrm_transport` | `ntlm` | `ntlm`, `basic`, `credssp` or `kerberos`. |
+| `verify_tls` | `false` | Validate the WinRM HTTPS certificate. |
+
+Authenticated checks run only on the VulnScanner server. A delegated agent scan
+ignores credentials and performs unauthenticated TCP/web checks only.
 
 ### `GET /api/scans/{scan_id}`
 
@@ -410,6 +551,8 @@ Returns the scan row plus:
 - `findings` - sorted by severity.
 - `events` - up to 1000 event log rows.
 - `agent` - public agent data when the scan belongs to an agent.
+- `credentials` - public metadata (OS, username, domain, account type, auth type)
+  for per-scan credentials. Secrets are never included.
 - `finding_count`.
 
 ### `POST /api/scans/{scan_id}/cancel`
@@ -479,7 +622,7 @@ Query parameter `format`:
 
 Other values return `400`. JSON/CSV are sent as attachments.
 
-## 7. Agents
+## 8. Agents
 
 ### `GET /api/agents`
 
@@ -732,7 +875,7 @@ returns `{"ok": true, "duplicate": true}`. A network-only failure with an
 `error` and no `network` data marks the scan failed instead of silently
 completing it.
 
-## 8. Active Directory import
+## 9. Active Directory import
 
 ### `POST /api/ad/import`
 
@@ -756,7 +899,7 @@ Returns `201` with the created AD scan detail. The report must be a JSON object
 under 20 MiB. Customer/group/asset relationships are validated. Processing is
 asynchronous; poll the scan.
 
-## 9. Server status and maintenance
+## 10. Server status and maintenance
 
 ### `GET /api/server/status`
 
@@ -849,7 +992,7 @@ Runs `VACUUM` and returns the size before and after:
 The database may be locked briefly; run it when scans are idle. Errors return
 `409`.
 
-## 10. Settings and KEV
+## 11. Settings and KEV
 
 ### `GET /api/settings`
 
@@ -894,7 +1037,7 @@ Downloads and caches the CISA KEV catalogue. Returns the sync result on success;
 returns `400` if external APIs are disabled, and `502` if the download fails.
 This endpoint requires outbound network access.
 
-## 11. Non-API routes
+## 12. Non-API routes
 
 | Route | Description |
 | --- | --- |
@@ -912,7 +1055,7 @@ This endpoint requires outbound network access.
 Only the six allow-listed names are served through `/agent/download/`;
 unknown names return `404`.
 
-## 12. Status codes
+## 13. Status codes
 
 | Code | Meaning |
 | --- | --- |
@@ -928,7 +1071,7 @@ unknown names return `404`.
 | `422` | Schema validation failed. |
 | `502` | KEV download failed. |
 
-## 13. Example client flow
+## 14. Example client flow
 
 ```bash
 BASE=http://127.0.0.1:8765

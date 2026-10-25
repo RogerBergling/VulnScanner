@@ -215,7 +215,98 @@ use TCP connect probes from the endpoint and do not run Nmap. The agent must
 belong to the selected customer/group and advertise the `network` module. This
 is useful for private subnets that the VulnScanner server cannot reach.
 
-### 5.3 Local repository scan
+### 5.3 Authenticated host checks
+
+Unauthenticated scans only see exposed ports. An authenticated scan logs in with a
+high-privilege account to inventory the host and report missing patches,
+vulnerable packages and insecure configuration. Windows uses WinRM (pywinrm) and
+Linux uses SSH (paramiko).
+
+**Configure credentials before scanning.** Open **Settings -> Target
+credentials** and choose **Add credential**:
+
+| Field | Notes |
+| --- | --- |
+| Name | A label such as `Linux server admin`. |
+| Operating system | Linux (SSH) or Windows (WinRM). |
+| Username | The scan account. Use a dedicated, least-privilege account. |
+| Account type | Windows only: **Local account** or **Domain account**. |
+| Domain | Windows domain accounts, for example `CORP`. |
+| Scope | Global (all customers) or one customer. |
+| Password or SSH key | Linux accepts a password or a private key and optional passphrase. Windows requires a password. |
+| Default | Use this credential when no asset binding or per-scan credential applies. |
+
+Credentials are encrypted at rest with a key in `VS_CREDENTIAL_KEY` or
+`data/credential.key`. Back up that key with the database; without it, saved
+credentials cannot be decrypted. The API and scan logs never show the password,
+private key or passphrase. Delete or rotate a credential from the same page if an
+account changes.
+
+**Scope a credential to an asset.** Edit an asset and choose a **Linux scan
+credential** and/or **Windows scan credential**. Resolution for each host is:
+
+1. Per-scan credential entered in the scan dialog.
+2. Credential bound to the asset.
+3. Customer default for the host operating system.
+4. Global default for the host operating system.
+
+**Start the scan.** In a network scan, enable **Authenticated checks**, choose
+**Target operating system** (`Auto-detect`, `Linux` or `Windows`) and the maximum
+number of hosts to authenticate. Leave the per-scan Linux/Windows fields blank to
+use saved credentials, or enter an account to override them for this scan only.
+Per-scan secrets are stored encrypted with the scan and are not reused by later
+scans unless you use **Rescan**.
+
+Windows accounts:
+
+- **Local account**: a local administrator on each target, for example
+  `Administrator`. Set **Account type** to Local.
+- **Domain account**: a domain account with local administrator rights on the
+  targets, for example `CORP\svc-vulnscan`. Set **Account type** to Domain and
+  enter the domain. The account is sent as `DOMAIN\username`.
+
+Requirements on the targets:
+
+- **Windows**: WinRM enabled, port 5985 (HTTP) or 5986 (HTTPS), and the account in
+  the local Administrators group. For domain accounts, use a tiered
+  administration model rather than Domain Admin everywhere. HTTPS with a trusted
+  certificate is recommended; enable **Use HTTPS** and **Verify TLS** in the scan
+  options when available.
+- **Linux**: SSH reachable, an account with `sudo` rights, and either a password
+  or a key. Password authentication and non-interactive `sudo` must be permitted
+  for the collector to read protected files and package state.
+
+**Lockout protection.** Each host receives at most one authentication attempt per
+scan. The scanner never retries with the same or a different credential, so a
+wrong password cannot walk an account through a lockout threshold. A failed
+attempt produces a `host` finding that names the host and protocol without
+including the secret, and the scan continues with the next host. If a scan hits a
+lockout policy, stop it, fix the credential, and start a new scan.
+
+What authenticated scans report:
+
+- **Patch and version level**: Linux distribution end-of-life, pending package
+  updates, reboot-required state and kernel version. Windows end-of-support,
+  installed hotfix age, and missing update inventory.
+- **Package CVEs**: Linux packages are checked against OSV.dev when external APIs
+  are enabled. Windows software inventory is checked for known end-of-life
+  products such as unsupported Flash, Java, browsers and Office versions.
+- **Configuration**: SSH root login, password authentication, empty passwords,
+  firewall state, risky listening services, UID 0 accounts, world-writable
+  critical files and password policy for Linux; Defender, firewall profiles,
+  SMBv1 and SMB signing, RDP/NLA, UAC, autologon, AlwaysInstallElevated,
+  PowerShell logging, unquoted service paths, WinRM transport and local
+  administrators for Windows.
+- **Inventory**: host OS, build, install date, hotfixes, software, users, open
+  ports and services, shown in the scan metadata and findings.
+
+An authenticated scan is only available from the VulnScanner server. A delegated
+agent scan never receives credentials and performs unauthenticated TCP/web checks
+from the agent's network position. To scan a private subnet that only an agent can
+reach, run an unauthenticated agent scan; run authenticated scans from a server
+that can reach the management ports.
+
+### 5.4 Local repository scan
 
 The target is an absolute path on the VulnScanner server, for example
 `/srv/src/payments`. Relative paths are resolved from the server process working
@@ -245,7 +336,7 @@ Options:
 | Git history | off | Clone full Git history for GitHub; otherwise shallow clone. |
 | External tools | off | Allow Gitleaks, Semgrep and osv-scanner and other CLI integrations. |
 
-### 5.4 GitHub repository scan
+### 5.5 GitHub repository scan
 
 Targets:
 
@@ -265,7 +356,7 @@ disk). Repository size is limited by `VS_MAX_REPO_BYTES`.
 GitHub scans require outbound network access to GitHub and a token with the
 minimum read permission.
 
-### 5.5 Active Directory scan/import
+### 5.6 Active Directory scan/import
 
 Two supported paths:
 
@@ -452,6 +543,8 @@ The Settings page shows:
 - Toggles for external APIs, Nuclei and Nmap.
 - Optional tool installation status and versions.
 - KEV catalogue count and last sync time.
+- **Target credentials** for authenticated network scans, with encrypted
+  passwords/SSH keys, customer/global scope and default flags.
 - Database path, size and reports path.
 - Scan limits, including the configured parallel worker count
   (`VS_SCAN_WORKERS`).
@@ -503,6 +596,10 @@ toggles.
   cancelled scans only.
 - Agent revocation preserves history.
 - OSV responses and the KEV catalogue are cached in SQLite.
+- Saved target credentials are encrypted with `VS_CREDENTIAL_KEY` or
+  `data/credential.key`. Back up the key with the database; a database restored
+  without the matching key has unreadable credentials and they must be re-entered.
+  Per-scan credentials are deleted with the scan.
 - Temporary GitHub clones are removed after the scan.
 - Reports are generated in memory and streamed; no report file is retained by
   the application. Database backups requested from the Server page are kept
@@ -539,6 +636,17 @@ or the connect timeout may be too short. Try explicit ports and a longer
 timeout, and confirm you have authorisation and routing. For a delegated scan,
 confirm the endpoint can reach the target range and that it is within the
 server host limit.
+
+### An authenticated scan reports "authentication failed"
+
+The account was rejected once and is not retried, by design, to avoid lockouts.
+Confirm the username, password/key, domain (`CORP\user`) and account type. For
+Windows, confirm WinRM is enabled (`Enable-PSRemoting -Force`), the port is
+correct, and the account is a local administrator. For HTTPS, a self-signed
+certificate requires **Verify TLS** to be off or the certificate to be trusted on
+the server. For Linux, confirm SSH password/key authentication and non-interactive
+`sudo` work for that account. Fix the credential in Settings or re-enter a
+per-scan credential, then start a new scan.
 
 ### OSV lookups are skipped
 

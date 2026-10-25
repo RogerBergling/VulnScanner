@@ -10,7 +10,11 @@ VulnScanner can scan:
 - Websites and web applications (HTTP security checks, exposed files, security
   headers, cookies, forms, and optional active checks).
 - Servers and network services (TCP port discovery, service banners, risky
-  ports, and optional Nmap/NSE enrichment).
+  ports, built-in web checks on discovered HTTP ports, and optional Nmap/NSE
+  enrichment).
+- Linux and Windows hosts over SSH/WinRM with a high-privilege account
+  (patch level, package CVEs, configuration and inventory), in addition to
+  unauthenticated network checks.
 - Local source repositories and GitHub repositories (secrets, dependency
   vulnerabilities, source-code review, optional Gitleaks/Semgrep/osv-scanner/Nuclei).
 - Linux and Windows endpoints through an outbound-polling agent.
@@ -28,7 +32,8 @@ inbound firewall rules on scanned endpoints.
 
 Requirements: Python 3.11 or newer (3.14 is used by the project virtual
 environment), and optionally Git, Nmap, Nuclei, Gitleaks, Semgrep and
-osv-scanner.
+osv-scanner. Authenticated host scans use `paramiko` (SSH) and `pywinrm`
+(WinRM), which are installed from `requirements.txt`.
 
 Linux/macOS:
 
@@ -77,7 +82,7 @@ persisted in SQLite.
 | Type | Target | Main checks |
 | --- | --- | --- |
 | Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, optional Nuclei |
-| Network | Hostname, IP address or CIDR (`/30` to `/24` by default) | TCP ports, dangerous services, banners, optional Nmap service/version detection and NSE CVEs |
+| Network | Hostname, IP address or CIDR (`/30` to `/24` by default) | TCP ports, dangerous services, banners, web checks on discovered HTTP ports, optional Nmap service/version detection and NSE CVEs; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
 | Local repository | Absolute path on the server | Secrets, dependency manifests/OSV, source review, optional Gitleaks/Semgrep/osv-scanner |
 | GitHub repository | `https://github.com/owner/repo` or `owner/repo` | Clone plus the same repository checks; private repositories can use a scan-only token |
 | Active Directory | JSON report path or import API | Guest account, password policy, lockout, krbtgt age, delegation, Kerberoasting, AS-REP roasting, stale accounts, privileged groups, AdminCount, machine account quota, recycle bin, functional level |
@@ -112,7 +117,9 @@ Typical use:
   selected-path secrets/repository inventory, a network scan from the agent, and
   on Windows, Active Directory.
 - When starting a network scan, choose an agent under **Run from** to scan a
-  subnet that only the endpoint can reach.
+  subnet that only the endpoint can reach. Delegated scans are unauthenticated;
+  authenticated checks run from the VulnScanner server and never receive
+  credentials through an agent.
 - Open **Manage** to monitor an agent, review jobs/scans, rename or move it,
   rotate its token and run service commands.
 - Use the **Server** page for health checks, database/storage status, queue
@@ -133,6 +140,7 @@ Environment variables can also be exported directly.
 | `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. |
 | `VS_DATA_DIR` | `./data` | Database, reports and temporary clone directory. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. |
+| `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Allow OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep and osv-scanner outbound calls. |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools; empty searches `PATH`. |
 | `VS_MAX_REPO_BYTES` | `536870912` | Maximum cloned repository size. |
@@ -147,6 +155,8 @@ Environment variables can also be exported directly.
 Everything is local by default:
 
 - Database: `data/vulnscanner.db` (SQLite WAL mode).
+- Credential key: `data/credential.key` (or `VS_CREDENTIAL_KEY`). A restored
+  database needs the same key to decrypt saved credentials.
 - Reports are generated on demand; no external report service is used.
 - GitHub clones are temporary and removed after the scan.
 
@@ -162,6 +172,9 @@ database** in the UI for a consistent online copy under
 - Set `VS_ADMIN_PASSWORD` before exposing the service beyond localhost.
 - Agent tokens are stored as SHA-256 hashes. Enrolment tokens are one-time and
   expire.
+- Saved target credentials are encrypted with Fernet and never returned by the
+  API. Each host receives at most one authentication attempt per scan to reduce
+  account-lockout risk.
 - Findings retain acknowledgement, false-positive and accepted status across
   rescans of the same asset.
 - Active Directory collection is read-only and never modifies directory

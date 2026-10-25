@@ -69,6 +69,7 @@ VulnScanner is deliberately small and local-first:
 | `app/jobs.py` | Small `ThreadPoolExecutor` that runs scan, AD import and agent-result tasks off the request thread. The pool size is `VS_SCAN_WORKERS` (default 4, range 1-32). |
 | `app/agents.py` | Creates agents and their assets, processes heartbeats and jobs, creates agent scans, renames/moves agents, rotates tokens and handles revocation. |
 | `app/security.py` | Generates enrolment/agent tokens, stores only SHA-256 hashes and authenticates agent requests. |
+| `app/credentials.py` | Fernet-encrypted credential profiles, asset bindings, per-scan credentials and resolution order. |
 | `app/scanners/` | Independent scan engines and shared finding types. |
 | `app/reporting.py` | Builds JSON, CSV and self-contained HTML reports on demand. |
 | `app/database.py` | SQLite schema, connections, transactions, settings helpers and event logging. |
@@ -181,7 +182,8 @@ directly.
 | Engine | Module | Approach |
 | --- | --- | --- |
 | Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei. |
-| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, optional HTTP/TLS inspection and Nmap XML parsing. The same module normalises delegated agent results. |
+| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, built-in web checks on discovered HTTP ports, optional HTTP/TLS inspection and Nmap XML parsing, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results. |
+| Authenticated host | `scanners/authenticated.py` | Chooses SSH or WinRM per host, performs one authentication attempt, collects OS/patch/package/user/configuration inventory, parses it and emits host findings and OSV package CVEs. |
 | Repository | `scanners/repository.py` | Local path or GitHub clone, then secrets, dependencies and source review. Temporary clones are deleted in a `finally` block. |
 | Dependencies | `scanners/dependencies.py` | Manifest/lockfile parsers for npm, Python, Go, Rust, PHP, Ruby, Java and .NET; OSV.dev batch queries; optional `osv-scanner` supplement. |
 | Secrets | `scanners/secrets.py` | Pattern and entropy checks with placeholder filtering; optional Gitleaks. |
@@ -203,7 +205,33 @@ Each integration is gated by the scan's **External tools** option and, where
 relevant, by the Settings toggles or `VS_ENABLE_EXTERNAL_APIS`. Tool failures are
 logged but do not fail the scan.
 
-### 6.2 Enrichment
+### 6.2 Authenticated host scanning
+
+`scanners/authenticated.py` runs after port and web discovery when
+`options.authenticated` is true. For each host it selects Linux (SSH) or Windows
+(WinRM) from `target_os`, open ports and banners, then resolves credentials in
+this order: per-scan override, asset binding, customer default, global default.
+
+- Linux uses `paramiko` to run a read-only POSIX shell collector (`/etc/os-release`,
+  package database, pending updates, users, groups, `ss`, `sudo`, SSH config,
+  firewall and kernel).
+- Windows uses `pywinrm` to run a PowerShell collector that returns one JSON
+  document with OS, hotfixes, installed software, local users/administrators,
+  listeners, Defender, firewall, SMB, RDP, UAC, autologon, WinRM and service data.
+- Each host receives exactly one authentication attempt. Authentication and
+  connection failures become findings that name the host/protocol but never the
+  secret; the scan continues with the next host.
+- Linux package versions are queried against OSV.dev when external APIs are
+  enabled. Both platforms also run local end-of-life, patch-age and configuration
+  rules.
+- Credentials are decrypted only in worker memory. Per-scan credentials are
+  copied from `scan_credentials` into the scan context; saved secrets are never
+  written to events, findings or API responses.
+
+Authenticated checks are server-side only. A delegated agent job carries no
+credentials and returns unauthenticated network results.
+
+### 6.3 Enrichment
 
 - **OSV.dev** is queried in batches of up to 100 packages. Batch responses are
   cached for six hours and advisory details for fourteen days.
@@ -322,7 +350,8 @@ keeps installation simple. Consequences:
   authenticated operator.
 - No role-based access control, per-user accounts or approval workflow.
 - No exploitation, credential brute forcing, authenticated web crawling or
-  post-exploitation.
+  post-exploitation. Authenticated host scans make a single login attempt per
+  host and never enumerate passwords.
 - No arbitrary distributed scanning, horizontal worker scaling or external job
   queue. Network scans can be delegated to enrolled agents, but there is no
   central pool of scan workers beyond `VS_SCAN_WORKERS`.

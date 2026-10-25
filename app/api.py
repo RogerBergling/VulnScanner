@@ -45,6 +45,19 @@ from .config import (
     database_path,
     reports_dir,
 )
+from .credentials import (
+    CredentialError,
+    asset_credential_bindings,
+    copy_scan_credentials,
+    create_credential,
+    delete_credential,
+    list_credentials,
+    normalize_input,
+    scan_credentials_public,
+    set_asset_credential,
+    store_scan_credentials,
+    update_credential,
+)
 from .database import (
     ensure_default_group,
     get_db,
@@ -68,7 +81,10 @@ from .schemas import (
     AgentTokenRequest,
     AgentUpdate,
     AssetCreate,
+    AssetCredentialUpdate,
     AssetUpdate,
+    CredentialCreate,
+    CredentialUpdate,
     CustomerCreate,
     CustomerUpdate,
     FindingStatusUpdate,
@@ -640,11 +656,134 @@ def delete_asset(asset_id: int) -> dict[str, Any]:
     return {"ok": True, "group_id": asset["group_id"], "deleted_scan_ids": scans}
 
 
+def _credential_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, CredentialError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=500, detail="Credential operation failed")
+
+
+def _credential_payload_secret(payload: CredentialCreate | CredentialUpdate) -> tuple[str, str, str]:
+    """Return (secret, auth_type, passphrase) from a create/update payload."""
+    private_key = getattr(payload, "private_key", None)
+    password = getattr(payload, "password", None)
+    if private_key:
+        return private_key, "key", getattr(payload, "passphrase", None) or ""
+    if password:
+        auth_type = getattr(payload, "auth_type", None) or "password"
+        if auth_type == "key":
+            raise CredentialError("Provide a private key when auth_type is 'key'")
+        return password, "password", ""
+    if getattr(payload, "auth_type", None) == "key":
+        raise CredentialError("A private key is required for key authentication")
+    return "", "", ""
+
+
+@router.get("/credentials")
+def credentials_list(
+    customer_id: int | None = None, os: str | None = None
+) -> list[dict[str, Any]]:
+    if customer_id is not None:
+        _fetch_customer(customer_id)
+    try:
+        return list_credentials(customer_id, os)
+    except CredentialError as exc:
+        raise _credential_error(exc) from exc
+
+
+@router.post("/credentials", status_code=201)
+def credentials_create(payload: CredentialCreate) -> dict[str, Any]:
+    if payload.customer_id is not None:
+        _fetch_customer(payload.customer_id)
+    if payload.asset_id is not None:
+        _fetch_asset(payload.asset_id)
+    try:
+        secret, auth_type, passphrase = _credential_payload_secret(payload)
+        return create_credential(
+            name=payload.name,
+            os_name=payload.os,
+            username=payload.username,
+            secret=secret,
+            auth_type=auth_type,
+            domain=payload.domain,
+            account_type=payload.account_type,
+            passphrase=passphrase,
+            customer_id=payload.customer_id,
+            is_default=payload.is_default,
+            asset_id=payload.asset_id,
+        )
+    except CredentialError as exc:
+        raise _credential_error(exc) from exc
+
+
+@router.patch("/credentials/{credential_id}")
+def credentials_update(credential_id: int, payload: CredentialUpdate) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for key in ("name", "username", "domain", "account_type", "is_default"):
+        value = getattr(payload, key, None)
+        if value is not None:
+            fields[key] = value
+    if payload.os is not None:
+        fields["os_name"] = payload.os
+    try:
+        secret, auth_type, passphrase = _credential_payload_secret(payload)
+        if secret:
+            fields["secret"] = secret
+            fields["auth_type"] = auth_type
+            fields["passphrase"] = passphrase
+        elif payload.auth_type is not None:
+            fields["auth_type"] = payload.auth_type
+        if payload.passphrase is not None and "secret" not in fields:
+            fields["passphrase"] = payload.passphrase
+        return update_credential(credential_id, **fields)
+    except CredentialError as exc:
+        raise _credential_error(exc) from exc
+
+
+@router.delete("/credentials/{credential_id}")
+def credentials_delete(credential_id: int) -> dict[str, Any]:
+    try:
+        delete_credential(credential_id)
+    except CredentialError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.get("/assets/{asset_id}/credentials")
+def asset_credentials(asset_id: int) -> dict[str, Any]:
+    _fetch_asset(asset_id)
+    bindings = asset_credential_bindings(asset_id)
+    return {
+        "asset_id": asset_id,
+        "bindings": bindings,
+    }
+
+
+@router.put("/assets/{asset_id}/credentials")
+def asset_credentials_update(asset_id: int, payload: AssetCredentialUpdate) -> dict[str, Any]:
+    _fetch_asset(asset_id)
+    provided = payload.model_fields_set
+    try:
+        for os_name in ("linux", "windows"):
+            if os_name in provided:
+                set_asset_credential(asset_id, os_name, getattr(payload, os_name))
+    except CredentialError as exc:
+        raise _credential_error(exc) from exc
+    bindings = asset_credential_bindings(asset_id)
+    return {"asset_id": asset_id, "bindings": bindings}
+
+
 def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     bool_keys = {
         "web": ["active", "external_tools"],
-        "network": ["external_tools", "nmap_vulners"],
+        "network": [
+            "external_tools",
+            "nmap_vulners",
+            "authenticated",
+            "web_checks",
+            "winrm_https",
+            "verify_tls",
+        ],
         "repo": ["include_secrets", "include_dependencies", "include_source", "git_history", "external_tools"],
         "github": ["include_secrets", "include_dependencies", "include_source", "git_history", "external_tools"],
         "ad": [],
@@ -669,6 +808,30 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="connect_timeout must be a number") from exc
             clean["connect_timeout"] = max(0.1, min(3.0, timeout))
+        if "target_os" in options:
+            target_os = str(options["target_os"] or "auto").lower()
+            if target_os not in {"auto", "linux", "windows"}:
+                raise HTTPException(status_code=400, detail="target_os must be auto, linux or windows")
+            clean["target_os"] = target_os
+        if "winrm_transport" in options:
+            transport = str(options["winrm_transport"] or "ntlm").lower()
+            if transport not in {"ntlm", "basic", "credssp", "kerberos"}:
+                raise HTTPException(status_code=400, detail="Invalid WinRM transport")
+            clean["winrm_transport"] = transport
+        for key, low, high in (
+            ("max_auth_hosts", 1, 256),
+            ("auth_timeout", 3, 90),
+            ("max_web_hosts", 1, 200),
+            ("ssh_port", 1, 65535),
+            ("winrm_port", 1, 65535),
+        ):
+            if key not in options:
+                continue
+            try:
+                value = int(options[key])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+            clean[key] = max(low, min(high, value))
     return clean
 
 
@@ -803,6 +966,7 @@ def _scan_detail(scan_id: int) -> dict[str, Any]:
         else:
             scan["agent"] = None
         scan["finding_count"] = len(findings)
+        scan["credentials"] = scan_credentials_public(scan_id)
     return scan
 
 
@@ -871,6 +1035,27 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="A scan target is required")
     normalized_target = _normalize_scan_target(payload.scan_type, target)
     options = _clean_options(payload.scan_type, payload.options)
+    credential_entries: dict[str, dict[str, Any]] | None = None
+    if payload.credentials:
+        if payload.scan_type != "network":
+            raise HTTPException(status_code=400, detail="Credentials can only be used for network scans")
+        if payload.agent_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Per-scan credentials cannot be sent to an agent. "
+                    "Run the authenticated scan from the VulnScanner server instead."
+                ),
+            )
+        credential_entries = {}
+        for os_name, item in payload.credentials.items():
+            data = item.model_dump(exclude_none=True)
+            try:
+                normalize_input(os_name, data)
+            except CredentialError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            credential_entries[os_name] = data
+        options["authenticated"] = True
     agent = None
     if payload.agent_id:
         if payload.scan_type != "network":
@@ -898,6 +1083,13 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
     if agent:
         queue_network_scan_job(agent, scan_id, normalized_target, options)
     else:
+        if credential_entries:
+            try:
+                store_scan_credentials(scan_id, credential_entries)
+            except CredentialError as exc:
+                with transaction() as conn:
+                    conn.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         runtime: dict[str, Any] = {}
         if payload.github_token and payload.scan_type == "github":
             runtime["_github_token"] = payload.github_token.strip()
@@ -964,6 +1156,7 @@ def rescan(scan_id: int, request: Request) -> dict[str, Any]:
     if agent_id:
         return create_scan(payload)
     new_id = _create_scan_record(payload, row["target"], json_load(row["options"], {}))
+    copy_scan_credentials(scan_id, new_id)
     submit_scan(new_id, {})
     return _scan_detail(new_id)
 
@@ -1258,7 +1451,12 @@ def create_agent_token(payload: AgentTokenRequest, request: Request) -> dict[str
     if group["customer_id"] != customer["id"]:
         raise HTTPException(status_code=400, detail="Group does not belong to the selected customer")
     token, meta = create_enrollment_token(
-        payload.customer_id, payload.group_id, payload.agent_name, payload.hours
+        payload.customer_id,
+        payload.group_id,
+        payload.agent_name,
+        hours=payload.hours,
+        months=payload.months or 0,
+        years=payload.years or 0,
     )
     base = str(request.base_url).rstrip("/")
     name = payload.agent_name or "my-agent"
@@ -1827,3 +2025,172 @@ def meta() -> dict[str, Any]:
             {"id": "ad", "name": "Active Directory audit (Windows)"},
         ],
     }
+
+# ============================================================================
+# Scheduled scans
+# ============================================================================
+
+@router.get("/schedules")
+def schedules_list(
+    customer_id: int | None = None,
+    group_id: int | None = None,
+    asset_id: int | None = None,
+    scan_type: str | None = None,
+    enabled: bool | None = None,
+) -> list[dict[str, Any]]:
+    from .scheduler import get_schedules
+    return [s.to_dict() for s in get_schedules(customer_id, group_id, asset_id, scan_type, enabled)]
+
+
+@router.post("/schedules", status_code=201)
+def schedules_create(
+    customer_id: int,
+    group_id: int,
+    asset_id: int,
+    scan_type: str,
+    target: str,
+    options: dict[str, Any] = {},
+    cron_expression: str = "",
+    notify_email: str | None = None,
+    notify_webhook: str | None = None,
+    enabled: bool = False,
+) -> dict[str, Any]:
+    from .scheduler import create_schedule
+    s = create_schedule(
+        customer_id, group_id, asset_id, scan_type, target, options,
+        cron_expression=cron_expression, notify_email=notify_email,
+        notify_webhook=notify_webhook, enabled=enabled,
+    )
+    return s.to_dict()
+
+
+@router.get("/schedules/{schedule_id}")
+def schedules_get(schedule_id: int) -> dict[str, Any]:
+    from .scheduler import get_schedule
+    s = get_schedule(schedule_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return s.to_dict()
+
+
+@router.patch("/schedules/{schedule_id}")
+def schedules_update(
+    schedule_id: int,
+    scan_type: str | None = None,
+    target: str | None = None,
+    options: dict[str, Any] | None = None,
+    cron_expression: str | None = None,
+    notify_email: str | None = None,
+    notify_webhook: str | None = None,
+    enabled: bool | None = None,
+) -> dict[str, Any]:
+    from .scheduler import update_schedule
+    s = update_schedule(
+        schedule_id, scan_type=scan_type, target=target, options=options,
+        cron_expression=cron_expression, notify_email=notify_email,
+        notify_webhook=notify_webhook, enabled=enabled,
+    )
+    if not s:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return s.to_dict()
+
+
+@router.delete("/schedules/{schedule_id}")
+def schedules_delete(schedule_id: int) -> dict[str, Any]:
+    from .scheduler import delete_schedule
+    delete_schedule(schedule_id)
+    return {"ok": True}
+
+
+# ============================================================================
+# Trends
+# ============================================================================
+
+@router.get("/trends/compare")
+def trends_compare(
+    older_scan_id: int,
+    newer_scan_id: int,
+) -> dict[str, Any]:
+    from .trends import compare_scans
+    return compare_scans(older_scan_id, newer_scan_id)
+
+
+@router.get("/trends/assets/{asset_id}")
+def trends_asset(asset_id: int, limit: int = 10) -> dict[str, Any]:
+    from .trends import asset_trend
+    return asset_trend(asset_id, limit)
+
+
+# ============================================================================
+# PDF Reports
+# ============================================================================
+
+@router.get("/scans/{scan_id}/report/pdf")
+def scan_pdf(
+    scan_id: int,
+    report_type: str = "technical",
+) -> Response:
+    from .database import get_db
+    from .reporting import build_pdf
+    with get_db() as conn:
+        scan_row = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    if not scan_row:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    findings_rows = conn.execute(
+        "SELECT severity, title, category, description, evidence, remediation, cve, cwe, cvss, location, fingerprint, status FROM findings WHERE scan_id = ?",
+        (scan_id,),
+    ).fetchall()
+    findings = [dict(r) for r in findings_rows]
+    pdf_bytes = build_pdf(
+        dict(scan_row),
+        findings,
+        {"generated_at": str(datetime.now()), "customer": {}, "group": {}, "asset": {}},
+        report_type=report_type,
+    )
+    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-{report_type}.pdf"'})
+
+@router.get("/tools/status")
+def tools_status() -> dict[str, Any]:
+    from .tools_check import check_external_tools
+    return {"tools": check_external_tools(), "message": "Run 'nmap --version' / 'nuclei -version' manually to confirm latest releases."}
+
+# ============================================================================
+# Remote server delegation (DMZ / satellite scanner nodes with full tools)
+# ============================================================================
+
+@router.post("/remote/enroll", status_code=201)
+def remote_enroll(
+    payload: dict[str, Any],
+    request: Request,
+) -> dict[str, Any]:
+    from .security import hash_token, new_agent_token
+    token = payload.get("token", "")
+    # For satellite nodes: validate a server token or use basic auth from main server
+    # This endpoint is called by the DMZ server to register with main server.
+    # For now: require basic auth or a pre-shared token passed in payload
+    # Store remote scanner info
+    customer = payload.get("customer_id")
+    group = payload.get("group_id")
+    name = payload.get("name", "dmz-server")
+    url = payload.get("server_url", str(request.base_url).rstrip("/"))
+    token_hash = hash_token(token)
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO remote_scanners(name, server_url, api_token, customer_id, group_id, capabilities, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, url, token_hash, customer, group, json_dump(["network", "web", "authenticated", "nmap", "nuclei"]), "active", utcnow(), utcnow()),
+        )
+        rid = int(cursor.lastrowid)
+    return {"id": rid, "name": name, "token": token[:16]+"...", "status": "registered", "url": url}
+
+
+@router.get("/remote/scanners")
+def remote_scanners_list(customer_id: int | None = None) -> list[dict[str, Any]]:
+    conditions = []
+    params: list[Any] = []
+    if customer_id is not None:
+        conditions.append("customer_id = ?")
+        params.append(customer_id)
+    query = "SELECT * FROM remote_scanners" + (" WHERE " + " AND ".join(conditions) if conditions else "")
+    with get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [{"id": r["id"], "name": r["name"], "server_url": r["server_url"], "status": r["status"], "customer_id": r["customer_id"], "group_id": r["group_id"]} for r in rows]

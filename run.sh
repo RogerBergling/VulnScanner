@@ -23,6 +23,6 @@ if [ ! -f .venv/.deps-ok ] || [ requirements.txt -nt .venv/.deps-ok ]; then
 fi
 
 HOST="${VS_HOST:-127.0.0.1}"
-PORT="${VS_PORT:-8765}"
+PORT="${VS_PORT:-8787}"
 echo "[vulnscanner] Starting on http://${HOST}:${PORT}"
 exec .venv/bin/python -m uvicorn app.main:app --host "$HOST" --port "$PORT" "$@"

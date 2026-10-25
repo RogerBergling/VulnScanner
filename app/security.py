@@ -35,11 +35,22 @@ def create_enrollment_token(
     group_id: int,
     agent_name: str = "",
     hours: int = 24,
+    days: int = 0,
+    months: int = 0,
+    years: int = 0,
 ) -> tuple[str, dict]:
     token = new_enrollment_token()
     token_id = secrets.token_hex(12)
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(hours=max(1, min(hours, 168)))
+    # Calculate expiration: default is max(1, min(hours, 168)) for hourly mode.
+    # If any of days/months/years provided, use those instead.
+    if days or months or years:
+        delta_args = {"days": days, "months": months, "years": years}
+        # Filter zero values
+        delta_args = {k: v for k, v in delta_args.items() if v > 0}
+        expires = now + timedelta(**delta_args)
+    else:
+        expires = now + timedelta(hours=max(1, min(hours, 168)))
     with get_db() as conn:
         conn.execute(
             "INSERT INTO enrollment_tokens"

@@ -357,6 +357,15 @@ The native PowerShell agent and Python agent 1.1+ both support delegated
 network scans. Older Python agents without the `network` capability cannot be
 selected for one.
 
+Delegated network scans are always **unauthenticated**. The agent receives only
+the target and port options; it never receives SSH/WinRM credentials and cannot
+perform authenticated host inventory. If you select an agent under **Run from**,
+the scan dialog hides authenticated checks and the API rejects per-scan
+credentials with `agent_id`. Run authenticated scans from the VulnScanner server,
+which resolves credentials from the per-scan override, asset binding, customer
+default or global default. See the user manual for WinRM/SSH prerequisites and
+the one-attempt-per-host lockout protection.
+
 
 Module output is uploaded as one JSON document. The server applies its own
 normalisation, deduplication, OSV/KEV enrichment and severity rules, so an agent

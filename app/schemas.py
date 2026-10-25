@@ -69,6 +69,54 @@ class AssetUpdate(BaseModel):
 
 
 ScanType = Literal["web", "network", "repo", "github", "ad"]
+CredentialOS = Literal["linux", "windows"]
+CredentialAuth = Literal["password", "key"]
+CredentialAccount = Literal["local", "domain"]
+
+
+class ScanCredentialInput(BaseModel):
+    """Per-scan credential override. Secrets are stored encrypted."""
+
+    username: str = Field(min_length=1, max_length=200)
+    password: str | None = Field(default=None, max_length=40_000)
+    private_key: str | None = Field(default=None, max_length=40_000)
+    passphrase: str | None = Field(default=None, max_length=4_000)
+    domain: str = Field(default="", max_length=200)
+    account_type: CredentialAccount = "local"
+    auth_type: CredentialAuth | None = None
+
+
+class CredentialCreate(BaseModel):
+    name: str = Field(default="", max_length=160)
+    os: CredentialOS
+    username: str = Field(min_length=1, max_length=200)
+    password: str | None = Field(default=None, max_length=40_000)
+    private_key: str | None = Field(default=None, max_length=40_000)
+    passphrase: str | None = Field(default=None, max_length=4_000)
+    auth_type: CredentialAuth = "password"
+    domain: str = Field(default="", max_length=200)
+    account_type: CredentialAccount = "local"
+    customer_id: int | None = None
+    asset_id: int | None = None
+    is_default: bool = False
+
+
+class CredentialUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=160)
+    os: CredentialOS | None = None
+    username: str | None = Field(default=None, min_length=1, max_length=200)
+    password: str | None = Field(default=None, max_length=40_000)
+    private_key: str | None = Field(default=None, max_length=40_000)
+    passphrase: str | None = Field(default=None, max_length=4_000)
+    auth_type: CredentialAuth | None = None
+    domain: str | None = Field(default=None, max_length=200)
+    account_type: CredentialAccount | None = None
+    is_default: bool | None = None
+
+
+class AssetCredentialUpdate(BaseModel):
+    linux: int | None = None
+    windows: int | None = None
 
 
 class ScanCreate(BaseModel):
@@ -78,6 +126,9 @@ class ScanCreate(BaseModel):
     scan_type: ScanType
     target: str = Field(default="", max_length=4000)
     options: dict[str, Any] = Field(default_factory=dict)
+    # Per-scan credential overrides keyed by "linux"/"windows". The values are
+    # encrypted into the per-scan credential table and never returned.
+    credentials: dict[CredentialOS, ScanCredentialInput] | None = None
     github_token: str | None = Field(default=None, max_length=500)
     requested_by: str = Field(default="local", max_length=120)
     # Optional execution agent for network scans. When set, the job is queued
@@ -88,6 +139,8 @@ class ScanCreate(BaseModel):
     def check_target(self) -> "ScanCreate":
         if self.scan_type in {"web", "network", "repo", "github", "ad"} and not self.target.strip():
             raise ValueError("This scan type requires a target")
+        if self.credentials and self.scan_type != "network":
+            raise ValueError("Credentials can only be supplied for network scans")
         return self
 
 
@@ -100,6 +153,8 @@ class AgentTokenRequest(BaseModel):
     group_id: int
     agent_name: str = Field(default="", max_length=160)
     hours: int = Field(default=24, ge=1, le=168)
+    months: int | None = Field(default=None, ge=0, le=12)
+    years: int | None = Field(default=None, ge=0, le=10)
 
 
 class AgentUpdate(BaseModel):

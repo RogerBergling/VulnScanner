@@ -15,7 +15,7 @@ from typing import Any, Iterable, Iterator
 
 from .config import database_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (
@@ -150,6 +150,47 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_agent ON agent_jobs(agent_id, status, created_at);
 
+-- Scan credentials are stored encrypted (Fernet). Global profiles have a NULL
+-- customer_id; customer profiles are only used for that customer. Asset
+-- bindings select a profile per operating system for a single asset.
+CREATE TABLE IF NOT EXISTS credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    os TEXT NOT NULL,
+    username TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    account_type TEXT NOT NULL DEFAULT '',
+    auth_type TEXT NOT NULL DEFAULT 'password',
+    secret TEXT NOT NULL,
+    passphrase TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_credentials_customer ON credentials(customer_id, os);
+
+CREATE TABLE IF NOT EXISTS asset_credential_bindings (
+    asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    os TEXT NOT NULL,
+    credential_id INTEGER NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    PRIMARY KEY (asset_id, os)
+);
+
+CREATE TABLE IF NOT EXISTS scan_credentials (
+    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    os TEXT NOT NULL,
+    username TEXT NOT NULL,
+    domain TEXT NOT NULL DEFAULT '',
+    account_type TEXT NOT NULL DEFAULT '',
+    auth_type TEXT NOT NULL DEFAULT 'password',
+    secret TEXT NOT NULL,
+    passphrase TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (scan_id, os)
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -173,6 +214,68 @@ CREATE TABLE IF NOT EXISTS kev_catalog (
     required_action TEXT NOT NULL DEFAULT '',
     synced_at TEXT NOT NULL
 );
+
+-- Scheduled scans define recurring targets that run on a schedule and may send
+-- notifications when completed.
+CREATE TABLE IF NOT EXISTS scan_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+    group_id INTEGER REFERENCES asset_groups(id) ON DELETE CASCADE,
+    asset_id INTEGER REFERENCES assets(id) ON DELETE CASCADE,
+    scan_type TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    options TEXT NOT NULL DEFAULT '{}',
+    cron_expression TEXT NOT NULL DEFAULT '',
+    notify_email TEXT NOT NULL DEFAULT '',
+    notify_webhook TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    error TEXT NOT NULL DEFAULT '',
+    last_run TEXT,
+    next_run TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_customer ON scan_schedules(customer_id);
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_enabled_next ON scan_schedules(enabled, next_run);
+
+-- Continuous inventory: discovered hosts tracked per scan with device type, MAC/IP, last seen
+CREATE TABLE IF NOT EXISTS asset_inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id INTEGER REFERENCES scans(id) ON DELETE CASCADE,
+    asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL,
+    customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+    ip_address TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    mac_address TEXT NOT NULL DEFAULT '',
+    device_type TEXT NOT NULL DEFAULT '',
+    ports TEXT NOT NULL DEFAULT '[]',
+    os_guess TEXT NOT NULL DEFAULT '',
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_inventory_scan ON asset_inventory(scan_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_customer ON asset_inventory(customer_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_ip ON asset_inventory(ip_address);
+
+-- Historical finding trends: per-asset fingerprint tracking over scans
+CREATE TABLE IF NOT EXISTS finding_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER REFERENCES assets(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    first_seen_scan_id INTEGER,
+    last_seen_scan_id INTEGER,
+    severity_at_first TEXT,
+    severity_at_last TEXT,
+    status_at_first TEXT,
+    status_at_last TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_finding_history_asset_fp ON finding_history(asset_id, fingerprint);
 """
 
 
@@ -214,8 +317,13 @@ def transaction() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with get_db() as conn:
-        conn.executescript(SCHEMA)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+        if current_version < SCHEMA_VERSION:
+            # Split SCHEMA into separate migrations for controlled upgrade
+            conn.executescript(SCHEMA)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        # Always ensure settings exist
         defaults = {
             "allow_external_apis": "true",
             "nuclei_enabled": "true",
@@ -229,6 +337,45 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
                 (key, value),
             )
+        conn.commit()
+
+
+def add_remote_scanners_table() -> None:
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS remote_scanners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                server_url TEXT NOT NULL DEFAULT '',
+                api_token TEXT NOT NULL DEFAULT '',
+                customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+                group_id INTEGER REFERENCES asset_groups(id) ON DELETE CASCADE,
+                capabilities TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'active',
+                last_seen TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_customer ON remote_scanners(customer_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_status ON remote_scanners(status)")
+        conn.commit()
+    with get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS remote_scanners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                server_url TEXT NOT NULL DEFAULT '',
+                api_token TEXT NOT NULL DEFAULT '',
+                customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
+                group_id INTEGER REFERENCES asset_groups(id) ON DELETE CASCADE,
+                capabilities TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'active',
+                last_seen TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_customer ON remote_scanners(customer_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_status ON remote_scanners(status)")
         conn.commit()
 
 
