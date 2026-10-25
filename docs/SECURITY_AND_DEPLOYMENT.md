@@ -349,9 +349,16 @@ delete data you no longer need.
   controlled labs only.
 - The Linux installer defaults to a dedicated unprivileged `vulnscanner`
   account. Using `--user root` increases the impact of a compromised agent.
-- The Windows installer runs the scheduled task as SYSTEM by default so it can
-  read system configuration and AD. Use `-NoService`, a dedicated account and
-  your own scheduler if that is not acceptable.
+- The Windows installers run the scheduled task as SYSTEM by default so it can
+  read system configuration and AD. Pass `-ServiceAccount` on the native
+  installer, or use `-NoService`, a dedicated account and your own scheduler if
+  that is not acceptable.
+- The native Windows installer downloads the agent from the server over HTTPS
+  and restricts the program and state ACLs with `icacls`. Review the script
+  before running it and verify the server URL.
+- Delegated network scans originate from the endpoint's network position. Only
+  authorised agents should be allowed to run them, and the server enforces the
+  host limit and agent customer/group scope.
 - Scope `secrets` and `repo` modules to explicit paths. The server rejects those
   modules without paths.
 - Revoke lost or decommissioned endpoints. Re-enrolment requires a new one-time

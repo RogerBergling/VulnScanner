@@ -87,6 +87,7 @@ Lists scan types and agent modules.
     {"id": "system", "name": "System baseline and security configuration"},
     {"id": "packages", "name": "Installed package vulnerabilities (OSV)"},
     {"id": "ports", "name": "Local listening services"},
+    {"id": "network", "name": "Network scan from the agent's network position"},
     {"id": "secrets", "name": "Secrets in selected local paths"},
     {"id": "repo", "name": "Repository inventory in selected paths"},
     {"id": "ad", "name": "Active Directory audit (Windows)"}
@@ -329,7 +330,8 @@ Query parameters:
   "target": "https://www.example.com",
   "options": {"active": true, "external_tools": false},
   "github_token": null,
-  "requested_by": "local"
+  "requested_by": "local",
+  "agent_id": null
 }
 ```
 
@@ -342,8 +344,18 @@ Notes:
 - `target` is required for every scan type; blank targets fail validation with
   `422`.
 - `github_token` is accepted only for `github` scans and is never persisted.
-- The response is the created scan detail with `status: "queued"`.
-- Scan execution happens in the background. Poll `GET /api/scans/{id}`.
+- `agent_id` is accepted only for `network` scans. It delegates the scan to an
+  enrolled agent that belongs to the same customer/group, is not revoked, and
+  advertises the `network` capability. The scan is created with
+  `status: "waiting_agent"`; no server worker runs it. Unknown agents return
+  `404`; agents in another customer/group or without the capability return
+  `400`; revoked agents return `409`; using `agent_id` with another scan type
+  returns `400`. When neither `group_id` nor `asset_id` is supplied, the scan
+  uses the selected agent's group.
+- The response is the created scan detail with `status: "queued"` (or
+  `"waiting_agent"` for a delegated network scan).
+- Scan execution happens in the background up to `VS_SCAN_WORKERS` (default 4)
+  concurrent scans. Poll `GET /api/scans/{id}`.
 
 Target normalisation:
 
@@ -354,6 +366,10 @@ Target normalisation:
 | `repo` | Existing absolute/relative directory on the server. |
 | `github` | `https://github.com/owner/repo` or `owner/repo`. |
 | `ad` | Existing JSON report file on the server (prefer `/api/ad/import`). |
+
+For a delegated `network` scan, the target is validated and sent to the agent.
+The agent must be able to reach it; private ranges are common. The server host
+limit (default 256 hosts) still applies.
 
 Options are filtered per scan type:
 
@@ -520,9 +536,11 @@ with the agent while historical scans keep their original placement. Returns
 ### `POST /api/agents/{agent_id}/rotate-token`
 
 Replaces the agent token and returns the new token once, together with
-`linux_command` and `windows_command` that use `update-token` and restart the
-installed service. The previous token stops working immediately. Revoked agents
-return `409`.
+`linux_command`, `windows_command` (Python agent) and `windows_agent_command`
+(native PowerShell agent). The commands update the installed configuration and
+restart the service/task; the Python agent uses `update-token`, the PowerShell
+agent uses `-Action Configure -Token`. The previous token stops working
+immediately. Revoked agents return `409`.
 
 ### `POST /api/agents/enrollment-tokens`
 
@@ -546,14 +564,21 @@ Returns `201`:
   "group": "General",
   "linux_command": "curl -fsSL …",
   "windows_command": "Invoke-WebRequest …",
+  "windows_installer_command": "Invoke-WebRequest … install-windows-agent.ps1 …",
   "agent_url": "http://127.0.0.1:8765/agent/vulnscanner_agent.py",
+  "windows_agent_url": "http://127.0.0.1:8765/agent/VulnScannerAgent.ps1",
+  "windows_installer_url": "http://127.0.0.1:8765/agent/install-windows-agent.ps1",
   "note": "The token can be used once and is shown only now. …"
 }
 ```
 
-The token is shown once and expires after 1-168 hours.
+The token is shown once and expires after 1-168 hours. `windows_command` enrols
+the Python agent, while `windows_installer_command` installs the native
+PowerShell agent as a scheduled task.
 
 ### `POST /api/agents/{agent_id}/scan`
+
+Endpoint/mixed modules:
 
 ```json
 {
@@ -563,9 +588,23 @@ The token is shown once and expires after 1-168 hours.
 }
 ```
 
+Delegated network scan:
+
+```json
+{
+  "modules": ["network"],
+  "target": "10.0.0.0/24",
+  "paths": [],
+  "options": {"profile": "common", "ports": "22,80,443"}
+}
+```
+
 Returns `201` with `scan_id`, `agent_online`, a message and the scan detail.
-Modules: `system`, `packages`, `ports`, `secrets`, `repo`, `ad`. `secrets`/`repo`
-require paths; `ad` requires a Windows agent. Revoked agents return `409`.
+Modules: `system`, `packages`, `ports`, `network`, `secrets`, `repo`, `ad`.
+`secrets`/`repo` require paths; `ad` requires a Windows agent. `network` must be
+the only module in the job, requires `target`, and requires an agent that
+advertises the `network` capability. Revoked agents return `409`; unsupported or
+invalid combinations return `400`.
 
 ### `DELETE /api/agents/{agent_id}`
 
@@ -623,6 +662,7 @@ Requires an agent token. Claims the oldest queued job.
       "scan_id": 42,
       "modules": ["system", "ports"],
       "paths": [],
+      "target": "",
       "options": {"exclude_paths": [], "max_files": 20000}
     },
     "status": "running",
@@ -636,6 +676,9 @@ Requires an agent token. Claims the oldest queued job.
 ```
 
 When no job is available: `{"job": null, "next_poll": 30}`.
+
+A delegated network job has `payload.modules: ["network"]`, a `target` and
+network options (`profile`, optional `ports`, `connect_timeout`).
 
 ### `POST /api/agent/jobs/{job_id}/result`
 
@@ -657,11 +700,37 @@ Requires an agent token.
 }
 ```
 
+A delegated network result carries a `network` object:
+
+```json
+{
+  "status": "completed",
+  "results": {
+    "modules": ["network"],
+    "network": {
+      "hosts": ["10.0.0.1", "10.0.0.2"],
+      "host_count": 2,
+      "ports_scanned": 3,
+      "open_ports": [
+        {"host": "10.0.0.1", "port": 22, "service": "ssh", "banner": "SSH-2.0-OpenSSH_9.0"},
+        {"host": "10.0.0.2", "port": 6379, "service": "redis", "banner": "- NOAUTH required"}
+      ],
+      "started_at": "2026-01-02T03:04:05+00:00",
+      "finished_at": "2026-01-02T03:06:05+00:00"
+    },
+    "warnings": []
+  },
+  "error": ""
+}
+```
+
 `status` may be `completed`, `failed` or `cancelled`. Results over 25 MiB return
 `413`. A completed upload returns `{"ok": true, "accepted": true, "scan_id": 42}`
 and the server processes the report asynchronously. A failed/cancelled upload
 returns `accepted: false` and closes the scan. Re-uploading to a terminal job
-returns `{"ok": true, "duplicate": true}`.
+returns `{"ok": true, "duplicate": true}`. A network-only failure with an
+`error` and no `network` data marks the scan failed instead of silently
+completing it.
 
 ## 8. Active Directory import
 
@@ -741,11 +810,12 @@ be downloaded as a diagnostics snapshot.
   },
   "queue": {
     "scans_queued": 0, "scans_running": 0, "scans_waiting_agent": 0,
-    "jobs_queued": 0, "jobs_running": 0, "jobs_failed": 0
+    "jobs_queued": 0, "jobs_running": 0, "jobs_failed": 0,
+    "scan_workers": 4
   },
   "settings": {"allow_external_apis": true, "nuclei_enabled": true, "nmap_enabled": true},
   "tools": {},
-  "limits": {"top_ports": 58, "agent_job_timeout_seconds": 3600},
+  "limits": {"top_ports": 58, "agent_job_timeout_seconds": 3600, "scan_workers": 4},
   "checks": [
     {"id": "database", "label": "Database", "status": "ok", "detail": "ok · wal journal"}
   ],
@@ -755,7 +825,9 @@ be downloaded as a diagnostics snapshot.
 ```
 
 `status` is `ok` or `degraded`. Check statuses are `ok`, `warning`, `info` or
-`error`.
+`error`. `scan_workers` is the configured server-side concurrency
+(`VS_SCAN_WORKERS`, default 4, range 1-32). Delegated network scans wait for an
+agent and do not consume a worker.
 
 ### `POST /api/server/database/backup`
 
@@ -797,9 +869,12 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "tools": {
     "nmap": {"available": false, "path": "", "version": ""}
   },
-  "limits": {"top_ports": 58, "agent_job_timeout_seconds": 3600}
+  "limits": {"top_ports": 58, "agent_job_timeout_seconds": 3600, "scan_workers": 4}
 }
 ```
+
+`scan_workers` is read from `VS_SCAN_WORKERS` at process start; changing it
+requires a server restart.
 
 ### `PATCH /api/settings`
 
@@ -825,14 +900,16 @@ This endpoint requires outbound network access.
 | --- | --- |
 | `GET /` | SPA shell. |
 | `GET /manual` | Markdown user manual, inline. |
-| `GET /agent/download/vulnscanner_agent.py` | Agent script (allow-listed). |
+| `GET /agent/download/vulnscanner_agent.py` | Python agent script (allow-listed). |
+| `GET /agent/download/VulnScannerAgent.ps1` | Native PowerShell agent (allow-listed). |
 | `GET /agent/download/install-linux.sh` | Linux installer. |
-| `GET /agent/download/install-windows.ps1` | Windows installer. |
+| `GET /agent/download/install-windows.ps1` | Windows installer for the Python agent. |
+| `GET /agent/download/install-windows-agent.ps1` | Windows installer for the native PowerShell agent. |
 | `GET /agent/download/ad_audit.ps1` | AD collector. |
 | `GET /agent/{other-file}` | Read-only static agent directory. |
 | `GET /static/*` | CSS/JavaScript assets. |
 
-Only the four allow-listed names are served through `/agent/download/`;
+Only the six allow-listed names are served through `/agent/download/`;
 unknown names return `404`.
 
 ## 12. Status codes
@@ -864,7 +941,7 @@ curl -s -X POST "$BASE/api/customers" \
 # 2. Resolve the default group
 curl -s "$BASE/api/customers/1"
 
-# 3. Start a network scan
+# 3. Start a server-side network scan
 curl -s -X POST "$BASE/api/scans" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -873,6 +950,18 @@ curl -s -X POST "$BASE/api/scans" \
     "scan_type": "network",
     "target": "192.0.2.10",
     "options": {"ports": "22,80,443", "profile": "common"}
+  }'
+
+# 3b. Or delegate the scan to an enrolled agent
+curl -s -X POST "$BASE/api/scans" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "customer_id": 1,
+    "group_id": 1,
+    "scan_type": "network",
+    "target": "10.0.0.0/24",
+    "agent_id": "9c1e…",
+    "options": {"profile": "common"}
   }'
 
 # 4. Poll the scan

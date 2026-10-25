@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform as os_platform
@@ -18,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import __version__
 from .agents import (
+    agent_supports,
     claim_next_job,
     complete_job,
     create_agent_scan,
@@ -27,6 +29,7 @@ from .agents import (
     heartbeat,
     is_online,
     public_agent,
+    queue_network_scan_job,
     revoke_agent,
     rotate_agent_token,
     update_agent,
@@ -35,7 +38,9 @@ from .config import (
     AGENT_JOB_TIMEOUT_SECONDS,
     ENABLE_EXTERNAL_APIS,
     HOST,
+    MAX_CIDR_HOSTS,
     PORT,
+    SCAN_WORKERS,
     TOP_PORTS,
     database_path,
     reports_dir,
@@ -672,8 +677,15 @@ def _normalize_scan_target(scan_type: str, target: str) -> str:
         if scan_type == "web":
             return normalize_target_url(target)
         if scan_type == "network":
-            validate_host_target(target)
-            return target.strip()
+            kind, value = validate_host_target(target)
+            if kind == "cidr":
+                network = ipaddress.ip_network(value, strict=False)
+                if network.num_addresses > MAX_CIDR_HOSTS:
+                    raise ValueError(
+                        f"Network contains {network.num_addresses} addresses; "
+                        f"limit is {MAX_CIDR_HOSTS}. Scan smaller ranges."
+                    )
+            return value
         if scan_type == "github":
             normalized = normalize_repo_target(target)
             if not normalized.startswith(("http://", "https://")):
@@ -691,6 +703,27 @@ def _normalize_scan_target(scan_type: str, target: str) -> str:
     raise HTTPException(status_code=400, detail="Unsupported scan type")
 
 
+def _network_agent(agent_id: str, customer_id: int, group_id: int | None) -> dict[str, Any]:
+    agent = get_agent(agent_id.strip())
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.get("status") == "revoked":
+        raise HTTPException(status_code=409, detail="Agent has been revoked")
+    if int(agent["customer_id"]) != int(customer_id):
+        raise HTTPException(status_code=400, detail="Agent does not belong to the selected customer")
+    if group_id and int(agent["group_id"]) != int(group_id):
+        raise HTTPException(status_code=400, detail="Agent does not belong to the selected group")
+    if not agent_supports(agent, "network"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This agent does not advertise network-scan support. "
+                "Update the agent to the latest version and restart it."
+            ),
+        )
+    return agent
+
+
 def _create_scan_record(
     payload: ScanCreate,
     target: str,
@@ -698,6 +731,7 @@ def _create_scan_record(
     status: str = "queued",
     stage: str = "Queued",
     requested_by: str = "local",
+    agent_id: str | None = None,
 ) -> int:
     _fetch_customer(payload.customer_id)
     customer_id = payload.customer_id
@@ -722,11 +756,12 @@ def _create_scan_record(
             "INSERT INTO scans("
             "customer_id, group_id, asset_id, agent_id, scan_type, target, status, progress, "
             "stage, options, summary, requested_by, created_at"
-            ") VALUES (?, ?, ?, NULL, ?, ?, ?, 0, ?, ?, '{}', ?, ?)",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '{}', ?, ?)",
             (
                 customer_id,
                 group_id,
                 asset_id,
+                agent_id,
                 payload.scan_type,
                 target,
                 status,
@@ -836,16 +871,37 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="A scan target is required")
     normalized_target = _normalize_scan_target(payload.scan_type, target)
     options = _clean_options(payload.scan_type, payload.options)
+    agent = None
+    if payload.agent_id:
+        if payload.scan_type != "network":
+            raise HTTPException(
+                status_code=400,
+                detail="An agent can only be selected for network scans",
+            )
+        # Validate the agent against the group the scan will actually use,
+        # including a group derived from the selected asset.
+        effective_group_id = payload.group_id
+        if effective_group_id is None and payload.asset_id:
+            effective_group_id = _fetch_asset(payload.asset_id)["group_id"]
+        agent = _network_agent(payload.agent_id, payload.customer_id, effective_group_id)
+        if payload.group_id is None and payload.asset_id is None:
+            payload.group_id = agent["group_id"]
     scan_id = _create_scan_record(
         payload,
         normalized_target,
         options,
+        status="waiting_agent" if agent else "queued",
+        stage="Waiting for agent" if agent else "Queued",
         requested_by=payload.requested_by or "local",
+        agent_id=agent["id"] if agent else None,
     )
-    runtime: dict[str, Any] = {}
-    if payload.github_token and payload.scan_type == "github":
-        runtime["_github_token"] = payload.github_token.strip()
-    submit_scan(scan_id, runtime)
+    if agent:
+        queue_network_scan_job(agent, scan_id, normalized_target, options)
+    else:
+        runtime: dict[str, Any] = {}
+        if payload.github_token and payload.scan_type == "github":
+            runtime["_github_token"] = payload.github_token.strip()
+        submit_scan(scan_id, runtime)
     return _scan_detail(scan_id)
 
 
@@ -894,6 +950,7 @@ def rescan(scan_id: int, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Agent scans must be started from the Agents page")
     if not row["customer_id"]:
         raise HTTPException(status_code=400, detail="The original scan no longer has a customer")
+    agent_id = row["agent_id"] if row["scan_type"] == "network" else None
     payload = ScanCreate(
         customer_id=row["customer_id"],
         group_id=row["group_id"],
@@ -902,7 +959,10 @@ def rescan(scan_id: int, request: Request) -> dict[str, Any]:
         target=row["target"],
         options=json_load(row["options"], {}),
         requested_by="rescan",
+        agent_id=agent_id,
     )
+    if agent_id:
+        return create_scan(payload)
     new_id = _create_scan_record(payload, row["target"], json_load(row["options"], {}))
     submit_scan(new_id, {})
     return _scan_detail(new_id)
@@ -1167,6 +1227,13 @@ def rotate_token(agent_id: str, request: Request) -> dict[str, Any]:
         "Stop-ScheduledTask -TaskName 'VulnScanner Agent' -ErrorAction SilentlyContinue\n"
         "Start-ScheduledTask -TaskName 'VulnScanner Agent'"
     )
+    windows_agent_command = (
+        "# PowerShell agent (default Windows installation). Run as Administrator.\n"
+        f"& 'C:\\Program Files\\VulnScanner Agent\\VulnScannerAgent.ps1' -Action Configure "
+        f"-ConfigPath 'C:\\ProgramData\\VulnScanner Agent\\agent.json' -Token '{windows_token}'\n"
+        "Stop-ScheduledTask -TaskName 'VulnScanner Agent' -ErrorAction SilentlyContinue\n"
+        "Start-ScheduledTask -TaskName 'VulnScanner Agent'"
+    )
     return {
         "token": token,
         "agent_id": agent_id,
@@ -1174,6 +1241,7 @@ def rotate_token(agent_id: str, request: Request) -> dict[str, Any]:
         "server": base,
         "linux_command": linux_command,
         "windows_command": windows_command,
+        "windows_agent_command": windows_agent_command,
         "note": (
             "The previous token stops working immediately. Update the agent "
             "configuration and restart it before it polls again. This token is "
@@ -1206,6 +1274,12 @@ def create_agent_token(payload: AgentTokenRequest, request: Request) -> dict[str
         f"py -3 vulnscanner_agent.py enroll --server {base} --token {token} --name '{windows_name}'\n"
         f"py -3 vulnscanner_agent.py run"
     )
+    windows_installer_command = (
+        "Invoke-WebRequest -UseBasicParsing "
+        f"{base}/agent/install-windows-agent.ps1 -OutFile install-windows-agent.ps1\n"
+        f"powershell -ExecutionPolicy Bypass -File .\\install-windows-agent.ps1 "
+        f"-Server {base} -Token {token} -Name '{windows_name}'"
+    )
     return {
         "token": token,
         "token_prefix": meta["prefix"],
@@ -1214,7 +1288,10 @@ def create_agent_token(payload: AgentTokenRequest, request: Request) -> dict[str
         "group": group["name"],
         "linux_command": linux_command,
         "windows_command": windows_command,
+        "windows_installer_command": windows_installer_command,
         "agent_url": f"{base}/agent/vulnscanner_agent.py",
+        "windows_agent_url": f"{base}/agent/VulnScannerAgent.ps1",
+        "windows_installer_url": f"{base}/agent/install-windows-agent.ps1",
         "note": "The token can be used once and is shown only now. Review the command before running it.",
     }
 
@@ -1229,6 +1306,17 @@ def start_agent_scan(agent_id: str, payload: AgentScanRequest) -> dict[str, Any]
     if agent["status"] == "revoked":
         raise HTTPException(status_code=409, detail="Agent has been revoked")
     modules = payload.modules
+    # Delegated network scans require the module to be advertised in the last
+    # heartbeat. Other agent modules remain backward compatible with older
+    # capability lists.
+    if "network" in modules and not agent_supports(agent, "network"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This agent does not advertise network-scan support. "
+                "Update the agent to the latest version and restart it."
+            ),
+        )
     if "ad" in modules and "windows" not in (agent.get("platform") or "").lower():
         raise HTTPException(status_code=400, detail="Active Directory audits require a Windows agent")
     if any(module in {"secrets", "repo"} for module in modules) and not payload.paths:
@@ -1236,8 +1324,22 @@ def start_agent_scan(agent_id: str, payload: AgentScanRequest) -> dict[str, Any]
             status_code=400,
             detail="Secrets/repository modules require at least one local path on the agent",
         )
+    target = payload.target.strip()
+    options = payload.options
+    if "network" in modules:
+        if len(modules) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Run a delegated network scan as a separate job",
+            )
+        if not target:
+            raise HTTPException(status_code=400, detail="A network scan target is required")
+        target = _normalize_scan_target("network", target)
+        options = _clean_options("network", payload.options)
     try:
-        scan_id = create_agent_scan(agent, modules, payload.paths, payload.options)
+        scan_id = create_agent_scan(
+            agent, modules, payload.paths, options, target=target
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
@@ -1510,6 +1612,7 @@ def server_status() -> dict[str, Any]:
             "status": "info",
             "detail": (
                 f"{counts.get('scans_active', 0)} active scans · "
+                f"{SCAN_WORKERS} parallel worker slot(s) · "
                 f"{counts.get('jobs_queued', 0)} queued agent jobs"
             ),
         },
@@ -1548,12 +1651,14 @@ def server_status() -> dict[str, Any]:
             "jobs_queued": counts.get("jobs_queued", 0),
             "jobs_running": counts.get("jobs_running", 0),
             "jobs_failed": counts.get("jobs_failed", 0),
+            "scan_workers": SCAN_WORKERS,
         },
         "settings": settings,
         "tools": tools,
         "limits": {
             "top_ports": len(TOP_PORTS),
             "agent_job_timeout_seconds": AGENT_JOB_TIMEOUT_SECONDS,
+            "scan_workers": SCAN_WORKERS,
         },
         "checks": checks,
         "last_backup_at": get_setting("last_backup_at", ""),
@@ -1637,6 +1742,7 @@ def get_settings() -> dict[str, Any]:
         "limits": {
             "top_ports": len(TOP_PORTS),
             "agent_job_timeout_seconds": AGENT_JOB_TIMEOUT_SECONDS,
+            "scan_workers": SCAN_WORKERS,
         },
     }
 
@@ -1715,6 +1821,7 @@ def meta() -> dict[str, Any]:
             {"id": "system", "name": "System baseline and security configuration"},
             {"id": "packages", "name": "Installed package vulnerabilities (OSV)"},
             {"id": "ports", "name": "Local listening services"},
+            {"id": "network", "name": "Network scan from the agent's network position"},
             {"id": "secrets", "name": "Secrets in selected local paths"},
             {"id": "repo", "name": "Repository inventory in selected paths"},
             {"id": "ad", "name": "Active Directory audit (Windows)"},

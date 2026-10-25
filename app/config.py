@@ -56,6 +56,10 @@ MAX_SOURCE_FILE_BYTES = int(os.getenv("VS_MAX_SOURCE_FILE_BYTES", str(1024 * 102
 MAX_SCAN_FILES = int(os.getenv("VS_MAX_SCAN_FILES", "20000"))
 MAX_CIDR_HOSTS = int(os.getenv("VS_MAX_CIDR_HOSTS", "256"))
 AGENT_JOB_TIMEOUT_SECONDS = int(os.getenv("VS_AGENT_JOB_TIMEOUT", str(60 * 60)))
+# Background scans are independent jobs. Raise this on a larger host to run more
+# server-side scans at the same time. Delegated agent scans wait on the agent
+# and do not consume a worker slot.
+SCAN_WORKERS = max(1, min(32, int(os.getenv("VS_SCAN_WORKERS", "4"))))
 ENABLE_EXTERNAL_APIS = _env_bool("VS_ENABLE_EXTERNAL_APIS", True)
 
 # Optional CLI integrations.  Empty means "look in PATH".

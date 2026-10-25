@@ -80,6 +80,9 @@ class ScanCreate(BaseModel):
     options: dict[str, Any] = Field(default_factory=dict)
     github_token: str | None = Field(default=None, max_length=500)
     requested_by: str = Field(default="local", max_length=120)
+    # Optional execution agent for network scans. When set, the job is queued
+    # for that agent and runs from its network position.
+    agent_id: str | None = Field(default=None, max_length=80)
 
     @model_validator(mode="after")
     def check_target(self) -> "ScanCreate":
@@ -130,10 +133,11 @@ class AgentJobResult(BaseModel):
 
 
 class AgentScanRequest(BaseModel):
-    modules: list[Literal["system", "packages", "ports", "secrets", "ad", "repo"]] = Field(
+    modules: list[Literal["system", "packages", "ports", "secrets", "ad", "repo", "network"]] = Field(
         default_factory=lambda: ["system", "packages", "ports"]
     )
     paths: list[str] = Field(default_factory=list)
+    target: str = Field(default="", max_length=4000)
     options: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("modules")

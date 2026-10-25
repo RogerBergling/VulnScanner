@@ -132,6 +132,10 @@ Open **Scans -> New scan**. Choose a customer, optionally a group and asset, a
 scan type, a target, and type-specific options. Only authorised targets should
 be entered.
 
+Server-side scans run concurrently up to `VS_SCAN_WORKERS` (default 4, range
+1-32). Additional scans wait in the queue. Agent jobs are not limited by that
+pool; each agent claims one job at a time.
+
 Progress, stage and a timestamped event log are shown on the scan page. Scans
 can be cancelled while queued or running. Cancelling a running built-in scan
 saves partial findings where the engine has already produced them. A cancelled
@@ -192,15 +196,24 @@ Options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| Run from | VulnScanner server | Run on the server, or delegate to an enrolled agent from its network position. |
 | Port profile | `common` | `common`, `web`, `top1000` or `all` (1-10000). |
 | Ports | profile | Explicit list/ranges, for example `22,80,443,8000-8100`. Overrides the profile. |
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
-| External tools | off | Run Nmap service/version detection if installed. |
-| NSE vulners | off | With external tools, run the Nmap `vulners` script. Only use against authorised hosts. |
+| External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
+| NSE vulners | off | With external tools, run the Nmap `vulners` script (server-side scans only). |
 
 Port ranges are limited to 5000 ports per range and the UI/API validate the
 input. A network scan creates an informational finding for each open service
 and higher-severity findings for dangerous exposures.
+
+**Run from an agent** delegates the scan to an endpoint. Choose an agent in
+**Run from** when starting a network scan, or use **Scan now** on the agent
+detail page. The scan is queued as `waiting_agent` and an online agent starts it
+on its next poll; an offline agent holds it until it reconnects. Delegated scans
+use TCP connect probes from the endpoint and do not run Nmap. The agent must
+belong to the selected customer/group and advertise the `network` module. This
+is useful for private subnets that the VulnScanner server cannot reach.
 
 ### 5.3 Local repository scan
 
@@ -339,12 +352,47 @@ customer/group, scan count and queued jobs.
 Typical flow:
 
 1. Create an enrolment token for a customer/group and agent name.
-2. Copy the generated Linux or Windows command, or use the installer.
+2. Copy the generated Linux, Windows installer or Python agent command, or use
+   the download links at the top of the Agents page.
 3. Enrol the endpoint. The token is single-use and expires.
 4. The agent appears in the list. Its asset is created automatically in the
    selected group.
 5. Select **Scan** and choose modules, or open **Manage** for the agent detail
    page.
+
+### Installing on Windows
+
+Windows clients and servers can use the native PowerShell agent, which does not
+require Python. Run the installer in an elevated PowerShell:
+
+```powershell
+Invoke-WebRequest -UseBasicParsing `
+  https://scanner.example.com/agent/install-windows-agent.ps1 `
+  -OutFile install-windows-agent.ps1
+.\install-windows-agent.ps1 `
+  -Server https://scanner.example.com `
+  -Token vs_enroll_...
+```
+
+With no arguments the installer prompts for the server, token, agent name, TLS
+verification and poll interval. It installs to `%ProgramFiles%\VulnScanner
+Agent`, stores configuration in `%ProgramData%\VulnScanner Agent`, and registers
+the **VulnScanner Agent** scheduled task. Reconfigure an existing installation
+without reinstalling:
+
+```powershell
+.\install-windows-agent.ps1 -Configure -Server https://scanner.example.com -PollInterval 60
+.\install-windows-agent.ps1 -Configure -Insecure          # lab/self-signed only
+.\install-windows-agent.ps1 -Configure -VerifyTls
+.\install-windows-agent.ps1 -Configure -Token vs_agent_... # rotated token
+.\install-windows-agent.ps1 -Configure -EnrollAgain -Server ... -Token vs_enroll_...
+```
+
+Use `-ServiceAccount` to run the task under a dedicated account instead of
+SYSTEM during installation; a custom user account prompts for its password.
+Existing Python-based Windows installations can continue to use
+`install-windows.ps1`. See [AGENT_GUIDE.md](AGENT_GUIDE.md) for all installer
+options.
 
 ### Monitoring and configuring an agent
 
@@ -356,17 +404,20 @@ Select **Manage**, or the agent name, to open the agent detail page. It shows:
 - Capabilities reported by the latest heartbeat.
 - Queued, running and failed jobs, recent scan jobs and findings.
 - Recent scans with their severity summary.
-- Linux and Windows commands for status, restart and logs.
+- Status, restart and log commands for the native Windows agent and Python
+  agent.
 
 The page actions are:
 
 - **Configure** - rename the agent and move it to another customer/group. The
   linked asset moves with it; historical scans keep their original placement.
 - **Rotate token** - replace the agent credential. The old token stops working
-  immediately. Copy the generated Linux or Windows command, run it on the
-  endpoint as the service account/Administrator, then restart the agent
-  service. The new token is shown once.
+  immediately. Copy the generated Linux, Windows installer or Python agent
+  command, run it on the endpoint as the service account/Administrator, then
+  restart the agent service/task. The new token is shown once.
 - **Scan now** - queue a module scan. Jobs wait safely if the agent is offline.
+  Selecting the `network` module lets you scan from the endpoint's network
+  position; network jobs cannot be combined with other modules.
 - **Revoke** - invalidate the token and cancel queued jobs.
 
 Agent modules:
@@ -374,11 +425,17 @@ Agent modules:
 | Module | What it collects |
 | --- | --- |
 | `system` | OS, hardware, patch/update state, firewall, antivirus, disk encryption, local account and service configuration, platform-specific baseline checks. |
-| `packages` | Installed OS packages plus Python/npm/Windows program inventory, matched against OSV. |
+| `packages` | Installed OS packages plus Python/npm/Windows program inventory, matched against OSV. Python agent only. |
 | `ports` | Listening TCP/UDP sockets and bind addresses. |
-| `secrets` | Secret patterns in selected local paths. Requires at least one path. |
-| `repo` | Manifest inventory from selected local paths. Requires at least one path. |
-| `ad` | Read-only AD collection on Windows. Requires a Windows agent. |
+| `network` | TCP connect scan of a host, IP or CIDR from the agent's network position. |
+| `secrets` | Secret patterns in selected local paths. Requires at least one path. Python agent only. |
+| `repo` | Manifest inventory from selected local paths. Requires at least one path. Python agent only. |
+| `ad` | Read-only AD collection on Windows. Requires a Windows agent and the `ad_audit.ps1` collector. |
+
+The native Windows agent advertises `system`, `ports`, `network` and `ad` (when
+the collector is installed). The Python agent adds `packages`, `secrets` and
+`repo`. The scan dialog disables modules the selected agent did not report in
+its latest heartbeat.
 
 Agent results return over outbound HTTPS. An agent can be revoked; revoked
 tokens cannot authenticate, queued jobs are cancelled, and waiting scans are
@@ -396,7 +453,8 @@ The Settings page shows:
 - Optional tool installation status and versions.
 - KEV catalogue count and last sync time.
 - Database path, size and reports path.
-- Scan limits.
+- Scan limits, including the configured parallel worker count
+  (`VS_SCAN_WORKERS`).
 
 Disabling **Allow external APIs** prevents outbound OSV/KEV/GitHub activity
 and the Nuclei, Semgrep and osv-scanner integrations, and is appropriate for
@@ -417,9 +475,10 @@ The **Server** page reports the health of the local instance:
 - Database integrity, journal mode, schema version, WAL size, free pages, file
   size and path.
 - Disk usage for the data directory and report file counts.
-- Scan queue and agent job counts.
-- Health checks for the database, data/report directories, authentication and
-  external API mode.
+- Scan queue and agent job counts, plus the configured parallel scan worker
+  count.
+- Health checks for the database, data/report directories, authentication,
+  scan workers and external API mode.
 - Optional tool availability and versions.
 - The same runtime integration toggles as Settings.
 
@@ -432,8 +491,9 @@ Maintenance actions:
 - **Download diagnostics** saves a JSON snapshot of the status page for
   troubleshooting. It does not include findings, tokens or scan evidence.
 
-Bind address, authentication and paths are environment settings and require a
-service restart. Use the Settings page for integration toggles.
+Bind address, authentication, paths and `VS_SCAN_WORKERS` are environment
+settings and require a service restart. Use the Settings page for integration
+toggles.
 
 ## 10. Data lifecycle
 
@@ -457,8 +517,15 @@ Back up the data directory before upgrades or bulk deletions.
 ### The page loads but scans stay queued
 
 Check the server log. A scan worker may have failed at import time, or the
-service may have restarted. Cancel the scan and start a new one. Interrupted
-scans are marked failed on startup.
+service may have restarted. Interrupted scans are marked failed on startup.
+Several scans can run at once up to `VS_SCAN_WORKERS` (default 4); raise it on a
+larger host if scans wait behind long-running jobs.
+
+### A delegated network scan stays `waiting_agent`
+
+The selected agent is offline, revoked, or does not advertise the `network`
+module. Bring the agent online, pick another agent, or update the agent to a
+version that supports delegated network scans.
 
 ### A web target is rejected
 
@@ -469,7 +536,9 @@ Credentials in URLs are not recommended; remove spaces and invalid ports.
 
 The host may block TCP connects, the port profile may not include the service,
 or the connect timeout may be too short. Try explicit ports and a longer
-timeout, and confirm you have authorisation and routing.
+timeout, and confirm you have authorisation and routing. For a delegated scan,
+confirm the endpoint can reach the target range and that it is within the
+server host limit.
 
 ### OSV lookups are skipped
 
@@ -494,6 +563,14 @@ the token is redacted from errors and logs.
 Confirm the endpoint can reach the server URL, the agent service/task is
 running, and the system clock is correct. Run the agent manually with `status`
 or `run --once`. A revoked agent must be re-enrolled with a new token.
+
+### Windows PowerShell agent will not start
+
+Run an elevated PowerShell and check `VulnScannerAgent.ps1 -Action Status`,
+`Get-ScheduledTask -TaskName "VulnScanner Agent"` and
+`%ProgramData%\VulnScanner Agent\agent.json`. Reapply the configuration with
+`install-windows-agent.ps1 -Configure`. The token may have expired or been
+rotated.
 
 ### Agent scan reports "Secrets/repository modules requested without paths"
 

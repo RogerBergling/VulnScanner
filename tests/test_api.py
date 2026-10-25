@@ -21,6 +21,7 @@ def test_health_meta_and_dashboard(client):
         "ad",
     }
     assert "system" in {item["id"] for item in meta["agent_modules"]}
+    assert "network" in {item["id"] for item in meta["agent_modules"]}
 
     dashboard = client.get("/api/dashboard")
     assert dashboard.status_code == 200
@@ -352,6 +353,12 @@ def test_server_status_backup_and_vacuum(api_client, customer, data_dir):
     assert data["uptime_seconds"] >= 0
     assert "tools" in data
     assert data["settings"]["allow_external_apis"] is True
+    from app.config import SCAN_WORKERS
+
+    assert data["queue"]["scan_workers"] == SCAN_WORKERS
+    assert data["limits"]["scan_workers"] == SCAN_WORKERS
+    workers_check = next(check for check in data["checks"] if check["id"] == "workers")
+    assert "parallel worker slot" in workers_check["detail"]
 
     backup = api_client.post("/api/server/database/backup")
     assert backup.status_code == 201, backup.text

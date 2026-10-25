@@ -68,8 +68,9 @@ user manual is at <http://127.0.0.1:8765/manual> and in
 4. Open the scan to follow progress, review findings, change finding status, and
    export JSON, CSV or a printable HTML report.
 
-Scans run in background worker threads. You can leave the page and return
-later; all results are persisted in SQLite.
+Scans run in background worker threads, up to `VS_SCAN_WORKERS` at the same
+time (default 4). You can leave the page and return later; all results are
+persisted in SQLite.
 
 ## Scan types
 
@@ -86,17 +87,32 @@ scan continues with the built-in engine and records a log message.
 
 ## Endpoint agents
 
-The agent is a single standard-library Python file. It enrols with a one-time
-token and then polls the server over outbound HTTP(S), so no inbound firewall
-port is needed.
+Agents enrol with a one-time token and then poll the server over outbound
+HTTP(S), so no inbound firewall port is needed. They collect endpoint checks and
+can run delegated network scans from their own network position.
+
+Windows has two supported agents:
+
+- `VulnScannerAgent.ps1` - native PowerShell agent for Windows client and server
+  editions. No Python required. Install with `install-windows-agent.ps1`
+  (auto-restarting scheduled task, interactive or `-Configure` post-install
+  configuration).
+- `vulnscanner_agent.py` - the Python agent used on Linux/macOS and by existing
+  Windows deployments. Install with `install-linux.sh` or
+  `install-windows.ps1`.
+
+Typical use:
 
 - Create an enrolment token on the **Agents** page.
 - Install on Linux with `install-linux.sh` (systemd, dedicated service account by
   default).
-- Install on Windows with `install-windows.ps1` (auto-restarting scheduled task
-  running as SYSTEM).
+- Install on Windows with `install-windows-agent.ps1` (recommended) or
+  `install-windows.ps1` for the Python agent.
 - Start a scan from **Agents**: system baseline, packages, listening ports,
-  selected-path secrets/repository inventory, and on Windows, Active Directory.
+  selected-path secrets/repository inventory, a network scan from the agent, and
+  on Windows, Active Directory.
+- When starting a network scan, choose an agent under **Run from** to scan a
+  subnet that only the endpoint can reach.
 - Open **Manage** to monitor an agent, review jobs/scans, rename or move it,
   rotate its token and run service commands.
 - Use the **Server** page for health checks, database/storage status, queue
@@ -124,6 +140,7 @@ Environment variables can also be exported directly.
 | `VS_MAX_SCAN_FILES` | `20000` | Maximum files visited per scan. |
 | `VS_MAX_CIDR_HOSTS` | `256` | Maximum addresses expanded from one CIDR target. |
 | `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before an agent job is considered stale. |
+| `VS_SCAN_WORKERS` | `4` | Parallel server-side scan workers (1-32). Requires a restart. |
 
 ## Data and backup
 

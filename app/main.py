@@ -131,7 +131,14 @@ def manual() -> FileResponse:
 
 @app.get("/agent/download/{filename}", include_in_schema=False)
 def download_agent(filename: str) -> FileResponse:
-    allowed = {"vulnscanner_agent.py", "ad_audit.ps1", "install-linux.sh", "install-windows.ps1"}
+    allowed = {
+        "vulnscanner_agent.py",
+        "VulnScannerAgent.ps1",
+        "ad_audit.ps1",
+        "install-linux.sh",
+        "install-windows.ps1",
+        "install-windows-agent.ps1",
+    }
     if filename not in allowed:
         return Response("Not found", status_code=404)
     return FileResponse(AGENT_DIR / filename, filename=filename)

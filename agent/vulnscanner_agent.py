@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import getpass
+import ipaddress
 import json
 import os
 import platform
@@ -36,9 +38,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.0"
 USER_AGENT = f"VulnScanner-Agent/{AGENT_VERSION}"
 DEFAULT_INTERVAL = 30
+MAX_NETWORK_HOSTS = 256
 
 SERVICE_NAMES = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http",
@@ -48,6 +51,18 @@ SERVICE_NAMES = {
     3306: "mysql", 3389: "rdp", 5432: "postgresql", 5900: "vnc",
     6379: "redis", 8000: "http", 8080: "http", 8443: "https",
     9200: "elasticsearch", 11211: "memcached", 27017: "mongodb",
+}
+TOP_PORTS = [
+    21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 161, 389, 443, 445,
+    465, 514, 587, 631, 636, 873, 993, 995, 1080, 1433, 1521, 1723, 2049,
+    2181, 2375, 2376, 3000, 3306, 3389, 4443, 5000, 5432, 5601, 5672, 5900,
+    5984, 6379, 6443, 7001, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9090,
+    9200, 9300, 10000, 11211, 27017, 27018,
+]
+WEB_PORTS = [80, 443, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443]
+BANNER_PORTS = {
+    21, 22, 23, 25, 110, 143, 389, 587, 993, 995, 1433, 1521, 3306, 5432,
+    5900, 6379, 9200, 11211, 27017,
 }
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "bower_components", ".venv", "venv",
@@ -1170,11 +1185,155 @@ def _parse_manifest_text(name: str, text: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Delegated network scans
+# ---------------------------------------------------------------------------
+
+def agent_parse_ports(value: str | None, profile: str = "common") -> list[int]:
+    if value:
+        named = value.strip().lower()
+        if named in {"web", "common", "top1000", "all"}:
+            return agent_parse_ports(None, named)
+        ports: set[int] = set()
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                try:
+                    start, end = (int(item) for item in part.split("-", 1))
+                except ValueError as exc:
+                    raise ValueError(f"Invalid port range: {part}") from exc
+                if start < 1 or end > 65535 or start > end:
+                    raise ValueError(f"Invalid port range: {part}")
+                if end - start > 5000:
+                    raise ValueError("Port ranges are limited to 5000 ports")
+                ports.update(range(start, end + 1))
+            else:
+                try:
+                    port = int(part)
+                except ValueError as exc:
+                    raise ValueError(f"Invalid port: {part}") from exc
+                if port < 1 or port > 65535:
+                    raise ValueError(f"Invalid port: {part}")
+                ports.add(port)
+        if not ports:
+            raise ValueError("No ports supplied")
+        return sorted(ports)
+    if profile == "top1000":
+        return list(range(1, 1001))
+    if profile == "all":
+        return list(range(1, 10001))
+    if profile == "web":
+        return list(WEB_PORTS)
+    return list(TOP_PORTS)
+
+
+def agent_expand_targets(target: str) -> list[str]:
+    target = (target or "").strip()
+    if not target:
+        raise ValueError("A network scan target is required")
+    if "/" in target:
+        network = ipaddress.ip_network(target, strict=False)
+        if network.num_addresses > MAX_NETWORK_HOSTS:
+            raise ValueError(
+                f"Network contains {network.num_addresses} addresses; "
+                f"limit is {MAX_NETWORK_HOSTS}"
+            )
+        if network.num_addresses == 1:
+            return [str(network.network_address)]
+        return [str(host) for host in network.hosts()]
+    if re.search(r"[\s/\\]", target):
+        raise ValueError("Host target may not contain whitespace or slashes")
+    try:
+        socket.getaddrinfo(target, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"Could not resolve host {target}: {exc}") from exc
+    return [target]
+
+
+def _probe_network_port(host: str, port: int, timeout: float) -> dict[str, Any] | None:
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            banner = ""
+            if port in BANNER_PORTS:
+                sock.settimeout(min(timeout, 0.8))
+                try:
+                    raw = sock.recv(512)
+                    banner = raw.decode("utf-8", errors="replace")
+                    banner = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", banner)[:500]
+                except (socket.timeout, OSError):
+                    banner = ""
+            return {
+                "host": host,
+                "port": port,
+                "service": SERVICE_NAMES.get(port, "unknown"),
+                "banner": banner,
+            }
+    except (OSError, socket.timeout):
+        return None
+
+
+def _collect_probe(future: concurrent.futures.Future, open_ports: list[dict[str, Any]]) -> None:
+    try:
+        item = future.result()
+    except Exception:
+        return
+    if item:
+        open_ports.append(item)
+
+
+def collect_network(target: str, options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run a TCP connect scan from this endpoint's network position."""
+    options = options or {}
+    hosts = agent_expand_targets(target)
+    ports = agent_parse_ports(str(options.get("ports") or "") or None, str(options.get("profile") or "common"))
+    try:
+        timeout = float(options.get("connect_timeout", 0.45))
+    except (TypeError, ValueError):
+        timeout = 0.45
+    timeout = max(0.1, min(timeout, 3.0))
+    try:
+        workers = int(options.get("workers", 300))
+    except (TypeError, ValueError):
+        workers = 300
+    workers = max(10, min(workers, 600))
+    started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    open_ports: list[dict[str, Any]] = []
+    pending: set[concurrent.futures.Future] = set()
+    # Keep a bounded number of futures in flight. A large CIDR with the "all"
+    # profile can represent millions of host/port pairs; submitting them all at
+    # once would exhaust memory on an endpoint.
+    window = max(workers * 4, 32)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for host in hosts:
+            for port in ports:
+                pending.add(executor.submit(_probe_network_port, host, port, timeout))
+                if len(pending) >= window:
+                    done, pending = concurrent.futures.wait(
+                        pending, return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for future in done:
+                        _collect_probe(future, open_ports)
+        for future in concurrent.futures.as_completed(pending):
+            _collect_probe(future, open_ports)
+    open_ports.sort(key=lambda item: (item["host"], item["port"]))
+    return {
+        "target": target,
+        "hosts": hosts[:500],
+        "host_count": len(hosts),
+        "ports_scanned": len(ports),
+        "open_ports": open_ports[:5000],
+        "started_at": started,
+        "finished_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Job execution
 # ---------------------------------------------------------------------------
 
 def capabilities() -> list[str]:
-    caps = ["system", "packages", "ports", "secrets", "repo"]
+    caps = ["system", "packages", "ports", "network", "secrets", "repo"]
     if platform.system() == "Windows":
         caps.append("ad")
     return caps
@@ -1185,6 +1344,7 @@ def collect_job(job: dict[str, Any], stop_event=None) -> dict[str, Any]:
     modules = payload.get("modules") or ["system", "packages", "ports"]
     paths = payload.get("paths") or []
     options = payload.get("options") or {}
+    network_target = payload.get("target") or options.get("target") or ""
     info = system_info()
     result: dict[str, Any] = {
         "system": info,
@@ -1212,6 +1372,11 @@ def collect_job(job: dict[str, Any], stop_event=None) -> dict[str, Any]:
             result["listening_ports"] = collect_ports()
         except Exception as exc:
             errors.append(f"Port inventory failed: {exc}")
+    if "network" in modules:
+        try:
+            result["network"] = collect_network(str(network_target), options)
+        except Exception as exc:
+            errors.append(f"Network scan failed: {exc}")
     if "secrets" in modules or "repo" in modules:
         if not paths:
             errors.append("Secrets/repository modules requested without paths")
@@ -1319,6 +1484,9 @@ def run_once(config: dict[str, Any]) -> bool:
     try:
         result = collect_job(job)
         warnings = result.get("warnings") or []
+        modules = (job.get("payload") or {}).get("modules") or []
+        if result.get("error") and "network" in modules and not result.get("network"):
+            raise RuntimeError(result["error"])
         if result.get("error") and result.get("ad_error") and len(warnings) == 1:
             # AD-only failure should be a failed job with a clear error.
             raise RuntimeError(result["error"])
@@ -1356,11 +1524,18 @@ def run_loop(config: dict[str, Any], interval: int, once: bool = False) -> int:
 # CLI
 # ---------------------------------------------------------------------------
 
-def command_enroll(args: argparse.Namespace) -> int:
-    server = args.server.rstrip("/")
+def _normalize_server(server: str) -> str:
+    server = (server or "").strip().rstrip("/")
     if not server.startswith(("http://", "https://")):
         raise SystemExit("--server must start with http:// or https://")
+    return server
+
+
+def command_enroll(args: argparse.Namespace) -> int:
+    server = _normalize_server(args.server)
     verify = not args.insecure
+    if getattr(args, "verify_tls", False):
+        verify = True
     info = system_info()
     temp_config = {"server": server, "token": None, "verify_tls": verify}
     log(f"Enrolling with {server} as {args.name or info['hostname']}…")
@@ -1391,7 +1566,8 @@ def command_enroll(args: argparse.Namespace) -> int:
         "asset_id": response.get("asset_id"),
         "verify_tls": verify,
         "enrolled_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "poll_interval": response.get("poll_interval", DEFAULT_INTERVAL),
+        "poll_interval": int(args.poll_interval or response.get("poll_interval", DEFAULT_INTERVAL)),
+        "agent_kind": "python",
     }
     target = save_config(config, args.config)
     log(f"Enrolled as agent {response['agent_id']} ({response['name']})")
@@ -1430,9 +1606,50 @@ def command_update_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_configure(args: argparse.Namespace) -> int:
+    """Update an existing agent configuration without re-enrolling."""
+    target = Path(args.config).expanduser() if args.config else config_path()
+    if target.exists():
+        try:
+            config = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Could not read {target}: {exc}") from exc
+    else:
+        config = {}
+    if args.server:
+        config["server"] = _normalize_server(args.server)
+    if args.name:
+        config["name"] = args.name.strip()
+    if args.poll_interval:
+        config["poll_interval"] = max(5, min(int(args.poll_interval), 3600))
+    if args.insecure:
+        config["verify_tls"] = False
+    elif args.verify_tls:
+        config["verify_tls"] = True
+    if args.token:
+        new_token = args.token.strip()
+        if not new_token.startswith("vs_agent_"):
+            raise SystemExit("That does not look like an agent token")
+        config["token"] = new_token
+    if not config.get("server"):
+        raise SystemExit("--server is required when creating a new configuration")
+    saved = save_config(config, args.config)
+    log(f"Updated agent configuration at {saved}")
+    if not config.get("token"):
+        log("No agent token is configured yet. Enroll the agent before starting it.")
+    return 0
+
+
 def command_scan(args: argparse.Namespace) -> int:
     modules = [item.strip() for item in args.modules.split(",") if item.strip()]
-    job = {"payload": {"modules": modules, "paths": args.path or [], "options": {}}}
+    job = {
+        "payload": {
+            "modules": modules,
+            "paths": args.path or [],
+            "target": args.target or "",
+            "options": {"ports": args.ports} if args.ports else {},
+        }
+    }
     result = collect_job(job)
     output = json.dumps(result, indent=2, default=str)
     if args.output:
@@ -1452,7 +1669,10 @@ def main() -> int:
     enroll.add_argument("--server", required=True, help="Server URL, e.g. http://127.0.0.1:8765")
     enroll.add_argument("--token", required=True, help="One-time enrollment token")
     enroll.add_argument("--name", default="", help="Friendly agent name")
-    enroll.add_argument("--insecure", action="store_true", help="Do not verify the server TLS certificate")
+    tls = enroll.add_mutually_exclusive_group()
+    tls.add_argument("--insecure", action="store_true", help="Do not verify the server TLS certificate")
+    tls.add_argument("--verify-tls", action="store_true", help="Verify the server TLS certificate (default)")
+    enroll.add_argument("--poll-interval", type=int, default=0, help="Seconds between polls")
     enroll.set_defaults(func=command_enroll)
 
     run = sub.add_parser("run", help="Poll the server and execute scan jobs")
@@ -1469,9 +1689,23 @@ def main() -> int:
     update_token.add_argument("--token", required=True, help="New agent token")
     update_token.set_defaults(func=command_update_token)
 
+    configure = sub.add_parser(
+        "configure", help="Change server URL, name, TLS or poll interval after installation"
+    )
+    configure.add_argument("--server", default="", help="VulnScanner server URL")
+    configure.add_argument("--name", default="", help="Friendly agent name")
+    configure.add_argument("--token", default="", help="Updated agent token")
+    configure.add_argument("--poll-interval", type=int, default=0, help="Seconds between polls")
+    configure_tls = configure.add_mutually_exclusive_group()
+    configure_tls.add_argument("--insecure", action="store_true", help="Do not verify TLS")
+    configure_tls.add_argument("--verify-tls", action="store_true", help="Verify TLS")
+    configure.set_defaults(func=command_configure)
+
     scan = sub.add_parser("scan", help="Run modules locally (without a server) and print JSON")
     scan.add_argument("--modules", default="system,packages,ports", help="Comma-separated modules")
     scan.add_argument("--path", action="append", help="Path for secrets/repo modules (repeatable)")
+    scan.add_argument("--target", default="", help="Network target for the network module")
+    scan.add_argument("--ports", default="", help="Custom ports for the network module")
     scan.add_argument("--output", help="Write JSON to this file")
     scan.set_defaults(func=command_scan)
 

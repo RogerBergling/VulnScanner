@@ -32,6 +32,18 @@ def is_online(last_seen: str | None, threshold_seconds: int = 120) -> bool:
     return (datetime.now(timezone.utc) - seen).total_seconds() <= threshold_seconds
 
 
+def agent_capabilities(agent: dict[str, Any]) -> list[str]:
+    value = agent.get("capabilities")
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(item) for item in json_load(value, [])]
+
+
+def agent_supports(agent: dict[str, Any], module: str) -> bool:
+    """True only when the agent advertised the module in its last heartbeat."""
+    return module in agent_capabilities(agent)
+
+
 def enroll_agent(
     enrollment_token: str,
     name: str,
@@ -215,17 +227,71 @@ def get_job(agent: dict[str, Any], job_id: str) -> dict[str, Any] | None:
     return job
 
 
+def queue_network_scan_job(
+    agent: dict[str, Any],
+    scan_id: int,
+    target: str,
+    options: dict[str, Any],
+) -> str:
+    """Queue a delegated network scan for an existing scan record."""
+    if agent.get("status") == "revoked":
+        raise ValueError("Agent has been revoked")
+    now = utcnow()
+    job_id = str(uuid.uuid4())
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE scans SET status = 'waiting_agent', stage = 'Waiting for agent', agent_id = ? "
+            "WHERE id = ?",
+            (agent["id"], scan_id),
+        )
+        conn.execute(
+            "INSERT INTO agent_jobs(id, agent_id, scan_id, job_type, payload, status, created_at) "
+            "VALUES (?, ?, ?, 'scan', ?, 'queued', ?)",
+            (
+                job_id,
+                agent["id"],
+                scan_id,
+                json_dump(
+                    {
+                        "scan_id": scan_id,
+                        "modules": ["network"],
+                        "target": target,
+                        "options": dict(options or {}),
+                    }
+                ),
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO scan_events(scan_id, created_at, level, message) VALUES (?, ?, 'info', ?)",
+            (
+                scan_id,
+                now,
+                f"Network scan delegated to {agent.get('name') or agent['id']}",
+            ),
+        )
+    return job_id
+
+
 def create_agent_scan(
     agent: dict[str, Any],
     modules: list[str],
     paths: list[str],
     options: dict[str, Any],
     requested_by: str = "local",
+    target: str = "",
 ) -> int:
     if agent.get("status") == "revoked":
         raise ValueError("Agent has been revoked")
+    modules = list(dict.fromkeys(modules or []))
     if not modules:
         modules = ["system", "packages", "ports"]
+    if "network" in modules:
+        if len(modules) > 1:
+            raise ValueError("Run a network scan as its own agent job")
+        if not target.strip():
+            raise ValueError("A network scan target is required")
+        return create_agent_network_scan(agent, target, options, requested_by)
     if "ad" in modules and agent.get("platform", "").lower() != "windows":
         # It is allowed to queue, but the agent will report a clear error.
         pass
@@ -277,6 +343,68 @@ def create_agent_scan(
         conn.execute(
             "INSERT INTO scan_events(scan_id, created_at, level, message) VALUES (?, ?, 'info', ?)",
             (scan_id, now, f"Agent job queued for {agent.get('name') or agent['id']}"),
+        )
+    return scan_id
+
+
+def create_agent_network_scan(
+    agent: dict[str, Any],
+    target: str,
+    options: dict[str, Any],
+    requested_by: str = "local",
+) -> int:
+    """Create a network scan owned by one agent without running a server worker."""
+    if agent.get("status") == "revoked":
+        raise ValueError("Agent has been revoked")
+    if not target.strip():
+        raise ValueError("A network scan target is required")
+    safe_options = dict(options or {})
+    now = utcnow()
+    job_id = str(uuid.uuid4())
+    with transaction() as conn:
+        scan_id = int(
+            conn.execute(
+                "INSERT INTO scans("
+                "customer_id, group_id, asset_id, agent_id, scan_type, target, status, "
+                "progress, stage, options, summary, requested_by, created_at"
+                ") VALUES (?, ?, ?, ?, 'network', ?, 'waiting_agent', 0, 'Waiting for agent', ?, '{}', ?, ?)",
+                (
+                    agent["customer_id"],
+                    agent["group_id"],
+                    agent.get("asset_id"),
+                    agent["id"],
+                    target.strip(),
+                    json_dump(safe_options),
+                    requested_by,
+                    now,
+                ),
+            ).lastrowid
+        )
+        conn.execute(
+            "INSERT INTO agent_jobs(id, agent_id, scan_id, job_type, payload, status, created_at) "
+            "VALUES (?, ?, ?, 'scan', ?, 'queued', ?)",
+            (
+                job_id,
+                agent["id"],
+                scan_id,
+                json_dump(
+                    {
+                        "scan_id": scan_id,
+                        "modules": ["network"],
+                        "target": target.strip(),
+                        "options": safe_options,
+                    }
+                ),
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO scan_events(scan_id, created_at, level, message) VALUES (?, ?, 'info', ?)",
+            (
+                scan_id,
+                now,
+                f"Network scan delegated to {agent.get('name') or agent['id']}",
+            ),
         )
     return scan_id
 

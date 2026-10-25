@@ -5,6 +5,7 @@ from app.scanners.network import (
     _add_port_findings,
     _expand_hosts,
     parse_nmap_xml,
+    process_agent_network_payload,
 )
 from tests.helpers import DummyContext
 
@@ -75,3 +76,37 @@ def test_add_port_findings_severities_and_banner():
     assert by_port["banner-version:22"]["severity"] == "low"
     assert by_port["open-port:8080"]["severity"] == "info"
     assert "Banner: SSH-2.0-OpenSSH_8.9p1" in by_port["open-port:22"]["evidence"]
+
+
+def test_process_agent_network_payload():
+    payload = {
+        "network": {
+            "hosts": ["10.0.0.1", "10.0.0.2"],
+            "host_count": 2,
+            "ports_scanned": 3,
+            "open_ports": [
+                {"host": "10.0.0.1", "port": 22, "service": "ssh", "banner": "SSH-2.0-OpenSSH_9.0"},
+                {"host": "10.0.0.2", "port": 6379, "service": "redis", "banner": "- NOAUTH required"},
+                {"host": "", "port": 80, "banner": "ignored"},
+                {"host": "10.0.0.2", "port": "not-a-port"},
+            ],
+            "finished_at": "2026-01-01T00:00:00+00:00",
+        },
+        "warnings": ["one probe timed out"],
+    }
+    ctx = DummyContext(target="10.0.0.0/30")
+    result = process_agent_network_payload(ctx, payload)
+    findings = {finding["key"]: finding for finding in result.normalized()}
+    assert "open-port:22" in findings
+    assert findings["risky-port:6379"]["severity"] == "critical"
+    assert result.metadata["execution"] == "agent"
+    assert result.metadata["host_count"] == 2
+    assert result.metadata["ports_scanned"] == 3
+    assert {item["host"] for item in result.metadata["open_ports"]} == {"10.0.0.1", "10.0.0.2"}
+    assert any("one probe timed out" in message for _level, message in ctx.logs)
+
+
+def test_process_agent_network_payload_network_only_failure():
+    ctx = DummyContext(target="10.0.0.0/30")
+    with pytest.raises(ValueError, match="probe failed"):
+        process_agent_network_payload(ctx, {"error": "probe failed"})

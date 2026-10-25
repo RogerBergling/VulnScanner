@@ -27,7 +27,7 @@ from .scanners.base import (
 )
 from .scanners.dependencies import scan_dependencies
 from .scanners.kev import enrich_finding
-from .scanners.network import scan as scan_network
+from .scanners.network import process_agent_network_payload, scan as scan_network
 from .scanners.osv import kev_lookup
 from .scanners.repository import scan_repository
 from .scanners.web import scan as scan_web
@@ -272,7 +272,10 @@ def execute_agent_result(
     )
     log_event(scan_id, "Agent report received")
     try:
-        result = process_agent_payload(ctx, payload)
+        if scan["scan_type"] == "network":
+            result = process_agent_network_payload(ctx, payload)
+        else:
+            result = process_agent_payload(ctx, payload)
         if ctx.cancelled() or scan_cancelled(scan_id):
             update_scan(
                 scan_id,

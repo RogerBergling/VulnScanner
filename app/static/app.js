@@ -897,7 +897,7 @@
   // ---------------------------------------------------------------------------
   // New scan dialog
   // ---------------------------------------------------------------------------
-  function scanTypeOptionsHtml(type) {
+  function scanTypeOptionsHtml(type, agentOptionsHtml) {
     if (type === 'web') {
       return '<div class="form-section"><h3>Web scan options</h3><div class="checkbox-row">' +
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
@@ -906,15 +906,18 @@
     }
     if (type === 'network') {
       return '<div class="form-section"><h3>Network scan options</h3><div class="form-grid">' +
+        '<label class="field full"><span>Run from</span><select class="select" id="opt-agent">' +
+          '<option value="">VulnScanner server (local network)</option>' + (agentOptionsHtml || '') + '</select>' +
+          '<span class="hint">Choose an enrolled agent to scan from its network position. The agent must be online or reconnect before the scan starts.</span></label>' +
         '<label class="field"><span>Port profile</span><select class="select" id="opt-profile">' +
           '<option value="common">Common services</option><option value="web">Web ports</option>' +
           '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
         '<label class="field"><span>Custom ports <span class="muted">(optional)</span></span>' +
           '<input class="input" id="opt-ports" placeholder="22,80,443 or 1-1024"></label></div>' +
         '<div class="checkbox-row" style="margin-top:12px">' +
-        '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection.</span></label>' +
-        '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script.</span></label></div>' +
-        '<div class="modal-note" style="margin-top:8px">CIDR ranges are limited by the server configuration (default 256 hosts).</div></div>';
+        '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label></div>' +
+        '<div class="modal-note" style="margin-top:8px">CIDR ranges are limited by the server configuration (default 256 hosts). Delegated agent scans use TCP connect probes from the endpoint.</div></div>';
     }
     if (type === 'repo' || type === 'github') {
       return '<div class="form-section"><h3>Repository options</h3><div class="checkbox-row">' +
@@ -998,6 +1001,8 @@
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
                 const ports = ($('#opt-ports', ctx.overlay) || {}).value || '';
                 if (ports.trim()) payload.options.ports = ports.trim();
+                const agentId = ($('#opt-agent', ctx.overlay) || {}).value || '';
+                if (agentId) payload.agent_id = agentId;
               } else if (type === 'repo' || type === 'github') {
                 payload.options.include_secrets = !!($('#opt-secrets', ctx.overlay) || {}).checked;
                 payload.options.include_dependencies = !!($('#opt-deps', ctx.overlay) || {}).checked;
@@ -1023,16 +1028,52 @@
         const targetInput = $('#scan-target', overlay);
         const tokenField = $('#github-token-field', overlay);
         let detail = null;
+        let agentCache = null;
+
+        async function loadAgents(force) {
+          if (agentCache && !force) return agentCache;
+          try { agentCache = await get('/agents'); }
+          catch (ignore) { agentCache = []; }
+          return agentCache;
+        }
+
+        function agentOptionsHtml() {
+          const customerId = Number(customerSelect.value);
+          const groupId = groupSelect.value ? Number(groupSelect.value) : null;
+          return (agentCache || []).filter(function (agent) {
+            if (!agent || agent.status === 'revoked') return false;
+            if (Number(agent.customer_id) !== customerId) return false;
+            if (groupId && Number(agent.group_id) !== groupId) return false;
+            const caps = agent.capabilities || [];
+            return caps.indexOf('network') !== -1;
+          }).map(function (agent) {
+            return '<option value="' + esc(agent.id) + '">' + esc(agent.name) +
+              ' — ' + esc(agent.hostname || agent.platform || 'endpoint') +
+              (agent.online ? ' (online)' : ' (offline)') + '</option>';
+          }).join('');
+        }
 
         function renderType() {
           const type = typeSelect.value;
           const config = SCAN_TYPES[type];
+          const previousAgent = ($('#opt-agent', overlay) || {}).value || '';
+          const previousProfile = ($('#opt-profile', overlay) || {}).value || '';
+          const previousPorts = ($('#opt-ports', overlay) || {}).value || '';
           targetInput.placeholder = config.placeholder;
           $('#target-hint', overlay).textContent = type === 'github'
             ? 'Public repositories work without a token. The clone is stored locally and deleted after the scan.'
             : (type === 'repo' ? 'Use an absolute path on the server. A relative path is resolved from the server working directory.' :
               (type === 'ad' ? 'The JSON report must already exist on the server.' : 'Only scan systems you own or have written permission to test.'));
-          $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type);
+          $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type, agentOptionsHtml());
+          const agentSelect = $('#opt-agent', overlay);
+          if (agentSelect && previousAgent) {
+            const exists = Array.prototype.some.call(agentSelect.options, function (option) { return option.value === previousAgent; });
+            if (exists) agentSelect.value = previousAgent;
+          }
+          const profileSelect = $('#opt-profile', overlay);
+          if (profileSelect && previousProfile) profileSelect.value = previousProfile;
+          const portsInput = $('#opt-ports', overlay);
+          if (portsInput && previousPorts) portsInput.value = previousPorts;
           tokenField.classList.toggle('hidden', type !== 'github');
         }
         function renderAssets() {
@@ -1069,6 +1110,7 @@
             if (previousAsset) assetSelect.value = previousAsset;
             if (!assetSelect.value && initial.assetId) assetSelect.value = String(initial.assetId);
             if (assetSelect.value) applyAsset(false);
+            renderType();
           } catch (error) { formError(overlay, errorText(error)); }
         }
         function applyAsset(setType) {
@@ -1090,8 +1132,9 @@
 
         typeSelect.addEventListener('change', renderType);
         customerSelect.addEventListener('change', function () { loadCustomer(false, false); });
-        groupSelect.addEventListener('change', function () { renderAssets(); assetSelect.value = ''; });
+        groupSelect.addEventListener('change', function () { renderAssets(); assetSelect.value = ''; renderType(); });
         assetSelect.addEventListener('change', function () { applyAsset(true); });
+        loadAgents().then(function () { if (typeSelect.value === 'network') renderType(); });
 
         if (initial.type && SCAN_TYPES[initial.type]) typeSelect.value = initial.type;
         if (initial.customerId) customerSelect.value = String(initial.customerId);
@@ -1603,7 +1646,9 @@
     view.innerHTML =
       '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Endpoint agents</h1>' +
         '<div class="page-sub">Agents poll the server outbound, run checks locally and upload the results. No inbound rule is needed.</div></div>' +
-        '<div class="page-actions"><a class="btn" href="/agent/vulnscanner_agent.py" download>Download agent</a>' +
+        '<div class="page-actions"><a class="btn" href="/agent/VulnScannerAgent.ps1" download>Windows agent</a>' +
+        '<a class="btn" href="/agent/install-windows-agent.ps1" download>Windows installer</a>' +
+        '<a class="btn" href="/agent/vulnscanner_agent.py" download>Python agent</a>' +
         '<button class="btn btn-primary" data-action="enroll-agent">Enroll agent</button></div></div>' +
       '<div class="info-banner"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 4.8-3.2 8.8-8 10-4.8-1.2-8-5.2-8-10V7l8-4z"/><path d="M8.5 12l2.2 2.2L15.5 9.5" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
         '<div><strong>How enrollment works:</strong> create a one-time token, run the enroll command on the endpoint, then start the agent service. ' +
@@ -1729,8 +1774,11 @@
           '<pre class="command-block">sudo -u vulnscanner /opt/vulnscanner-agent/vulnscanner_agent.py --config /var/lib/vulnscanner-agent/agent.json status\nsudo systemctl restart vulnscanner-agent\njournalctl -u vulnscanner-agent -n 50 --no-pager</pre>' +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Agent commands</h2><span class="spacer"></span>' +
-          '<span class="muted small">Windows (Administrator)</span></div><div class="panel-body">' +
-          '<pre class="command-block">py -3 vulnscanner_agent.py --config "C:\\ProgramData\\VulnScanner Agent\\agent.json" status\nStop-ScheduledTask -TaskName "VulnScanner Agent"\nStart-ScheduledTask -TaskName "VulnScanner Agent"</pre>' +
+          '<span class="muted small">Windows PowerShell agent (Administrator)</span></div><div class="panel-body">' +
+          '<pre class="command-block">&amp; "' + esc((agent.install_path || "C:\\Program Files\\VulnScanner Agent\\VulnScannerAgent.ps1")) + '" -Action Status\n' +
+          'Stop-ScheduledTask -TaskName "VulnScanner Agent"\n' +
+          'Start-ScheduledTask -TaskName "VulnScanner Agent"</pre>' +
+          '<p class="modal-note" style="margin-top:10px">Python agents use <span class="mono">vulnscanner_agent.py --config "C:\\ProgramData\\VulnScanner Agent\\agent.json" status</span> instead.</p>' +
         '</div></section></div>' +
       '<div class="dash-grid-2" style="margin-bottom:16px">' +
         '<section class="panel"><div class="panel-head"><h2>Recent jobs</h2><span class="spacer"></span>' +
@@ -1953,12 +2001,13 @@
           '<button class="btn" type="button" data-copy="' + esc(result.token) + '">Copy</button></div></label></div>' +
         '<div class="tabs" style="margin-top:18px" id="enroll-tabs">' +
           '<button class="tab active" type="button" data-tab="linux">Linux / macOS</button>' +
-          '<button class="tab" type="button" data-tab="windows">Windows</button></div>' +
+          '<button class="tab" type="button" data-tab="windows-installer">Windows installer</button>' +
+          '<button class="tab" type="button" data-tab="windows">Windows (Python)</button></div>' +
         '<div id="enroll-command">' + commandPanel(result.linux_command, 'linux') + '</div>' +
         '<div class="modal-note" style="margin-top:12px">Review the command before running it. For a persistent service, use the installer scripts: ' +
         '<a href="/agent/install-linux.sh" target="_blank" rel="noopener">Linux</a> · ' +
-        '<a href="/agent/install-windows.ps1" target="_blank" rel="noopener">Windows</a>. ' +
-        'The Windows installer can also accept the enrollment token directly.</div>',
+        '<a href="/agent/install-windows-agent.ps1" target="_blank" rel="noopener">Windows</a>. ' +
+        'The Windows installer supports interactive and post-install configuration.</div>',
       actions: [{ label: 'Done', class: 'btn-primary', onClick: function (ctx) { ctx.close(); } }],
       onMount: function (overlay) {
         $('#enroll-tabs', overlay).addEventListener('click', function (event) {
@@ -1966,9 +2015,12 @@
           if (!tab) return;
           activeTab = tab.getAttribute('data-tab');
           $$('.tab', overlay).forEach(function (item) { item.classList.toggle('active', item === tab); });
-          $('#enroll-command', overlay).innerHTML = activeTab === 'windows'
-            ? commandPanel(result.windows_command, 'windows')
-            : commandPanel(result.linux_command, 'linux');
+          const commands = {
+            linux: result.linux_command,
+            'windows-installer': result.windows_installer_command || result.windows_command,
+            windows: result.windows_command
+          };
+          $('#enroll-command', overlay).innerHTML = commandPanel(commands[activeTab] || result.linux_command, activeTab);
         });
         overlay.addEventListener('click', function (event) {
           const copy = event.target.closest('[data-copy]');
@@ -2006,17 +2058,24 @@
       { id: 'system', name: 'System baseline and security configuration' },
       { id: 'packages', name: 'Installed package vulnerabilities (OSV)' },
       { id: 'ports', name: 'Local listening services' },
+      { id: 'network', name: "Network scan from the agent's network position" },
       { id: 'secrets', name: 'Secrets in selected local paths' },
       { id: 'repo', name: 'Repository inventory in selected paths' },
       { id: 'ad', name: 'Active Directory audit (Windows)' }
     ];
     const isWindows = String(agent.platform || '').toLowerCase().indexOf('windows') !== -1;
+    const capabilities = agent.capabilities || [];
     const checks = modules.map(function (module) {
-      const disabled = module.id === 'ad' && !isWindows;
-      const checked = ['system', 'packages', 'ports'].indexOf(module.id) !== -1 ? ' checked' : '';
-      return '<label class="check"><input type="checkbox" value="' + esc(module.id) + '"' + checked +
+      const unsupported = module.id === 'network'
+        ? capabilities.indexOf('network') === -1
+        : (capabilities.length > 0 && capabilities.indexOf(module.id) === -1);
+      const linuxOnlyAd = module.id === 'ad' && !isWindows;
+      const disabled = unsupported || linuxOnlyAd;
+      const checked = ['system', 'packages', 'ports'].indexOf(module.id) !== -1 && !unsupported ? ' checked' : '';
+      return '<label class="check"><input type="checkbox" id="agent-mod-' + esc(module.id) + '" value="' + esc(module.id) + '"' + checked +
         (disabled ? ' disabled' : '') + '><span><strong>' + esc(module.id) + '</strong> — ' + esc(module.name) +
-        (disabled ? ' <span class="muted">(Windows only)</span>' : '') + '</span></label>';
+        (linuxOnlyAd ? ' <span class="muted">(Windows only)</span>' : '') +
+        (unsupported ? ' <span class="muted">(not supported by this agent)</span>' : '') + '</span></label>';
     }).join('');
     openModal({
       title: 'Scan ' + agent.name,
@@ -2024,8 +2083,18 @@
       content: '<form id="agent-scan-form"><div class="info-banner" style="margin-top:0"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5" stroke-linecap="round"/></svg>' +
         '<div>Agent is <strong>' + (agent.online ? 'online' : 'offline') + '</strong>. ' +
         (agent.online ? 'The job starts on its next poll.' : 'The job is queued and runs when the agent reconnects.') + '</div></div>' +
-        '<div class="form-section" style="margin-top:0;padding-top:0;border-top:0"><h3>Modules</h3><div class="checkbox-row" style="flex-direction:column;gap:9px">' + checks + '</div></div>' +
-        '<div class="form-section"><h3>Local paths for secrets / repository modules</h3>' +
+        '<div class="form-section" style="margin-top:0;padding-top:0;border-top:0"><h3>Modules</h3><div class="checkbox-row" style="flex-direction:column;gap:9px">' + checks + '</div>' +
+          '<div class="modal-note" style="margin-top:9px">A network scan runs on its own: selecting it clears the other modules.</div></div>' +
+        '<div class="form-section hidden" id="agent-network-section"><h3>Network scan from the agent</h3><div class="form-grid">' +
+          '<label class="field full"><span>Target</span><input class="input" id="agent-network-target" maxlength="4000" placeholder="192.168.1.0/24, 10.0.0.5 or hostname">' +
+            '<span class="hint">The scan starts from this endpoint, so private ranges reachable only from its network can be tested.</span></label>' +
+          '<label class="field"><span>Port profile</span><select class="select" id="agent-network-profile">' +
+            '<option value="common">Common services</option><option value="web">Web ports</option>' +
+            '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
+          '<label class="field"><span>Custom ports <span class="muted">(optional)</span></span>' +
+            '<input class="input" id="agent-network-ports" placeholder="22,80,443 or 1-1024"></label></div>' +
+          '<div class="modal-note">Delegated scans use TCP connect probes. Only scan systems you own or have written permission to test.</div></div>' +
+        '<div class="form-section" id="agent-paths-section"><h3>Local paths for secrets / repository modules</h3>' +
           '<label class="field full"><textarea class="textarea mono" id="agent-paths" rows="3" placeholder="/home/user/project&#10;C:\\inetpub\\wwwroot"></textarea>' +
           '<span class="hint">One absolute path per line. Required when the secrets or repository module is selected.</span></label>' +
           '<div class="form-grid" style="margin-top:10px">' +
@@ -2040,15 +2109,28 @@
             try {
               const selected = $$('#agent-scan-form input[type=checkbox]:checked', ctx.overlay).map(function (input) { return input.value; });
               if (!selected.length) throw new Error('Select at least one module');
-              const paths = $('#agent-paths', ctx.overlay).value.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
-              if (selected.indexOf('secrets') !== -1 || selected.indexOf('repo') !== -1) {
+              const isNetwork = selected.indexOf('network') !== -1;
+              const paths = isNetwork ? [] : $('#agent-paths', ctx.overlay).value.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
+              if (!isNetwork && (selected.indexOf('secrets') !== -1 || selected.indexOf('repo') !== -1)) {
                 if (!paths.length) throw new Error('Add at least one local path for the secrets/repository modules');
               }
-              const excludes = $('#agent-excludes', ctx.overlay).value.split(',').map(function (part) { return part.trim(); }).filter(Boolean);
-              const maxFiles = Number($('#agent-max-files', ctx.overlay).value) || 20000;
+              let target = '';
+              let options = {};
+              if (isNetwork) {
+                target = $('#agent-network-target', ctx.overlay).value.trim();
+                if (!target) throw new Error('Enter a network scan target');
+                options = {
+                  profile: $('#agent-network-profile', ctx.overlay).value || 'common'
+                };
+                const ports = $('#agent-network-ports', ctx.overlay).value.trim();
+                if (ports) options.ports = ports;
+              } else {
+                const excludes = $('#agent-excludes', ctx.overlay).value.split(',').map(function (part) { return part.trim(); }).filter(Boolean);
+                const maxFiles = Number($('#agent-max-files', ctx.overlay).value) || 20000;
+                options = { exclude_paths: excludes, max_files: maxFiles };
+              }
               const result = await post('/agents/' + agent.id + '/scan', {
-                modules: selected, paths: paths,
-                options: { exclude_paths: excludes, max_files: maxFiles }
+                modules: selected, paths: paths, target: target, options: options
               });
               ctx.close();
               toast(result.message || 'Agent scan queued');
@@ -2057,7 +2139,30 @@
             } catch (error) { formError(ctx.overlay, errorText(error)); }
           });
         } }
-      ]
+      ],
+      onMount: function (overlay) {
+        const networkSection = $('#agent-network-section', overlay);
+        const pathsSection = $('#agent-paths-section', overlay);
+        const networkCheck = $('#agent-mod-network', overlay);
+        function syncNetworkMode() {
+          const enabled = !!(networkCheck && networkCheck.checked);
+          networkSection.classList.toggle('hidden', !enabled);
+          pathsSection.classList.toggle('hidden', enabled);
+        }
+        $$('#agent-scan-form input[type=checkbox]', overlay).forEach(function (input) {
+          input.addEventListener('change', function () {
+            if (input.value === 'network' && input.checked) {
+              $$('#agent-scan-form input[type=checkbox]', overlay).forEach(function (other) {
+                if (other !== input) other.checked = false;
+              });
+            } else if (input.value !== 'network' && input.checked && networkCheck) {
+              networkCheck.checked = false;
+            }
+            syncNetworkMode();
+          });
+        });
+        syncNetworkMode();
+      }
     });
   }
 
@@ -2164,7 +2269,7 @@
         '<div class="stat-card ' + (diskPercent > 85 ? 'stat-warn' : '') + '"><div class="stat-label">Disk free</div><div class="stat-value stat-value-text">' + bytes(disk.free) + '</div>' +
           '<div class="stat-foot">' + diskPercent + '% used of ' + bytes(disk.total) + '</div></div>' +
         '<div class="stat-card"><div class="stat-label">Active work</div><div class="stat-value">' + num(counts.scans_active) + '</div>' +
-          '<div class="stat-foot">' + num(queue.jobs_queued) + ' agent jobs queued · ' + num(queue.jobs_running) + ' running</div></div>' +
+          '<div class="stat-foot">' + num(queue.scan_workers || 4) + ' worker slots · ' + num(queue.jobs_queued) + ' agent jobs queued</div></div>' +
       '</div>' +
       '<div class="dash-grid-2" style="margin-bottom:16px">' +
         '<section class="panel"><div class="panel-head"><h2>Health checks</h2><span class="spacer"></span>' +
@@ -2172,6 +2277,7 @@
         '<section class="panel"><div class="panel-head"><h2>Scan queue</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Queued scans</span><span>' + num(queue.scans_queued) + '</span></div>' +
           '<div class="kv"><span>Running scans</span><span>' + num(queue.scans_running) + '</span></div>' +
+          '<div class="kv"><span>Parallel scan workers</span><span>' + num(queue.scan_workers || 4) + ' <span class="muted">(VS_SCAN_WORKERS)</span></span></div>' +
           '<div class="kv"><span>Waiting for agents</span><span>' + num(queue.scans_waiting_agent) + '</span></div>' +
           '<div class="kv"><span>Agent jobs queued</span><span>' + num(queue.jobs_queued) + '</span></div>' +
           '<div class="kv"><span>Agent jobs running</span><span>' + num(queue.jobs_running) + '</span></div>' +

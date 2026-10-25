@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import concurrent.futures
 
+from .config import SCAN_WORKERS
 from .scans import execute_ad_import, execute_agent_result, execute_scan
 
+# One slot per independent server-side scan. SQLite WAL mode lets these workers
+# persist results concurrently. Delegated agent scans are not submitted here;
+# they stay in agent_jobs until the endpoint polls.
 _executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="vulnscan"
+    max_workers=SCAN_WORKERS, thread_name_prefix="vulnscan"
 )
 
 

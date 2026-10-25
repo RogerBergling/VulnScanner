@@ -361,3 +361,65 @@ def scan(ctx: ScanContext) -> ScanResult:
 
     ctx.progress(96, "Finalizing network results")
     return result
+
+
+def _payload_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def process_agent_network_payload(ctx: ScanContext, payload: dict[str, Any]) -> ScanResult:
+    """Turn a delegated TCP probe report from an endpoint agent into findings."""
+    result = ScanResult()
+    if not isinstance(payload.get("network"), dict) and payload.get("error"):
+        raise ValueError(str(payload["error"]))
+    network = payload.get("network")
+    if not isinstance(network, dict):
+        network = payload
+    raw_ports = network.get("open_ports") or []
+    ports: list[PortResult] = []
+    if isinstance(raw_ports, list):
+        for item in raw_ports[:5000]:
+            if not isinstance(item, dict):
+                continue
+            host = str(item.get("host") or "").strip()[:255]
+            if not host:
+                continue
+            try:
+                port = int(item.get("port") or 0)
+            except (TypeError, ValueError):
+                continue
+            if port < 1 or port > 65535:
+                continue
+            ports.append(
+                PortResult(host, port, truncate(str(item.get("banner") or ""), 500))
+            )
+    ctx.log(f"Agent network report contains {len(ports)} open TCP port(s)")
+    warnings = payload.get("warnings") or []
+    if isinstance(warnings, list):
+        for warning in warnings[:20]:
+            ctx.log(truncate(str(warning), 400), "warning")
+    ctx.progress(60, "Evaluating agent network results")
+    _add_port_findings(result, ports, ctx)
+    raw_hosts = network.get("hosts")
+    hosts = raw_hosts[:500] if isinstance(raw_hosts, list) else []
+    result.metadata = {
+        "execution": "agent",
+        "target": ctx.target,
+        "hosts": [str(host)[:255] for host in hosts],
+        "host_count": _payload_int(network.get("host_count")),
+        "ports_scanned": _payload_int(network.get("ports_scanned")),
+        "open_ports": [
+            {
+                "host": item.host,
+                "port": item.port,
+                "service": SERVICE_NAMES.get(item.port, "unknown"),
+            }
+            for item in ports[:1000]
+        ],
+        "agent_reported_at": truncate(str(network.get("finished_at") or ""), 80),
+    }
+    ctx.progress(94, "Finalizing delegated network results")
+    return result

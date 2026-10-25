@@ -5,12 +5,12 @@ from __future__ import annotations
 from app.database import get_db
 
 
-def _enrollment_token(api_client, customer, name="web01"):
+def _enrollment_token(api_client, customer, name="web01", group_id=None):
     response = api_client.post(
         "/api/agents/enrollment-tokens",
         json={
             "customer_id": customer["id"],
-            "group_id": customer["group_id"],
+            "group_id": customer["group_id"] if group_id is None else group_id,
             "agent_name": name,
             "hours": 2,
         },
@@ -19,7 +19,7 @@ def _enrollment_token(api_client, customer, name="web01"):
     return response.json()
 
 
-def _enroll(api_client, token, *, name="", platform="Linux", hostname="web01"):
+def _enroll(api_client, token, *, name="", platform="Linux", hostname="web01", capabilities=None):
     return api_client.post(
         "/api/agent/enroll",
         json={
@@ -28,7 +28,7 @@ def _enroll(api_client, token, *, name="", platform="Linux", hostname="web01"):
             "platform": platform,
             "version": "1.2.3",
             "hostname": hostname,
-            "capabilities": ["system", "packages", "ports"],
+            "capabilities": capabilities if capabilities is not None else ["system", "packages", "ports"],
         },
     )
 
@@ -40,6 +40,9 @@ def test_enrollment_token_commands_and_single_use(api_client, customer):
     assert "vulnscanner_agent.py enroll" in result["linux_command"]
     assert "vulnscanner_agent.py enroll" in result["windows_command"]
     assert result["agent_url"].endswith("/agent/vulnscanner_agent.py")
+    assert "install-windows-agent.ps1" in result["windows_installer_command"]
+    assert result["windows_installer_url"].endswith("/agent/install-windows-agent.ps1")
+    assert result["windows_agent_url"].endswith("/agent/VulnScannerAgent.ps1")
     assert "once" in result["note"]
 
     enrolled = _enroll(api_client, result["token"])
@@ -199,6 +202,244 @@ def test_agent_scan_module_validation(api_client, customer):
     ).status_code == 404
 
 
+def test_network_scan_can_be_delegated_to_agent(api_client, customer, monkeypatch):
+    import app.api as api
+    from app.scans import execute_agent_result
+
+    submitted = []
+    monkeypatch.setattr(api, "submit_scan", lambda *args, **kwargs: submitted.append(args))
+
+    token = _enrollment_token(api_client, customer)["token"]
+    agent = _enroll(
+        api_client,
+        token,
+        platform="Windows",
+        hostname="jump01",
+        capabilities=["system", "ports", "network"],
+    ).json()
+    headers = {"X-Agent-Token": agent["token"]}
+
+    response = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "group_id": customer["group_id"],
+            "scan_type": "network",
+            "target": "10.0.0.0/30",
+            "agent_id": agent["agent_id"],
+            "options": {"profile": "web", "ports": "22,80,443"},
+        },
+    )
+    assert response.status_code == 201, response.text
+    scan = response.json()
+    assert scan["scan_type"] == "network"
+    assert scan["status"] == "waiting_agent"
+    assert scan["agent_id"] == agent["agent_id"]
+    assert submitted == []
+
+    with get_db() as conn:
+        job_row = conn.execute(
+            "SELECT * FROM agent_jobs WHERE scan_id = ?", (scan["id"],)
+        ).fetchone()
+    assert job_row is not None
+    payload = __import__("json").loads(job_row["payload"])
+    assert payload["modules"] == ["network"]
+    assert payload["target"] == "10.0.0.0/30"
+    assert payload["options"]["profile"] == "web"
+
+    claimed = api_client.post("/api/agent/jobs/next", headers=headers).json()["job"]
+    assert claimed["scan_id"] == scan["id"]
+    assert claimed["payload"]["modules"] == ["network"]
+
+    report = {
+        "network": {
+            "hosts": ["10.0.0.1", "10.0.0.2"],
+            "host_count": 2,
+            "ports_scanned": 3,
+            "open_ports": [
+                {"host": "10.0.0.1", "port": 22, "service": "ssh", "banner": "SSH-2.0-OpenSSH_9.0"},
+                {"host": "10.0.0.2", "port": 6379, "service": "redis", "banner": "- NOAUTH required"},
+            ],
+            "finished_at": "2026-01-01T00:00:00+00:00",
+        }
+    }
+    duplicate = api_client.post(
+        f"/api/agent/jobs/{claimed['id']}/result",
+        headers=headers,
+        json={"status": "completed", "results": report},
+    )
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["accepted"] is True
+
+    execute_agent_result(scan["id"], report, claimed["id"])
+    detail = api_client.get(f"/api/scans/{scan['id']}").json()
+    assert detail["status"] == "completed"
+    assert detail["summary"]["total"] >= 2
+    by_key = {finding["location"]: finding for finding in detail["findings"]}
+    assert "10.0.0.1:22" in by_key
+    assert by_key["10.0.0.2:6379"]["severity"] == "critical"
+    assert detail["summary"]["metadata"]["execution"] == "agent"
+    with get_db() as conn:
+        job_status = conn.execute(
+            "SELECT status FROM agent_jobs WHERE id = ?", (claimed["id"],)
+        ).fetchone()["status"]
+    assert job_status == "completed"
+
+
+def test_agent_network_scan_module_and_validation(api_client, customer):
+    token = _enrollment_token(api_client, customer)["token"]
+    agent = _enroll(
+        api_client, token, platform="Linux", capabilities=["system", "network"]
+    ).json()
+
+    missing_target = api_client.post(
+        f"/api/agents/{agent['agent_id']}/scan",
+        json={"modules": ["network"], "target": ""},
+    )
+    assert missing_target.status_code == 400
+
+    mixed = api_client.post(
+        f"/api/agents/{agent['agent_id']}/scan",
+        json={"modules": ["network", "system"], "target": "10.0.0.1"},
+    )
+    assert mixed.status_code == 400
+
+    created = api_client.post(
+        f"/api/agents/{agent['agent_id']}/scan",
+        json={
+            "modules": ["network"],
+            "target": "10.0.0.1",
+            "options": {"profile": "common"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["scan"]["scan_type"] == "network"
+    assert payload["scan"]["status"] == "waiting_agent"
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT scan_type FROM scans WHERE id = ?", (payload["scan_id"],)
+        ).fetchone()
+    assert row["scan_type"] == "network"
+
+    legacy = _enroll(
+        api_client,
+        _enrollment_token(api_client, customer, name="legacy")["token"],
+        name="legacy",
+        capabilities=["system"],
+    ).json()
+    rejected = api_client.post(
+        f"/api/agents/{legacy['agent_id']}/scan",
+        json={"modules": ["network"], "target": "10.0.0.1"},
+    )
+    assert rejected.status_code == 400
+    assert "network" in rejected.json()["detail"]
+
+    wrong_customer = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "scan_type": "network",
+            "target": "10.0.0.1",
+            "agent_id": "not-an-agent",
+        },
+    )
+    assert wrong_customer.status_code == 404
+
+    non_network = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "scan_type": "web",
+            "target": "https://example.test",
+            "agent_id": agent["agent_id"],
+        },
+    )
+    assert non_network.status_code == 400
+
+
+def test_delegated_network_scan_requires_capability_and_bounded_cidr(api_client, customer):
+    no_caps = _enroll(
+        api_client,
+        _enrollment_token(api_client, customer, name="no-caps")["token"],
+        name="no-caps",
+        capabilities=[],
+    ).json()
+    empty_capabilities = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "scan_type": "network",
+            "target": "10.0.0.1",
+            "agent_id": no_caps["agent_id"],
+        },
+    )
+    assert empty_capabilities.status_code == 400
+    assert "network" in empty_capabilities.json()["detail"]
+
+    capable = _enroll(
+        api_client,
+        _enrollment_token(api_client, customer, name="neter")["token"],
+        name="neter",
+        capabilities=["system", "network"],
+    ).json()
+    oversized = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "scan_type": "network",
+            "target": "10.0.0.0/8",
+            "agent_id": capable["agent_id"],
+        },
+    )
+    assert oversized.status_code == 400
+    assert "limit is 256" in oversized.json()["detail"]
+
+    via_agent = api_client.post(
+        f"/api/agents/{capable['agent_id']}/scan",
+        json={"modules": ["network"], "target": "10.0.0.0/8"},
+    )
+    assert via_agent.status_code == 400
+    assert "limit is 256" in via_agent.json()["detail"]
+
+
+def test_delegated_network_scan_uses_agent_group(api_client, customer):
+    group = api_client.post(
+        f"/api/customers/{customer['id']}/groups", json={"name": "Jump hosts"}
+    ).json()
+    agent = _enroll(
+        api_client,
+        _enrollment_token(api_client, customer, name="jump", group_id=group["id"])["token"],
+        name="jump",
+        capabilities=["network"],
+    ).json()
+
+    created = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "scan_type": "network",
+            "target": "10.0.0.1",
+            "agent_id": agent["agent_id"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["group_id"] == group["id"]
+
+    cross_group = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer["id"],
+            "group_id": customer["group_id"],
+            "scan_type": "network",
+            "target": "10.0.0.1",
+            "agent_id": agent["agent_id"],
+        },
+    )
+    assert cross_group.status_code == 400
+
+
 def test_agent_job_result_failure_marks_scan_failed(api_client, customer):
     token = _enrollment_token(api_client, customer)["token"]
     agent = _enroll(api_client, token).json()
@@ -310,6 +551,8 @@ def test_agent_detail_configuration_and_token_rotation(api_client, customer):
     assert "update-token" in payload["linux_command"]
     assert "sudo -u vulnscanner /opt/vulnscanner-agent" in payload["linux_command"]
     assert "update-token" in payload["windows_command"]
+    assert "VulnScannerAgent.ps1" in payload["windows_agent_command"]
+    assert "-Action Configure" in payload["windows_agent_command"]
     assert api_client.post(
         "/api/agent/heartbeat", headers=headers, json={}
     ).status_code == 401

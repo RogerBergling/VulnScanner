@@ -37,7 +37,7 @@ VulnScanner is deliberately small and local-first:
 │  app/main.py       security headers, Basic auth, static files    │
 │  app/api.py        REST endpoints, validation, imports           │
 │  app/scans.py      lifecycle, persistence, status carry-over     │
-│  app/jobs.py       4-thread background executor                  │
+│  app/jobs.py       configurable background executor              │
 │  app/agents.py     enrolment, heartbeat, jobs, agent scans       │
 │  app/security.py   token generation, hashing, agent auth         │
 │  app/reporting.py  JSON, CSV and standalone HTML reports         │
@@ -66,14 +66,14 @@ VulnScanner is deliberately small and local-first:
 | `app/main.py` | Creates the FastAPI application, initialises the database, recovers interrupted scans, applies security headers and optional Basic authentication, and serves the SPA/manual/downloads. |
 | `app/api.py` | Defines `/api` routes, request schemas, target validation, option filtering, imports, reports, agent management, server diagnostics, backups and settings. |
 | `app/scans.py` | Turns a queued scan into a running scan, dispatches the correct engine, decorates findings with KEV data, persists results, applies finding-status carry-over and handles cancellation/failure. |
-| `app/jobs.py` | Small `ThreadPoolExecutor` (four workers by default) that runs scan, AD import and agent-result tasks off the request thread. |
+| `app/jobs.py` | Small `ThreadPoolExecutor` that runs scan, AD import and agent-result tasks off the request thread. The pool size is `VS_SCAN_WORKERS` (default 4, range 1-32). |
 | `app/agents.py` | Creates agents and their assets, processes heartbeats and jobs, creates agent scans, renames/moves agents, rotates tokens and handles revocation. |
 | `app/security.py` | Generates enrolment/agent tokens, stores only SHA-256 hashes and authenticates agent requests. |
 | `app/scanners/` | Independent scan engines and shared finding types. |
 | `app/reporting.py` | Builds JSON, CSV and self-contained HTML reports on demand. |
 | `app/database.py` | SQLite schema, connections, transactions, settings helpers and event logging. |
 | `app/static/` | Dependency-free single-page interface. |
-| `agent/` | Cross-platform agent, installers and read-only AD collector. |
+| `agent/` | Python and PowerShell agents, installers and read-only AD collector. |
 
 ## 4. Request and scan lifecycle
 
@@ -82,12 +82,14 @@ VulnScanner is deliberately small and local-first:
 1. The SPA posts to `POST /api/scans`.
 2. `app/api.py` validates the customer/group/asset relationship, normalises the
    target and filters options to those supported by the scan type.
-3. A scan row is inserted with `status = "queued"` and an empty summary.
-4. The scan is submitted to the background executor. The HTTP response returns
-   immediately with the queued scan.
-5. If an agent module scan was requested, the scan is created with
-   `status = "waiting_agent"` and an `agent_jobs` row is queued instead. The
-   endpoint returns without waiting for the endpoint.
+3. A scan row is inserted with `status = "queued"` (or `waiting_agent` for a
+   delegated network scan) and an empty summary.
+4. The scan is submitted to the background executor up to `VS_SCAN_WORKERS`
+   concurrent scans. The HTTP response returns immediately with the queued scan.
+5. If an agent module scan or delegated network scan was requested, the scan is
+   created with `status = "waiting_agent"` and an `agent_jobs` row is queued
+   instead. The server executor does not run it; the endpoint returns without
+   waiting for the endpoint.
 
 ### 4.2 Executing a built-in scan
 
@@ -179,7 +181,7 @@ directly.
 | Engine | Module | Approach |
 | --- | --- | --- |
 | Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei. |
-| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, optional HTTP/TLS inspection and Nmap XML parsing. |
+| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, optional HTTP/TLS inspection and Nmap XML parsing. The same module normalises delegated agent results. |
 | Repository | `scanners/repository.py` | Local path or GitHub clone, then secrets, dependencies and source review. Temporary clones are deleted in a `finally` block. |
 | Dependencies | `scanners/dependencies.py` | Manifest/lockfile parsers for npm, Python, Go, Rust, PHP, Ruby, Java and .NET; OSV.dev batch queries; optional `osv-scanner` supplement. |
 | Secrets | `scanners/secrets.py` | Pattern and entropy checks with placeholder filtering; optional Gitleaks. |
@@ -219,19 +221,27 @@ logged but do not fail the scan.
    only the SHA-256 hash and creates an asset in the selected group.
 3. The agent calls the heartbeat and next-job endpoints over outbound HTTP(S).
 4. A claimed job moves from `queued` to `running` and carries the module list,
-   selected paths and options.
+   selected paths, target and options.
 5. The agent collects data locally and uploads one JSON document.
 6. The server validates size and identity, processes the payload through
-   `scanners/agent.py`, persists findings and completes both the job and scan.
+   `scanners/agent.py` (or `scanners/network.py` for a delegated network scan),
+   persists findings and completes both the job and scan.
 7. Failed uploads are retried from `pending-result.json`. Terminal jobs return a
    duplicate acknowledgement instead of creating a second finding set.
+
+A delegated network scan is created as a `waiting_agent` scan with an
+`agent_jobs` row whose payload has `modules: ["network"]` and a `target`. It does
+not enter the server scan pool. The endpoint performs TCP connect probes from
+its own network position and uploads open ports, service guesses and banners.
 
 Revoking an agent invalidates its token, cancels queued/running jobs and closes
 waiting scans. Historical findings are retained.
 
-The agent is a separate Python file using only the standard library so it can be
-installed without installing the server's dependencies. See
-[AGENT_GUIDE.md](AGENT_GUIDE.md).
+There are two agents. `agent/VulnScannerAgent.ps1` is a native PowerShell agent
+for Windows client and server editions and does not require Python.
+`agent/vulnscanner_agent.py` is the standard-library Python agent for
+Linux/macOS and existing Windows deployments. Both use the same enrolment,
+heartbeat, job and result contract. See [AGENT_GUIDE.md](AGENT_GUIDE.md).
 
 ## 8. Active Directory path
 
@@ -266,7 +276,11 @@ scripts, no separate frontend build, bundler or CDN is required.
 The executor is in-process. This is intentional: it avoids an extra service and
 keeps installation simple. Consequences:
 
-- The practical concurrency limit is four scans at once.
+- Server-side scan concurrency is set by `VS_SCAN_WORKERS` (default 4, range
+  1-32). Additional scans stay queued.
+- Delegated network scans do not use a server worker. They are `waiting_agent`
+  scans backed by an `agent_jobs` row; the selected endpoint claims the job on
+  its next poll and uploads the result.
 - A process crash loses in-flight work.
 - On startup, `recover_interrupted_scans()` marks any `queued` or `running` scans
   as failed with an "Interrupted" stage and an explanatory event. Start a new
@@ -286,10 +300,12 @@ keeps installation simple. Consequences:
 
 ### Adding an agent module
 
-1. Collect data in `agent/vulnscanner_agent.py` and include it in the result
-   document.
+1. Collect data in `agent/vulnscanner_agent.py` (and
+   `agent/VulnScannerAgent.ps1` when the module should be available on Windows)
+   and include it in the result document.
 2. Allow the module in the agent-scan validation in `app/api.py`.
-3. Normalise it in `app/scanners/agent.py`.
+3. Normalise it in `app/scanners/agent.py`, or add a dedicated normaliser such as
+   `process_agent_network_payload` in `app/scanners/network.py`.
 4. Document the module and retest job retry/idempotency.
 
 ### Adding a tool integration
@@ -307,7 +323,9 @@ keeps installation simple. Consequences:
 - No role-based access control, per-user accounts or approval workflow.
 - No exploitation, credential brute forcing, authenticated web crawling or
   post-exploitation.
-- No distributed scanning, horizontal worker scaling or external job queue.
+- No arbitrary distributed scanning, horizontal worker scaling or external job
+  queue. Network scans can be delegated to enrolled agents, but there is no
+  central pool of scan workers beyond `VS_SCAN_WORKERS`.
 - No automatic remediation.
 - Built-in checks are conservative and may miss issues that a dedicated,
   carefully tuned tool would find. Findings require validation.
