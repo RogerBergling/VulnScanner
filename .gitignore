@@ -1,0 +1,43 @@
+# Miljoefiler och hemligheter
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_ed25519
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+
+# Node / build
+node_modules/
+dist/
+build/
+
+# Lokala editorer och loggar
+.vscode/
+.idea/
+*.log
+
+# Runtimedata
+data/
+*.db
+*.db-wal
+*.db-shm
+reports/
+clones/
+
+# Operativsystem
+.DS_Store
+Thumbs.db
+
