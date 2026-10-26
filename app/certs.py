@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography import x509
@@ -121,8 +121,8 @@ def _generate_self_signed(cert_path: str | None = None, key_path: str | None = N
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow())
-        .not_valid_after(datetime.utcnow() + timedelta(days=365))
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.DNSName(cn)]), critical=False)
         .sign(key, hashes.SHA256())
     )
@@ -173,8 +173,8 @@ def _generate_internal_ca() -> None:
         .issuer_name(ca_name)
         .public_key(ca_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow())
-        .not_valid_after(datetime.utcnow() + timedelta(days=3650))
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=3650))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(ca_key, hashes.SHA256())
     )
@@ -201,8 +201,8 @@ def _generate_internal_ca() -> None:
         .issuer_name(ca_name)
         .public_key(server_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow())
-        .not_valid_after(datetime.utcnow() + timedelta(days=365))
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.DNSName("vulnscanner.local")]), critical=False)
         .sign(ca_key, hashes.SHA256())
     )

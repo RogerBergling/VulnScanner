@@ -2832,13 +2832,13 @@
       const certUpload = event.target.closest('[data-action="cert-upload-web"]');
       if (certUpload) { event.preventDefault(); openCertUploadModal('web'); return; }
       const certRegen = event.target.closest('[data-action="cert-regenerate-web"]');
-      if (certRegen) { event.preventDefault(); confirmAction('Regenerate a new self-signed web certificate? The old one will be replaced.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate', { mode: 'web' }); toast('Web certificate regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
+      if (certRegen) { event.preventDefault(); confirmAction('Regenerate a new self-signed web certificate? The old one will be replaced.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate?mode=web'); toast('Web certificate regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
       const internalUpload = event.target.closest('[data-action="cert-upload-internal"]');
       if (internalUpload) { event.preventDefault(); openCertUploadModal('internal'); return; }
       const internalRegen = event.target.closest('[data-action="cert-regenerate-internal"]');
-      if (internalRegen) { event.preventDefault(); confirmAction('Regenerate a new internal CA and server certificate? This will replace the existing internal certificates.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate', { mode: 'internal' }); toast('Internal certificates regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
+      if (internalRegen) { event.preventDefault(); confirmAction('Regenerate a new internal CA and server certificate? This will replace the existing internal certificates.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate?mode=internal'); toast('Internal certificates regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
       const allRegen = event.target.closest('[data-action="cert-regenerate-all"]');
-      if (allRegen) { event.preventDefault(); confirmAction('Regenerate all certificates? This will replace both the web and internal certificates.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate', { mode: 'all' }); toast('All certificates regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
+      if (allRegen) { event.preventDefault(); confirmAction('Regenerate all certificates? This will replace both the web and internal certificates.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate?mode=all'); toast('All certificates regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
     });
   }
 

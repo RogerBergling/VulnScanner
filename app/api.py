@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, UploadFile, File
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from . import __version__
@@ -2246,8 +2246,15 @@ def cert_status() -> dict[str, Any]:
 
 
 @router.post("/certs/regenerate")
-def cert_regenerate(mode: str = "web") -> dict[str, Any]:
-    """Regenerate the web certificate, the internal CA, or both."""
+def cert_regenerate(
+    mode: str | None = Query(default=None),
+    payload: dict[str, Any] | None = Body(default=None),
+) -> dict[str, Any]:
+    """Regenerate the web certificate, the internal CA, or both.
+
+    ``mode`` is accepted as a query parameter (documented API) and, for
+    backwards compatibility with older UI builds, as a JSON body field.
+    """
     from .certs import (
         INTERNAL_SERVER_CERT,
         INTERNAL_SERVER_KEY,
@@ -2257,7 +2264,12 @@ def cert_regenerate(mode: str = "web") -> dict[str, Any]:
         _generate_self_signed,
     )
 
-    mode = (mode or "").strip().lower()
+    requested = mode
+    if requested is None and isinstance(payload, dict):
+        candidate = payload.get("mode")
+        if isinstance(candidate, str):
+            requested = candidate
+    mode = (requested or "web").strip().lower()
     if mode not in {"web", "internal", "all"}:
         raise HTTPException(status_code=400, detail="mode must be 'web', 'internal', or 'all'")
 
@@ -2290,7 +2302,7 @@ def cert_regenerate(mode: str = "web") -> dict[str, Any]:
 def cert_upload(
     cert_file: UploadFile = File(...),
     key_file: UploadFile = File(...),
-    mode: str = "web",
+    mode: str = Form("web"),
 ) -> dict[str, Any]:
     from .certs import (
         INTERNAL_SERVER_CERT,

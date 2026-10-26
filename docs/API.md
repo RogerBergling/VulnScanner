@@ -1100,6 +1100,10 @@ terminate TLS at a reverse proxy and set `VS_SSL=false`.
 | `POST /api/certs/regenerate?mode=all` | Regenerate both the web and internal certificate sets. |
 | `POST /api/certs/upload` | Multipart upload with `cert_file`, `key_file`, and `mode` (`web` or `internal`). |
 
+For `POST /api/certs/regenerate`, `mode` can be a query parameter
+(`?mode=internal`) or a JSON body field (`{"mode": "internal"}`); the query
+parameter takes precedence when both are supplied. The UI uses the query form.
+
 `POST /api/certs/upload` accepts PEM files up to 1 MiB each, rejects encrypted
 private keys, and verifies that the certificate and key match. Keys are written
 with mode `0600`; certificates with `0644`. Restart the server after replacing
