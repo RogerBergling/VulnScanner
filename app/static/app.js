@@ -2722,8 +2722,8 @@
           '<div style="margin-top:14px"><button class="btn" id="sync-kev">Sync catalogue now</button></div>' +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>SSL/TLS Certificates</h2></div><div class="panel-body">' +
-          '<p class="muted small" style="margin-top:0">Manage the certificates used by the optional built-in HTTPS listener. ' +
-          'Start the server with <span class="mono">VS_SSL=true</span> to use the web certificate. ' +
+          '<p class="muted small" style="margin-top:0">Manage the certificates used by the built-in HTTPS listener. ' +
+          'The listener is enabled by default (<span class="mono">VS_SSL=true</span>); set <span class="mono">VS_SSL=false</span> for plain HTTP behind a TLS reverse proxy. ' +
           'The internal CA is used for agent communication and mTLS. Restart the server after changing the web certificate.</p>' +
           '<div class="cert-grid">' +
           '<div class="cert-section"><h3>Web Certificate (HTTPS)</h3>' +

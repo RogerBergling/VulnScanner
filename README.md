@@ -50,28 +50,35 @@ run.bat
 ```
 
 The launcher creates `.venv`, installs the runtime dependencies, and starts
-Uvicorn. Open <http://127.0.0.1:8765>.
+Uvicorn. Open <https://127.0.0.1:8765> and accept the self-signed certificate
+warning on first use.
 
-The default listener is plain HTTP on loopback, which is suitable for a
-single-user workstation or a reverse-proxied deployment. For a local
-self-signed HTTPS listener, set `VS_SSL=true` in `.env` before starting; the
-server creates a certificate under `data/certs/` and prints the `https://` URL.
-For anything reachable from another machine, use a TLS-terminating reverse
-proxy (see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
+The default listener is HTTPS on loopback with a self-signed certificate, which
+is suitable for a single-user workstation. The certificate and key are created
+under `data/certs/` on first start. Set `VS_SSL=false` in `.env` for plain HTTP,
+for example when a TLS-terminating reverse proxy is in front of the app. For
+anything reachable from another machine, use a reverse proxy for production TLS
+(see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
 
 You can set or change the dashboard password from **Settings → Security**; it is
 saved to `.env` and applied immediately.
+
+If the browser reports `SSL_ERROR_RX_RECORD_TOO_LONG`, you are using `https://`
+against a server that is running plain HTTP. Start the server with `./run.sh`
+(the default is HTTPS) or browse `http://127.0.0.1:8765` when `VS_SSL=false`.
 
 Manual installation:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
+.venv/bin/python -m app.main
 ```
 
-The API reference is available at <http://127.0.0.1:8765/api/docs>. The full
-user manual is at <http://127.0.0.1:8765/manual> and in
+`python -m app.main` honors `VS_SSL`; use `VS_SSL=false .venv/bin/python -m app.main`
+for plain HTTP. The API reference is available at
+<https://127.0.0.1:8765/api/docs>. The full user manual is at
+<https://127.0.0.1:8765/manual> and in
 [docs/USER_MANUAL.md](docs/USER_MANUAL.md).
 
 ## First scan
@@ -146,7 +153,7 @@ Environment variables can also be exported directly.
 | --- | --- | --- |
 | `VS_HOST` | `127.0.0.1` | Bind address. Keep loopback unless protected by a firewall/reverse proxy. |
 | `VS_PORT` | `8765` | HTTP/HTTPS port. |
-| `VS_SSL` | `false` | Enable the built-in HTTPS listener with a self-signed certificate under `data/certs/`. Use a reverse proxy for production TLS. |
+| `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `data/certs/`. Set to `false` for plain HTTP behind a TLS reverse proxy. |
 | `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. |
 | `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. Can also be set from Settings → Security. |
 | `VS_DATA_DIR` | `./data` | Database, reports and temporary clone directory. |

@@ -3,7 +3,7 @@
 The API is served under `/api`. Interactive OpenAPI documentation is available
 at `/api/docs` and the schema at `/api/openapi.json`.
 
-- Base URL: `http://127.0.0.1:8765`
+- Base URL: `https://127.0.0.1:8765` (or `http://127.0.0.1:8765` when `VS_SSL=false`). The built-in certificate is self-signed, so use `curl -k` or trust `data/certs/server.crt` locally.
 - Content type: `application/json` unless noted.
 - Timestamps: ISO 8601 UTC with an offset, for example
   `2026-01-02T03:04:05+00:00`.
@@ -22,7 +22,7 @@ authentication, except these public prefixes:
 - `/api/openapi.json`
 
 ```bash
-curl -u admin:change-me http://127.0.0.1:8765/api/customers
+curl -k -u admin:change-me https://127.0.0.1:8765/api/customers
 ```
 
 Agent endpoints use an agent token instead:
@@ -708,9 +708,9 @@ Returns `201`:
   "linux_command": "curl -fsSL …",
   "windows_command": "Invoke-WebRequest …",
   "windows_installer_command": "Invoke-WebRequest … install-windows-agent.ps1 …",
-  "agent_url": "http://127.0.0.1:8765/agent/vulnscanner_agent.py",
-  "windows_agent_url": "http://127.0.0.1:8765/agent/VulnScannerAgent.ps1",
-  "windows_installer_url": "http://127.0.0.1:8765/agent/install-windows-agent.ps1",
+  "agent_url": "https://127.0.0.1:8765/agent/vulnscanner_agent.py",
+  "windows_agent_url": "https://127.0.0.1:8765/agent/VulnScannerAgent.ps1",
+  "windows_installer_url": "https://127.0.0.1:8765/agent/install-windows-agent.ps1",
   "note": "The token can be used once and is shown only now. …"
 }
 ```
@@ -1088,9 +1088,9 @@ This endpoint requires outbound network access.
 
 ### Certificate management
 
-Certificates are only needed for the optional built-in HTTPS listener
-(`VS_SSL=true`) or for agent mTLS. For production web TLS, terminate TLS at a
-reverse proxy instead.
+Certificates are only needed for the built-in HTTPS listener
+(`VS_SSL=true`, enabled by default) or for agent mTLS. For production web TLS,
+terminate TLS at a reverse proxy and set `VS_SSL=false`.
 
 | Endpoint | Description |
 | --- | --- |
@@ -1142,18 +1142,19 @@ unknown names return `404`.
 ## 14. Example client flow
 
 ```bash
-BASE=http://127.0.0.1:8765
+BASE=https://127.0.0.1:8765
+CURL="curl -sk"   # -k accepts the self-signed certificate; use http:// and drop -k with VS_SSL=false
 
 # 1. Create a customer
-curl -s -X POST "$BASE/api/customers" \
+$CURL -X POST "$BASE/api/customers" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Acme"}'
 
 # 2. Resolve the default group
-curl -s "$BASE/api/customers/1"
+$CURL "$BASE/api/customers/1"
 
 # 3. Start a server-side network scan
-curl -s -X POST "$BASE/api/scans" \
+$CURL -X POST "$BASE/api/scans" \
   -H 'Content-Type: application/json' \
   -d '{
     "customer_id": 1,
@@ -1164,7 +1165,7 @@ curl -s -X POST "$BASE/api/scans" \
   }'
 
 # 3b. Or delegate the scan to an enrolled agent
-curl -s -X POST "$BASE/api/scans" \
+$CURL -X POST "$BASE/api/scans" \
   -H 'Content-Type: application/json' \
   -d '{
     "customer_id": 1,
@@ -1176,11 +1177,11 @@ curl -s -X POST "$BASE/api/scans" \
   }'
 
 # 4. Poll the scan
-curl -s "$BASE/api/scans/1"
+$CURL "$BASE/api/scans/1"
 
 # 5. Export results
-curl -s "$BASE/api/scans/1/export?format=json" -o scan-1.json
-curl -s "$BASE/api/scans/1/export?format=csv" -o scan-1.csv
+$CURL "$BASE/api/scans/1/export?format=json" -o scan-1.json
+$CURL "$BASE/api/scans/1/export?format=csv" -o scan-1.csv
 ```
 
 For agent and AD examples, see [AGENT_GUIDE.md](AGENT_GUIDE.md) and the OpenAPI

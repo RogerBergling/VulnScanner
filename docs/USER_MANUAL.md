@@ -30,9 +30,9 @@ cp .env.example .env
 ```
 
 `run.sh` creates `.venv`, installs `requirements.txt` when needed, loads `.env`
-and starts Uvicorn on `VS_HOST:VS_PORT` using HTTP by default. Set
-`VS_SSL=true` in `.env` to start a local HTTPS listener with a self-signed
-certificate instead.
+and starts Uvicorn on `VS_HOST:VS_PORT` using HTTPS by default with a
+self-signed certificate. Set `VS_SSL=false` in `.env` for plain HTTP, for
+example when a TLS-terminating reverse proxy is in front of the app.
 
 ### Windows
 
@@ -44,8 +44,16 @@ run.bat
 ### Manual start
 
 ```bash
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
+.venv/bin/python -m app.main
 ```
+
+Use `VS_SSL=false .venv/bin/python -m app.main` for plain HTTP. Starting
+`uvicorn app.main:app` directly bypasses the `VS_SSL` handling; pass
+`--ssl-certfile` and `--ssl-keyfile` yourself if you start Uvicorn that way.
+
+If the browser reports `SSL_ERROR_RX_RECORD_TOO_LONG`, you are using `https://`
+against a plain HTTP listener. Start with `./run.sh` (HTTPS by default) or use
+`http://` when `VS_SSL=false`.
 
 Stop the server with `Ctrl+C`. Background scans are marked as interrupted on
 the next start; restart the affected scans from the scan page.
@@ -56,8 +64,9 @@ If `VS_ADMIN_PASSWORD` is empty, no login is required. This is convenient on a
 single-user workstation bound to `127.0.0.1`, but it is not safe on a shared
 network. Set a password from **Settings → Security** (saved to `.env` and
 applied immediately) or in `.env`, and preferably place the service behind a TLS
-reverse proxy before remote use. For local HTTPS, set `VS_SSL=true`; the
-built-in listener uses a self-signed certificate and browsers will warn.
+reverse proxy before remote use. The default local listener uses HTTPS with a
+self-signed certificate, so browsers will warn; set `VS_SSL=false` to use HTTP
+on loopback instead.
 
 ## 3. Interface tour
 

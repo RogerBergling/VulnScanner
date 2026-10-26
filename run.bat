@@ -24,7 +24,7 @@ if not exist .venv\.deps-ok (
 
 if not defined VS_HOST set "VS_HOST=127.0.0.1"
 if not defined VS_PORT set "VS_PORT=8765"
-if not defined VS_SSL set "VS_SSL=false"
+if not defined VS_SSL set "VS_SSL=true"
 
 set "SCHEME=http"
 if /I "%VS_SSL%"=="1" set "SCHEME=https"

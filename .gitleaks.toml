@@ -20,3 +20,9 @@ regexes = [
   '''aB3dE5fG7hJ9kL2mN4pQ6rS8''',
   '''admin:change-me''',
 ]
+
+[[allowlists]]
+description = "Gitignored runtime data, including locally generated certificates"
+paths = [
+  '''^data/''',
+]

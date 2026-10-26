@@ -113,7 +113,7 @@ separate scan.
 Open **Settings -> Sync KEV catalogue**, or call:
 
 ```bash
-curl -u admin:password -X POST http://127.0.0.1:8765/api/settings/kev/sync
+curl -k -u admin:password -X POST https://127.0.0.1:8765/api/settings/kev/sync
 ```
 
 The server downloads:

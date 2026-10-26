@@ -40,7 +40,7 @@ async def lifespan(_app: FastAPI):
     start_scheduler()
     data_dir()
     admin_password = os.getenv("VS_ADMIN_PASSWORD")
-    scheme = "https" if os.getenv("VS_SSL", "false").lower() in {"1", "true", "yes", "on"} else "http"
+    scheme = "https" if os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"} else "http"
     logger.info("VulnScanner %s starting on %s://%s:%s", __version__, scheme, HOST, PORT)
     logger.info("Database: %s", data_dir() / "vulnscanner.db")
     if admin_password:
@@ -156,7 +156,7 @@ app.mount("/agent", StaticFiles(directory=AGENT_DIR), name="agent")
 def run() -> None:
     import uvicorn
 
-    ssl_enabled = os.getenv("VS_SSL", "false").lower() in {"1", "true", "yes", "on"}
+    ssl_enabled = os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"}
     log_level = os.getenv("VS_LOG_LEVEL", "info").lower()
     if ssl_enabled:
         from .certs import get_cert_paths

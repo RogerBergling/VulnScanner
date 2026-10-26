@@ -89,14 +89,16 @@ VulnScanner has:
 - No login lockout or built-in rate limiting.
 - No application-level CSRF tokens.
 
-VulnScanner includes an **optional** built-in HTTPS listener (`VS_SSL=true`)
-that uses a self-signed certificate. It is intended for local testing and
-small trusted networks, not as a replacement for a managed certificate. Start
-it with `VS_SSL=true ./run.sh` (or `set VS_SSL=true` before `run.bat`); the
-certificate and key are created under `data/certs/` and the browser will show a
-self-signed warning. For any service reachable from another machine, use a
-TLS-terminating reverse proxy for certificate management, access control, rate
-limiting and request logging. Do not expose plain HTTP to an untrusted network.
+VulnScanner includes a built-in HTTPS listener that is **enabled by default**
+(`VS_SSL=true`) and uses a self-signed certificate. It is intended for local
+testing and small trusted networks, not as a replacement for a managed
+certificate. The certificate and key are created under `data/certs/` and the
+browser will show a self-signed warning. The launchers `run.sh` and `run.bat`
+enable it automatically. Set `VS_SSL=false` when a TLS-terminating reverse proxy
+handles HTTPS, or when you deliberately want plain HTTP on loopback. For any
+service reachable from another machine, use a TLS-terminating reverse proxy for
+certificate management, access control, rate limiting and request logging. Do
+not expose plain HTTP to an untrusted network.
 
 ### Reverse proxy example
 
@@ -149,8 +151,8 @@ the agent supports it; those endpoints authenticate with agent tokens.
 
 - Bind to `127.0.0.1`.
 - Basic auth is optional but recommended.
-- Use plain HTTP on loopback (default), or set `VS_SSL=true` for a local
-  self-signed HTTPS listener.
+- Use the default HTTPS listener with a self-signed certificate, or set
+  `VS_SSL=false` for plain HTTP on loopback.
 - Keep the project directory and data directory readable only by your account.
 - Run scans locally. Optional tools can be installed per user.
 - Back up `data/` before upgrades.
@@ -421,7 +423,8 @@ For a team deployment:
 Before exposing the service beyond localhost:
 
 - [ ] `VS_HOST=127.0.0.1` and a TLS reverse proxy in front for remote access.
-- [ ] `VS_SSL=false` unless you intentionally use the built-in self-signed listener.
+- [ ] `VS_SSL=false` when the reverse proxy terminates TLS; leave the default
+      `true` only for the local self-signed listener.
 - [ ] `VS_ADMIN_PASSWORD` set to a long, unique value.
 - [ ] Reverse proxy requires HTTPS and restricts source networks.
 - [ ] Firewall allows only the proxy and required agent paths.
@@ -442,9 +445,10 @@ Before exposing the service beyond localhost:
 
 - Basic auth is the only built-in authentication mechanism.
 - There is no RBAC, no per-user attribution and no approval workflow.
-- The built-in TLS listener uses a self-signed certificate and is optional;
-  there is no WAF, rate limiter or account lockout. Use a reverse proxy for
-  production TLS and edge controls.
+- The built-in TLS listener uses a self-signed certificate and is enabled by
+  default for local use; disable it with `VS_SSL=false` behind a TLS reverse
+  proxy. There is no WAF, rate limiter or account lockout. Use a reverse proxy
+  for production TLS and edge controls.
 - There are no application-level CSRF tokens. The JSON API, same-origin design
   and CSP reduce exposure, but a proxy with strict origin policy is recommended.
 - Scan workers are in-process and are lost on restart.
