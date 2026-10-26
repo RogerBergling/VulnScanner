@@ -27,6 +27,7 @@ inbound firewall rules on scanned endpoints.
 
 > **Authorised use only.** Only scan systems you own or have explicit written
 > permission to test. See [AUTHORIZED_USE.md](docs/AUTHORIZED_USE.md).
+<img width="3433" height="1084" alt="image" src="https://github.com/user-attachments/assets/e7508247-6842-44d4-b1e7-7886436b26cb" />
 
 ## Quick start
 
