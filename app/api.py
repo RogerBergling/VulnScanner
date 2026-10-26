@@ -86,6 +86,7 @@ from .schemas import (
     AssetCreate,
     AssetCredentialUpdate,
     AssetUpdate,
+    BindAddressUpdate,
     CredentialCreate,
     CredentialUpdate,
     CustomerCreate,
@@ -1927,6 +1928,11 @@ def get_settings() -> dict[str, Any]:
     with get_db() as conn:
         kev_count = conn.execute("SELECT COUNT(*) c FROM kev_catalog").fetchone()["c"]
         db_size = database_path().stat().st_size if database_path().exists() else 0
+    configured_bind_host = os.getenv("VS_HOST") or HOST
+    try:
+        configured_bind_port = int(os.getenv("VS_PORT", str(PORT)))
+    except ValueError:
+        configured_bind_port = PORT
     return {
         "product": "VulnScanner",
         "version": __version__,
@@ -1935,6 +1941,11 @@ def get_settings() -> dict[str, Any]:
         "nmap_enabled": get_setting("nmap_enabled", "true") == "true",
         "external_apis_available": ENABLE_EXTERNAL_APIS,
         "admin_auth_enabled": bool(os.getenv("VS_ADMIN_PASSWORD")),
+        "bind_host": configured_bind_host,
+        "bind_port": configured_bind_port,
+        "active_bind_host": HOST,
+        "active_bind_port": PORT,
+        "bind_restart_required": configured_bind_host != HOST or configured_bind_port != PORT,
         "kev_last_sync": get_setting("kev_last_sync", ""),
         "kev_count": kev_count,
         "database_path": str(database_path()),
@@ -2345,11 +2356,34 @@ def cert_upload(
     }
 
 
-def _is_admin_password_line(line: str) -> bool:
+def _is_env_entry(line: str, key: str) -> bool:
     stripped = line.strip()
     if stripped.startswith("#"):
         stripped = stripped[1:].lstrip()
-    return stripped.startswith("VS_ADMIN_PASSWORD=")
+    return stripped.startswith(key + "=")
+
+
+def _upsert_env_entries(path: Path, entries: dict[str, str]) -> None:
+    """Add or replace ``KEY=VALUE`` entries while preserving other lines."""
+    lines: list[str] = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8").splitlines()
+    for key, value in entries.items():
+        entry = f"{key}={value}"
+        new_lines: list[str] = []
+        found = False
+        for line in lines:
+            if _is_env_entry(line, key):
+                if not found:
+                    new_lines.append(entry)
+                    found = True
+                # Drop duplicate entries for the same key.
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(entry)
+        lines = new_lines
+    _write_env_file(path, lines)
 
 
 def _write_env_file(path: Path, lines: list[str]) -> None:
@@ -2383,25 +2417,7 @@ def _write_env_file(path: Path, lines: list[str]) -> None:
 def set_admin_password(payload: AdminPasswordUpdate) -> dict[str, Any]:
     """Set or disable the dashboard password, stored in the project .env file."""
     env_path = BASE_DIR / ".env"
-    lines: list[str] = []
-    if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-
-    entry = f"VS_ADMIN_PASSWORD={payload.password}" if payload.password else "VS_ADMIN_PASSWORD="
-    new_lines: list[str] = []
-    found = False
-    for line in lines:
-        if _is_admin_password_line(line):
-            if not found:
-                new_lines.append(entry)
-                found = True
-            # Drop duplicate VS_ADMIN_PASSWORD lines.
-        else:
-            new_lines.append(line)
-    if not found:
-        new_lines.append(entry)
-
-    _write_env_file(env_path, new_lines)
+    _upsert_env_entries(env_path, {"VS_ADMIN_PASSWORD": payload.password})
 
     # The auth middleware reads os.environ per request, so the change applies
     # immediately without a restart.
@@ -2411,3 +2427,30 @@ def set_admin_password(payload: AdminPasswordUpdate) -> dict[str, Any]:
         os.environ.pop("VS_ADMIN_PASSWORD", None)
 
     return {"ok": True, "set": bool(payload.password), "restart_required": False}
+
+
+@router.post("/settings/network")
+def set_bind_address(payload: BindAddressUpdate) -> dict[str, Any]:
+    """Persist the listener bind address to .env; a restart is required.
+
+    Uvicorn binds the socket at startup, so this only writes configuration.
+    ``run.sh`` and ``run.bat`` load ``.env`` and apply it on the next start.
+    """
+    env_path = BASE_DIR / ".env"
+    _upsert_env_entries(
+        env_path,
+        {"VS_HOST": payload.bind_host, "VS_PORT": str(payload.bind_port)},
+    )
+
+    # Reflect the saved configuration in the UI immediately, without rebinding.
+    os.environ["VS_HOST"] = payload.bind_host
+    os.environ["VS_PORT"] = str(payload.bind_port)
+    restart_required = payload.bind_host != HOST or payload.bind_port != PORT
+    return {
+        "ok": True,
+        "bind_host": payload.bind_host,
+        "bind_port": payload.bind_port,
+        "active_bind_host": HOST,
+        "active_bind_port": PORT,
+        "restart_required": restart_required,
+    }

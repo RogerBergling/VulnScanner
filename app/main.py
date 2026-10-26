@@ -46,10 +46,19 @@ async def lifespan(_app: FastAPI):
     if admin_password:
         logger.info("Dashboard Basic Authentication is enabled (user: %s)", os.getenv("VS_ADMIN_USER", "admin"))
     else:
-        logger.warning(
-            "Dashboard authentication is disabled. The default bind address is 127.0.0.1; "
-            "set VS_ADMIN_PASSWORD before exposing the server to a network."
-        )
+        if HOST in {"127.0.0.1", "::1", "localhost"}:
+            logger.warning(
+                "Dashboard authentication is disabled. The listener is bound to %s; "
+                "set VS_ADMIN_PASSWORD before exposing the server to a network.",
+                HOST,
+            )
+        else:
+            logger.warning(
+                "Dashboard authentication is disabled and the listener is bound to %s. "
+                "Anyone who can reach this port has full access. Set VS_ADMIN_PASSWORD "
+                "or restrict access before using this server on a network.",
+                HOST,
+            )
     yield
     shutdown(wait=False)
     stop_scheduler()

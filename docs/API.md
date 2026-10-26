@@ -1005,6 +1005,11 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "nmap_enabled": true,
   "external_apis_available": true,
   "admin_auth_enabled": false,
+  "bind_host": "127.0.0.1",
+  "bind_port": 8765,
+  "active_bind_host": "127.0.0.1",
+  "active_bind_port": 8765,
+  "bind_restart_required": false,
   "kev_last_sync": "",
   "kev_count": 0,
   "database_path": "/path/to/data/vulnscanner.db",
@@ -1032,8 +1037,11 @@ The database may be locked briefly; run it when scans are idle. Errors return
 
 `scan_workers` is read from `VS_SCAN_WORKERS` at process start; changing it
 requires a server restart. `admin_auth_enabled` reflects whether
-`VS_ADMIN_PASSWORD` is currently set. `smtp_password` is stored but never
-returned by the API.
+`VS_ADMIN_PASSWORD` is currently set. `bind_host` and `bind_port` are the
+configured listener values from `VS_HOST`/`VS_PORT`; `active_bind_host` and
+`active_bind_port` show the address the current process is bound to, and
+`bind_restart_required` is `true` when the configured values differ and a
+restart is needed. `smtp_password` is stored but never returned by the API.
 
 ### `PATCH /api/settings`
 
@@ -1067,6 +1075,20 @@ settings are `allow_external_apis`, `nuclei_enabled` and `nmap_enabled`.
 `max_source_file_bytes` 1 KiB–100 MiB, `max_scan_files` 1–1000000,
 `max_cidr_hosts` 1–65536, and `agent_job_timeout` 60–86400 seconds. Returns the
 updated settings object.
+
+### `POST /api/settings/network`
+
+```json
+{"bind_host": "0.0.0.0", "bind_port": 8765}
+```
+
+Stores `VS_HOST` and `VS_PORT` in the project `.env` (mode `0600`). The
+listener is bound at process start, so the new address is applied after a
+restart via `run.sh` or `run.bat`. `bind_host` must be a literal IPv4 or IPv6
+address (hostnames are rejected) and `bind_port` must be `1`–`65535`; invalid
+values return `422`. Returns the saved values, the currently active address and
+`restart_required`. The GUI exposes this in **Settings → Security → Bind
+address**.
 
 ### `POST /api/settings/admin-password`
 

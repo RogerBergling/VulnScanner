@@ -327,6 +327,7 @@ def test_openapi_document_lists_all_major_routes(client):
         "/api/agent/enroll",
         "/api/ad/import",
         "/api/settings",
+        "/api/settings/network",
         "/api/server/status",
         "/api/server/database/backup",
         "/api/server/database/vacuum",

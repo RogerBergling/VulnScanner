@@ -558,6 +558,8 @@ The Settings page shows:
 - KEV catalogue count and last sync time.
 - **Target credentials** for authenticated network scans, with encrypted
   passwords/SSH keys, customer/global scope and default flags.
+- **Security and access** for the bind address/port and the dashboard admin
+  password.
 - Database path, size and reports path.
 - Scan limits, including the configured parallel worker count
   (`VS_SCAN_WORKERS`).
@@ -566,7 +568,14 @@ Disabling **Allow external APIs** prevents outbound OSV/KEV/GitHub activity
 and the Nuclei, Semgrep and osv-scanner integrations, and is appropriate for
 air-gapped installations. Built-in checks still run. Disabling Nuclei or Nmap
 prevents those tools from being invoked even when installed.
-Settings are stored in SQLite and survive restarts.
+The integration toggles are stored in SQLite and survive restarts. The bind
+address, port and admin password are written to `.env`.
+
+The bind address and port are edited under **Settings → Security**. The running
+listener keeps its current address; the new value is applied after restarting
+with `./run.sh` or `run.bat`. The panel shows the active address and warns when
+a restart is pending. Use `127.0.0.1` for local-only access and bind to
+`0.0.0.0` or `::` only on a trusted network or behind a TLS reverse proxy.
 
 The CISA KEV catalogue can be synchronised from Settings. Synchronisation is
 optional; known-exploited enrichment is skipped if the catalogue is empty or
@@ -597,9 +606,11 @@ Maintenance actions:
 - **Download diagnostics** saves a JSON snapshot of the status page for
   troubleshooting. It does not include findings, tokens or scan evidence.
 
-Bind address, authentication, paths and `VS_SCAN_WORKERS` are environment
-settings and require a service restart. Use the Settings page for integration
-toggles.
+The bind address and port are environment-level settings edited under
+**Settings → Security**; bind changes require a restart via `./run.sh` or
+`run.bat`. Authentication is also managed there and applies immediately. Paths
+and `VS_SCAN_WORKERS` remain `.env`/environment settings. Use the Settings page
+for integration toggles.
 
 ## 10. Data lifecycle
 

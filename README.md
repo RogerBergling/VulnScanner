@@ -62,7 +62,9 @@ anything reachable from another machine, use a reverse proxy for production TLS
 (see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
 
 You can set or change the dashboard password from **Settings → Security**; it is
-saved to `.env` and applied immediately.
+saved to `.env` and applied immediately. The same panel lets you edit the bind
+address and port; those values are saved to `.env` and take effect the next time
+you start the server with `./run.sh` or `run.bat`.
 
 If the browser reports `SSL_ERROR_RX_RECORD_TOO_LONG`, you are using `https://`
 against a server that is running plain HTTP. Start the server with `./run.sh`
@@ -152,8 +154,8 @@ Environment variables can also be exported directly.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VS_HOST` | `127.0.0.1` | Bind address. Keep loopback unless protected by a firewall/reverse proxy. |
-| `VS_PORT` | `8765` | HTTP/HTTPS port. |
+| `VS_HOST` | `127.0.0.1` | Bind address. Editable in Settings → Security. Keep loopback unless protected by a firewall/reverse proxy. |
+| `VS_PORT` | `8765` | HTTP/HTTPS port. Editable in Settings → Security. |
 | `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `data/certs/`. Set to `false` for plain HTTP behind a TLS reverse proxy. |
 | `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. |
 | `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. Can also be set from Settings → Security. |

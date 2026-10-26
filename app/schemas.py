@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -247,6 +248,23 @@ class SettingsUpdate(BaseModel):
             return value
         if not value.lower().startswith(("http://", "https://")):
             raise ValueError("Webhook URL must start with http:// or https://")
+        return value
+
+
+class BindAddressUpdate(BaseModel):
+    # Only literal IP addresses are accepted so the value is safe to write to
+    # .env, which run.sh sources as shell code.
+    bind_host: str = Field(min_length=1, max_length=64)
+    bind_port: int = Field(ge=1, le=65_535)
+
+    @field_validator("bind_host")
+    @classmethod
+    def validate_bind_host(cls, value: str) -> str:
+        value = (value or "").strip()
+        try:
+            ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValueError("Bind address must be a valid IPv4 or IPv6 address") from exc
         return value
 
 

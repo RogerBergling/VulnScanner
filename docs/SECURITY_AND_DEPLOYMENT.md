@@ -423,6 +423,8 @@ For a team deployment:
 Before exposing the service beyond localhost:
 
 - [ ] `VS_HOST=127.0.0.1` and a TLS reverse proxy in front for remote access.
+      Verify the active bind address in **Settings → Security** or on the
+      **Server** page after any change.
 - [ ] `VS_SSL=false` when the reverse proxy terminates TLS; leave the default
       `true` only for the local self-signed listener.
 - [ ] `VS_ADMIN_PASSWORD` set to a long, unique value.

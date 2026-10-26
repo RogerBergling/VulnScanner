@@ -57,6 +57,10 @@
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
+  function fmtHostPort(host, port) {
+    const label = String(host || '');
+    return (label.indexOf(':') >= 0 ? '[' + label + ']' : label) + ':' + num(port);
+  }
   function relTime(value) {
     if (!value) return 'never';
     const date = new Date(value);
@@ -2432,7 +2436,7 @@
       '<div class="dash-grid-2" style="margin-bottom:16px">' +
         '<section class="panel"><div class="panel-head"><h2>Runtime</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Version</span><span>' + esc(data.product) + ' ' + esc(data.version) + '</span></div>' +
-          '<div class="kv"><span>Bind address</span><span class="mono">' + esc(process.host) + ':' + num(process.port) + '</span></div>' +
+          '<div class="kv"><span>Bind address</span><span class="mono">' + esc(fmtHostPort(process.host, process.port)) + '</span></div>' +
           '<div class="kv"><span>Dashboard auth</span><span>' + (process.auth_enabled ? 'enabled (' + esc(process.admin_user) + ')' : 'disabled') + '</span></div>' +
           '<div class="kv"><span>Process</span><span class="mono">pid ' + num(process.pid) + '</span></div>' +
           '<div class="kv"><span>Python</span><span>' + esc(process.python) + '</span></div>' +
@@ -2458,7 +2462,7 @@
           switchRow('srv-nmap', 'Enable Nmap integration',
             'Use Nmap for service detection during network scans when installed.', settings.nmap_enabled) +
           '<div style="display:flex;align-items:center;gap:10px;margin-top:16px"><button class="btn btn-primary" data-action="save-server-settings">Save configuration</button>' +
-          '<span class="muted small">Bind address, authentication and paths are environment variables and require a restart.</span></div>' +
+          '<span class="muted small">Change the bind address under Settings → Security. Environment-level changes require a restart.</span></div>' +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Maintenance</h2></div><div class="panel-body">' +
           '<p class="muted small" style="margin-top:0">Back up the SQLite database before upgrades. The copy is stored under the reports directory and excluded from normal report exports.</p>' +
@@ -2694,7 +2698,7 @@
 
     view.innerHTML =
       '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Settings</h1>' +
-        '<div class="page-sub">Local configuration and optional integrations. Environment variables control bind address, authentication and paths.</div></div>' +
+        '<div class="page-sub">Local configuration and optional integrations. Bind address, authentication and paths are environment-level settings.</div></div>' +
         '<div class="page-actions"><a class="btn" href="/api/docs" target="_blank" rel="noopener">API reference</a>' +
         '<a class="btn" href="/manual" target="_blank" rel="noopener">Full manual</a></div></div>' +
       '<div class="settings-grid">' +
@@ -2756,7 +2760,15 @@
           'Reports are generated on demand from the database.</p>' +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Security and access</h2></div><div class="panel-body">' +
-          '<div class="kv"><span>Default bind</span><span class="mono">127.0.0.1:8765</span></div>' +
+          '<div class="kv"><span>Active bind</span><span class="mono">' + esc(fmtHostPort(settings.active_bind_host, settings.active_bind_port)) + '</span></div>' +
+          (settings.bind_restart_required ? '<div class="info-banner info-banner-warn" style="margin:10px 0"><strong>Restart required.</strong> Saved address ' + esc(fmtHostPort(settings.bind_host, settings.bind_port)) + ' is not active yet.</div>' : '') +
+          '<label class="field full" style="margin-top:8px"><span>Bind address</span>' +
+          '<input class="input mono" id="bind-host-input" value="' + esc(settings.bind_host) + '" maxlength="64" spellcheck="false" autocomplete="off" placeholder="127.0.0.1"></label>' +
+          '<label class="field full"><span>Port</span>' +
+          '<input class="input mono" id="bind-port-input" type="number" min="1" max="65535" value="' + num(settings.bind_port) + '"></label>' +
+          '<button class="btn btn-sm" id="save-bind" style="margin-top:6px">Save bind address</button>' +
+          '<p class="muted small" style="margin-top:6px">Saved to <span class="mono">.env</span> and applied after restarting VulnScanner with <span class="mono">./run.sh</span> or <span class="mono">run.bat</span>. ' +
+          'Keep <span class="mono">127.0.0.1</span> for local-only access; bind to <span class="mono">0.0.0.0</span> or <span class="mono">::</span> only behind a trusted network or TLS reverse proxy.</p>' +
           '<div class="kv"><span>Dashboard auth</span><span>' + (settings.admin_auth_enabled ? 'HTTP Basic auth is enabled' : 'Not enabled') + '</span></div>' +
           '<label class="field full" style="margin-top:8px"><span>Admin password</span>' +
           '<input class="input" type="password" id="admin-password-input" placeholder="At least 12 characters; leave empty to disable" ' +
@@ -2795,6 +2807,26 @@
           const result = await post('/settings/admin-password', { password: pw });
           input.value = '';
           toast(result.set ? 'Admin password updated' : 'Dashboard authentication disabled');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-bind').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const host = $('#bind-host-input').value.trim();
+          const port = Number($('#bind-port-input').value);
+          if (!host) throw new Error('Enter a bind address');
+          if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535');
+          const loopback = host === '::1' || host.indexOf('127.') === 0;
+          if (!loopback) {
+            const warning = 'Bind to ' + fmtHostPort(host, port) + '? This makes the dashboard reachable beyond loopback.' +
+              (settings.admin_auth_enabled ? '' : ' Dashboard authentication is currently disabled.') +
+              ' Use authentication, a firewall or a TLS reverse proxy before exposing it.';
+            if (!(await confirmAction(warning, 'Save bind address'))) return;
+          }
+          const result = await post('/settings/network', { bind_host: host, bind_port: port });
+          toast(result.restart_required ? 'Bind address saved to .env. Restart VulnScanner to apply.' : 'Bind address unchanged');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });
