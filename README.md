@@ -2,7 +2,7 @@
 
 VulnScanner is a local-first vulnerability scanner and management platform. It
 stores customers, asset groups, assets, scans, findings and endpoint agents in a
-single SQLite database, and it provides a Nessus-style web interface for running
+single SQLite database, and it provides a  web interface for running
 and reviewing scans.
 
 VulnScanner can scan:
