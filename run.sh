@@ -23,6 +23,17 @@ if [ ! -f .venv/.deps-ok ] || [ requirements.txt -nt .venv/.deps-ok ]; then
 fi
 
 HOST="${VS_HOST:-127.0.0.1}"
-PORT="${VS_PORT:-8787}"
-echo "[vulnscanner] Starting on http://${HOST}:${PORT}"
-exec .venv/bin/python -m uvicorn app.main:app --host "$HOST" --port "$PORT" "$@"
+PORT="${VS_PORT:-8765}"
+SSL_ENABLED="$(printf '%s' "${VS_SSL:-false}" | tr '[:upper:]' '[:lower:]')"
+case "${SSL_ENABLED}" in
+  1|true|yes|on)
+    CERT_FILE=$(.venv/bin/python -c "from app.certs import get_cert_paths; print(get_cert_paths()[0])")
+    CERT_KEY=$(.venv/bin/python -c "from app.certs import get_cert_paths; print(get_cert_paths()[1])")
+    echo "[vulnscanner] Starting on https://${HOST}:${PORT} (self-signed certificate)"
+    exec .venv/bin/python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --ssl-certfile "$CERT_FILE" --ssl-keyfile "$CERT_KEY" "$@"
+    ;;
+  *)
+    echo "[vulnscanner] Starting on http://${HOST}:${PORT}"
+    exec .venv/bin/python -m uvicorn app.main:app --host "$HOST" --port "$PORT" "$@"
+    ;;
+esac

@@ -36,13 +36,12 @@ AGENT_DIR.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    from .database import add_remote_scanners_table
-    add_remote_scanners_table()
     recover_interrupted_scans()
     start_scheduler()
     data_dir()
     admin_password = os.getenv("VS_ADMIN_PASSWORD")
-    logger.info("VulnScanner %s starting on http://%s:%s", __version__, HOST, PORT)
+    scheme = "https" if os.getenv("VS_SSL", "false").lower() in {"1", "true", "yes", "on"} else "http"
+    logger.info("VulnScanner %s starting on %s://%s:%s", __version__, scheme, HOST, PORT)
     logger.info("Database: %s", data_dir() / "vulnscanner.db")
     if admin_password:
         logger.info("Dashboard Basic Authentication is enabled (user: %s)", os.getenv("VS_ADMIN_USER", "admin"))
@@ -156,18 +155,25 @@ app.mount("/agent", StaticFiles(directory=AGENT_DIR), name="agent")
 
 def run() -> None:
     import uvicorn
-    from .certs import get_cert_paths
-    cert_path, key_path = get_cert_paths()
-    ssl_enabled = os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"}
+
+    ssl_enabled = os.getenv("VS_SSL", "false").lower() in {"1", "true", "yes", "on"}
+    log_level = os.getenv("VS_LOG_LEVEL", "info").lower()
     if ssl_enabled:
-        uvicorn.run(
-            "app.main:app", host=HOST, port=PORT, reload=False,
-            ssl_keyfile=key_path, ssl_certfile=cert_path,
-            log_level=os.getenv("VS_LOG_LEVEL", "info").lower()
-        )
+        from .certs import get_cert_paths
+
+        cert_path, key_path = get_cert_paths()
         logger.info("SSL enabled: cert=%s key=%s", cert_path, key_path)
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=PORT,
+            reload=False,
+            ssl_keyfile=key_path,
+            ssl_certfile=cert_path,
+            log_level=log_level,
+        )
     else:
-        uvicorn.run("app.main:app", host=HOST, port=PORT, reload=False, log_level=os.getenv("VS_LOG_LEVEL", "info").lower())
+        uvicorn.run(app, host=HOST, port=PORT, reload=False, log_level=log_level)
 
 
 if __name__ == "__main__":

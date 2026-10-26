@@ -24,8 +24,16 @@ if not exist .venv\.deps-ok (
 
 if not defined VS_HOST set "VS_HOST=127.0.0.1"
 if not defined VS_PORT set "VS_PORT=8765"
-echo [vulnscanner] Starting on http://%VS_HOST%:%VS_PORT%
-.venv\Scripts\python.exe -m uvicorn app.main:app --host %VS_HOST% --port %VS_PORT%
+if not defined VS_SSL set "VS_SSL=false"
+
+set "SCHEME=http"
+if /I "%VS_SSL%"=="1" set "SCHEME=https"
+if /I "%VS_SSL%"=="true" set "SCHEME=https"
+if /I "%VS_SSL%"=="yes" set "SCHEME=https"
+if /I "%VS_SSL%"=="on" set "SCHEME=https"
+
+echo [vulnscanner] Starting on %SCHEME%://%VS_HOST%:%VS_PORT%
+.venv\Scripts\python.exe -m app.main
 exit /b %errorlevel%
 
 :error

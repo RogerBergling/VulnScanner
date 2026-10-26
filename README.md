@@ -52,6 +52,16 @@ run.bat
 The launcher creates `.venv`, installs the runtime dependencies, and starts
 Uvicorn. Open <http://127.0.0.1:8765>.
 
+The default listener is plain HTTP on loopback, which is suitable for a
+single-user workstation or a reverse-proxied deployment. For a local
+self-signed HTTPS listener, set `VS_SSL=true` in `.env` before starting; the
+server creates a certificate under `data/certs/` and prints the `https://` URL.
+For anything reachable from another machine, use a TLS-terminating reverse
+proxy (see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
+
+You can set or change the dashboard password from **Settings → Security**; it is
+saved to `.env` and applied immediately.
+
 Manual installation:
 
 ```bash
@@ -135,9 +145,10 @@ Environment variables can also be exported directly.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `VS_HOST` | `127.0.0.1` | Bind address. Keep loopback unless protected by a firewall/reverse proxy. |
-| `VS_PORT` | `8765` | HTTP port. |
+| `VS_PORT` | `8765` | HTTP/HTTPS port. |
+| `VS_SSL` | `false` | Enable the built-in HTTPS listener with a self-signed certificate under `data/certs/`. Use a reverse proxy for production TLS. |
 | `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. |
-| `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. |
+| `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. Can also be set from Settings → Security. |
 | `VS_DATA_DIR` | `./data` | Database, reports and temporary clone directory. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials. Back it up with the database. |

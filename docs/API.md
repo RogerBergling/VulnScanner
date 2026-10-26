@@ -992,7 +992,7 @@ Runs `VACUUM` and returns the size before and after:
 The database may be locked briefly; run it when scans are idle. Errors return
 `409`.
 
-## 11. Settings and KEV
+## 11. Settings, certificates and KEV
 
 ### `GET /api/settings`
 
@@ -1004,6 +1004,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "nuclei_enabled": true,
   "nmap_enabled": true,
   "external_apis_available": true,
+  "admin_auth_enabled": false,
   "kev_last_sync": "",
   "kev_count": 0,
   "database_path": "/path/to/data/vulnscanner.db",
@@ -1012,12 +1013,27 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "tools": {
     "nmap": {"available": false, "path": "", "version": ""}
   },
-  "limits": {"top_ports": 58, "agent_job_timeout_seconds": 3600, "scan_workers": 4}
+  "limits": {
+    "top_ports": 58,
+    "agent_job_timeout_seconds": 3600,
+    "scan_workers": 4,
+    "max_web_hosts": 20,
+    "workers": 300
+  },
+  "smtp": {"host": "", "port": "587", "user": "", "from": ""},
+  "notify_default": {"email": "", "webhook": ""},
+  "max_repo_bytes": 536870912,
+  "max_source_file_bytes": 1048576,
+  "max_scan_files": 20000,
+  "max_cidr_hosts": 256,
+  "agent_job_timeout": 3600
 }
 ```
 
 `scan_workers` is read from `VS_SCAN_WORKERS` at process start; changing it
-requires a server restart.
+requires a server restart. `admin_auth_enabled` reflects whether
+`VS_ADMIN_PASSWORD` is currently set. `smtp_password` is stored but never
+returned by the API.
 
 ### `PATCH /api/settings`
 
@@ -1025,17 +1041,69 @@ requires a server restart.
 {
   "allow_external_apis": false,
   "nuclei_enabled": false,
-  "nmap_enabled": true
+  "nmap_enabled": true,
+  "smtp_host": "smtp.example.com",
+  "smtp_port": "587",
+  "smtp_user": "scanner@example.com",
+  "smtp_password": "smtp-password",
+  "smtp_from": "scanner@example.com",
+  "notify_email_default": "soc@example.com",
+  "notify_webhook_default": "https://hooks.example.com/vulnscanner",
+  "max_web_hosts": 20,
+  "workers": 300,
+  "max_repo_bytes": 536870912,
+  "max_source_file_bytes": 1048576,
+  "max_scan_files": 20000,
+  "max_cidr_hosts": 256,
+  "agent_job_timeout": 3600
 }
 ```
 
-All fields optional. Returns the updated settings object.
+All fields are optional; omitted fields keep their current values. Boolean
+settings are `allow_external_apis`, `nuclei_enabled` and `nmap_enabled`.
+`smtp_port` must be `1`–`65535`, and `notify_webhook_default` must start with
+`http://` or `https://`. Numeric guardrails are bounded: `max_web_hosts`
+1–10000, `workers` 1–32, `max_repo_bytes` 1 MiB–10 GiB,
+`max_source_file_bytes` 1 KiB–100 MiB, `max_scan_files` 1–1000000,
+`max_cidr_hosts` 1–65536, and `agent_job_timeout` 60–86400 seconds. Returns the
+updated settings object.
+
+### `POST /api/settings/admin-password`
+
+```json
+{"password": "a-long-random-password"}
+```
+
+Stores `VS_ADMIN_PASSWORD` in the project `.env` (mode `0600`) and applies it
+immediately. A non-empty password must be 12–128 characters using letters,
+digits, and `. _ ~ @ + = : , / -`; these characters are safe for both `run.sh`
+and `run.bat`. Send an empty password to disable dashboard authentication
+(`admin_auth_enabled` becomes `false`). Invalid passwords return `422`.
 
 ### `POST /api/settings/kev/sync`
 
 Downloads and caches the CISA KEV catalogue. Returns the sync result on success;
 returns `400` if external APIs are disabled, and `502` if the download fails.
 This endpoint requires outbound network access.
+
+### Certificate management
+
+Certificates are only needed for the optional built-in HTTPS listener
+(`VS_SSL=true`) or for agent mTLS. For production web TLS, terminate TLS at a
+reverse proxy instead.
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/certs/status` | Return the web and internal certificate/key paths and sizes. Missing files are reported with `exists: false`. |
+| `POST /api/certs/regenerate?mode=web` | Generate a new self-signed web certificate. |
+| `POST /api/certs/regenerate?mode=internal` | Generate a new internal CA and server certificate/key. |
+| `POST /api/certs/regenerate?mode=all` | Regenerate both the web and internal certificate sets. |
+| `POST /api/certs/upload` | Multipart upload with `cert_file`, `key_file`, and `mode` (`web` or `internal`). |
+
+`POST /api/certs/upload` accepts PEM files up to 1 MiB each, rejects encrypted
+private keys, and verifies that the certificate and key match. Keys are written
+with mode `0600`; certificates with `0644`. Restart the server after replacing
+the web certificate used by the HTTPS listener.
 
 ## 12. Non-API routes
 

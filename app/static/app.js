@@ -148,7 +148,7 @@
   async function api(path, options) {
     const opts = Object.assign({}, options || {});
     const headers = Object.assign({ Accept: 'application/json' }, opts.headers || {});
-    if (opts.body && typeof opts.body !== 'string') {
+    if (opts.body && typeof opts.body !== 'string' && !(opts.body instanceof FormData)) {
       opts.body = JSON.stringify(opts.body);
       headers['Content-Type'] = 'application/json';
     }
@@ -2616,6 +2616,44 @@
     return modal;
   }
 
+  function openCertUploadModal(targetMode) {
+    const mode = targetMode || 'web';
+    const isInternal = mode === 'internal';
+    openModal({
+      title: isInternal ? 'Upload internal certificate & key' : 'Upload web certificate & key',
+      size: 'wide',
+      content: '<form id="cert-upload-form"><div class="info-banner" style="margin-bottom:14px">' +
+        '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5" stroke-linecap="round"/></svg>' +
+        '<div>Upload both the certificate file (.pem/.crt) and the private key (.pem/.key) in PEM format.</div></div>' +
+        '<div class="form-grid">' +
+        '<label class="field full"><span>Certificate file</span>' +
+          '<input class="input" type="file" id="cert-file" accept=".pem,.crt,.cer" required></label>' +
+        '<label class="field full"><span>Private key file</span>' +
+          '<input class="input" type="file" id="cert-key-file" accept=".pem,.key,.pkcs8" required></label>' +
+        '</div><div class="form-error"></div></form>',
+      actions: [
+        { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+        { label: 'Upload & restart', class: 'btn-primary', onClick: function (ctx) {
+          runWithButton(ctx.button, async function () {
+            clearFormError(ctx.overlay);
+            try {
+              const certInput = $('#cert-file', ctx.overlay);
+              const keyInput = $('#cert-key-file', ctx.overlay);
+              if (!certInput || !certInput.files || !certInput.files[0]) throw new Error('Select the certificate file');
+              if (!keyInput || !keyInput.files || !keyInput.files[0]) throw new Error('Select the private key file');
+              const formData = new FormData();
+              formData.append('cert_file', certInput.files[0]);
+              formData.append('key_file', keyInput.files[0]);
+              formData.append('mode', mode);
+              await post('/certs/upload', formData);
+              ctx.close(); toast(isInternal ? 'Internal certificates uploaded — restart the server to apply' : 'Web certificate uploaded — restart the server to apply'); router();
+            } catch (error) { formError(ctx.overlay, errorText(error)); }
+          });
+        } }
+      ]
+    });
+  }
+
   async function renderSettings(view) {
     let settings;
     try { settings = await get('/settings'); }
@@ -2623,6 +2661,10 @@
       view.innerHTML = emptyHtml('Could not load settings', errorText(error));
       return;
     }
+    // Load certificate status
+    let certInfo;
+    try { certInfo = await get('/certs/status'); }
+    catch (error) { certInfo = { web: { exists: false, cert_path: null, key_path: null, cert_size_bytes: 0 }, internal: { exists: false, ca_path: null, cert_path: null, key_path: null, cert_size_bytes: 0 } }; }
     let credentials = [];
     let customers = [];
     try {
@@ -2679,6 +2721,29 @@
           '<div class="kv"><span>Last sync</span><span>' + esc(settings.kev_last_sync ? fmtDate(settings.kev_last_sync) : 'never') + '</span></div>' +
           '<div style="margin-top:14px"><button class="btn" id="sync-kev">Sync catalogue now</button></div>' +
         '</div></section>' +
+        '<section class="panel"><div class="panel-head"><h2>SSL/TLS Certificates</h2></div><div class="panel-body">' +
+          '<p class="muted small" style="margin-top:0">Manage the certificates used by the optional built-in HTTPS listener. ' +
+          'Start the server with <span class="mono">VS_SSL=true</span> to use the web certificate. ' +
+          'The internal CA is used for agent communication and mTLS. Restart the server after changing the web certificate.</p>' +
+          '<div class="cert-grid">' +
+          '<div class="cert-section"><h3>Web Certificate (HTTPS)</h3>' +
+            '<div class="kv"><span>Status</span><span>' + (certInfo.web.exists ? '<span class="badge sev-info">valid</span>' : '<span class="badge sev-warn">not configured</span>') + '</span></div>' +
+            '<div class="kv"><span>Certificate path</span><span class="mono">' + (certInfo.web.cert_path || 'Not set') + '</span></div>' +
+            '<div class="kv"><span>Key path</span><span class="mono">' + (certInfo.web.key_path || 'Not set') + '</span></div>' +
+            '<div class="kv"><span>Size</span><span>' + (certInfo.web.cert_size_bytes ? bytes(certInfo.web.cert_size_bytes) : '0 B') + '</span></div>' +
+            '<div class="cert-actions"><button class="btn btn-sm" data-action="cert-upload-web">Upload cert and key</button>' +
+              '<button class="btn btn-sm" data-action="cert-regenerate-web">Regenerate self-signed</button></div></div>' +
+          '<div class="cert-section"><h3>Internal CA & Server Cert (mTLS)</h3>' +
+            '<div class="kv"><span>Status</span><span>' + (certInfo.internal.exists ? '<span class="badge sev-info">valid</span>' : '<span class="badge sev-warn">not configured</span>') + '</span></div>' +
+            '<div class="kv"><span>CA path</span><span class="mono">' + (certInfo.internal.ca_path || 'Not set') + '</span></div>' +
+            '<div class="kv"><span>Server cert path</span><span class="mono">' + (certInfo.internal.cert_path || 'Not set') + '</span></div>' +
+            '<div class="kv"><span>Server key path</span><span class="mono">' + (certInfo.internal.key_path || 'Not set') + '</span></div>' +
+            '<div class="kv"><span>Size</span><span>' + (certInfo.internal.cert_size_bytes ? bytes(certInfo.internal.cert_size_bytes) : '0 B') + '</span></div>' +
+            '<div class="cert-actions"><button class="btn btn-sm" data-action="cert-upload-internal">Upload internal cert and key</button>' +
+              '<button class="btn btn-sm" data-action="cert-regenerate-internal">Regenerate internal CA</button>' +
+              '<button class="btn btn-sm" data-action="cert-regenerate-all">Regenerate all</button></div></div>' +
+          '</div>' +
+        '</div></section>' +
         '<section class="panel settings-wide"><div class="panel-head"><h2>Optional command-line tools</h2><span class="spacer"></span>' +
           '<span class="muted small">Built-in fallbacks remain available when a tool is missing.</span></div><div class="panel-body">' + toolRows + '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Local data</h2></div><div class="panel-body">' +
@@ -2692,7 +2757,13 @@
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Security and access</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Default bind</span><span class="mono">127.0.0.1:8765</span></div>' +
-          '<div class="kv"><span>Dashboard auth</span><span>Set <span class="mono">VS_ADMIN_PASSWORD</span> to enable HTTP Basic auth</span></div>' +
+          '<div class="kv"><span>Dashboard auth</span><span>' + (settings.admin_auth_enabled ? 'HTTP Basic auth is enabled' : 'Not enabled') + '</span></div>' +
+          '<label class="field full" style="margin-top:8px"><span>Admin password</span>' +
+          '<input class="input" type="password" id="admin-password-input" placeholder="At least 12 characters; leave empty to disable" ' +
+          'minlength="12" maxlength="128" autocomplete="new-password" spellcheck="false"></label>' +
+          '<button class="btn btn-sm" id="save-admin-pass" style="margin-top:6px">Save admin password</button>' +
+          '<p class="muted small" style="margin-top:6px">Saved to <span class="mono">.env</span> and applied immediately. ' +
+          'Use letters, digits, and <span class="mono">. _ ~ @ + = : , / -</span>.</p>' +
           '<div class="kv"><span>Agent tokens</span><span>SHA-256 hashed at rest</span></div>' +
           '<div class="kv"><span>Enrollment tokens</span><span>One-time use, 1–168 hour expiry</span></div>' +
           '<p class="modal-note" style="margin-top:12px">Bind to <span class="mono">0.0.0.0</span> only behind a trusted network or reverse proxy with TLS. ' +
@@ -2709,6 +2780,21 @@
             nmap_enabled: $('#set-nmap').checked
           });
           toast('Settings saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-admin-pass').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const input = $('#admin-password-input');
+          const pw = input.value;
+          if (!pw && !(await confirmAction('Disable dashboard authentication? Anyone who can reach the server will have full access.', 'Disable auth'))) {
+            return;
+          }
+          const result = await post('/settings/admin-password', { password: pw });
+          input.value = '';
+          toast(result.set ? 'Admin password updated' : 'Dashboard authentication disabled');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });
@@ -2743,6 +2829,16 @@
             .catch(function (error) { toast(errorText(error), 'error'); });
         });
       }
+      const certUpload = event.target.closest('[data-action="cert-upload-web"]');
+      if (certUpload) { event.preventDefault(); openCertUploadModal('web'); return; }
+      const certRegen = event.target.closest('[data-action="cert-regenerate-web"]');
+      if (certRegen) { event.preventDefault(); confirmAction('Regenerate a new self-signed web certificate? The old one will be replaced.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate', { mode: 'web' }); toast('Web certificate regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
+      const internalUpload = event.target.closest('[data-action="cert-upload-internal"]');
+      if (internalUpload) { event.preventDefault(); openCertUploadModal('internal'); return; }
+      const internalRegen = event.target.closest('[data-action="cert-regenerate-internal"]');
+      if (internalRegen) { event.preventDefault(); confirmAction('Regenerate a new internal CA and server certificate? This will replace the existing internal certificates.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate', { mode: 'internal' }); toast('Internal certificates regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
+      const allRegen = event.target.closest('[data-action="cert-regenerate-all"]');
+      if (allRegen) { event.preventDefault(); confirmAction('Regenerate all certificates? This will replace both the web and internal certificates.', 'Regenerate', false).then(function (ok) { if (ok) runWithButton(event.target, async function () { try { const result = await post('/certs/regenerate', { mode: 'all' }); toast('All certificates regenerated'); router(); } catch (error) { toast(errorText(error), 'error'); } }); }); return; }
     });
   }
 

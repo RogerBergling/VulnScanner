@@ -6,6 +6,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Characters that are safe in both POSIX shell (``. ./.env``) and Windows
+# ``cmd.exe`` (``set "KEY=VALUE"``) without quoting. Keeping the admin password
+# inside this set lets the settings endpoint write it to ``.env`` safely.
+_ADMIN_PASSWORD_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~@+=:,/-"
+)
+
 
 def _non_blank(value: str, name: str) -> str:
     value = (value or "").strip()
@@ -205,6 +212,64 @@ class SettingsUpdate(BaseModel):
     allow_external_apis: bool | None = None
     nuclei_enabled: bool | None = None
     nmap_enabled: bool | None = None
+
+    # SMTP notification settings.
+    smtp_host: str | None = Field(default=None, max_length=253)
+    smtp_port: str | None = Field(default=None, max_length=5)
+    smtp_user: str | None = Field(default=None, max_length=320)
+    smtp_password: str | None = Field(default=None, max_length=1024)
+    smtp_from: str | None = Field(default=None, max_length=320)
+    notify_email_default: str | None = Field(default=None, max_length=320)
+    notify_webhook_default: str | None = Field(default=None, max_length=2048)
+
+    # Scan guardrails.
+    max_web_hosts: int | None = Field(default=None, ge=1, le=10_000)
+    workers: int | None = Field(default=None, ge=1, le=32)
+    max_repo_bytes: int | None = Field(default=None, ge=1_048_576, le=10_737_418_240)
+    max_source_file_bytes: int | None = Field(default=None, ge=1024, le=104_857_600)
+    max_scan_files: int | None = Field(default=None, ge=1, le=1_000_000)
+    max_cidr_hosts: int | None = Field(default=None, ge=1, le=65_536)
+    agent_job_timeout: int | None = Field(default=None, ge=60, le=86_400)
+
+    @field_validator("smtp_port")
+    @classmethod
+    def validate_smtp_port(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return value
+        if not value.isdigit() or not 1 <= int(value) <= 65_535:
+            raise ValueError("SMTP port must be a number between 1 and 65535")
+        return value
+
+    @field_validator("notify_webhook_default")
+    @classmethod
+    def validate_webhook(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return value
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError("Webhook URL must start with http:// or https://")
+        return value
+
+
+class AdminPasswordUpdate(BaseModel):
+    # An empty string disables dashboard authentication. Non-empty passwords
+    # must be long enough and avoid characters that would need shell quoting in
+    # .env (newlines, spaces, $, %, quotes, etc.).
+    password: str = Field(default="", max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if value == "":
+            return value
+        if len(value) < 12:
+            raise ValueError("Admin password must be at least 12 characters")
+        invalid = sorted(set(value) - _ADMIN_PASSWORD_CHARS)
+        if invalid:
+            raise ValueError(
+                "Admin password contains unsupported characters. Use letters, digits, "
+                "and . _ ~ @ + = : , / -"
+            )
+        return value
 
 
 class ADImportRequest(BaseModel):

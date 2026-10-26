@@ -1,0 +1,22 @@
+# Gitleaks configuration.
+#
+# Extend the bundled rules so the project keeps gitleaks' default coverage,
+# while documenting the two placeholder credentials that are intentionally
+# committed for tests and API examples.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented placeholders and test fixtures that are not real credentials"
+condition = "AND"
+paths = [
+  '''tests/test_secrets\.py$''',
+  '''tests/__pycache__/''',
+  '''docs/API\.md$''',
+]
+regexTarget = "match"
+regexes = [
+  '''aB3dE5fG7hJ9kL2mN4pQ6rS8''',
+  '''admin:change-me''',
+]

@@ -88,10 +88,15 @@ VulnScanner has:
 - No per-user audit trail.
 - No login lockout or built-in rate limiting.
 - No application-level CSRF tokens.
-- No built-in TLS listener.
 
-Use a reverse proxy for TLS, access control, rate limiting and request logging.
-Do not expose plain HTTP to an untrusted network.
+VulnScanner includes an **optional** built-in HTTPS listener (`VS_SSL=true`)
+that uses a self-signed certificate. It is intended for local testing and
+small trusted networks, not as a replacement for a managed certificate. Start
+it with `VS_SSL=true ./run.sh` (or `set VS_SSL=true` before `run.bat`); the
+certificate and key are created under `data/certs/` and the browser will show a
+self-signed warning. For any service reachable from another machine, use a
+TLS-terminating reverse proxy for certificate management, access control, rate
+limiting and request logging. Do not expose plain HTTP to an untrusted network.
 
 ### Reverse proxy example
 
@@ -144,6 +149,8 @@ the agent supports it; those endpoints authenticate with agent tokens.
 
 - Bind to `127.0.0.1`.
 - Basic auth is optional but recommended.
+- Use plain HTTP on loopback (default), or set `VS_SSL=true` for a local
+  self-signed HTTPS listener.
 - Keep the project directory and data directory readable only by your account.
 - Run scans locally. Optional tools can be installed per user.
 - Back up `data/` before upgrades.
@@ -246,6 +253,7 @@ sudo install -d -m 0750 /etc/vulnscanner
 sudo sh -c 'umask 077; cat > /etc/vulnscanner/vulnscanner.env <<EOF
 VS_HOST=127.0.0.1
 VS_PORT=8765
+VS_SSL=false
 VS_ADMIN_USER=admin
 VS_ADMIN_PASSWORD=replace-with-a-long-random-password
 VS_DATA_DIR=/var/lib/vulnscanner
@@ -412,7 +420,8 @@ For a team deployment:
 
 Before exposing the service beyond localhost:
 
-- [ ] `VS_HOST=127.0.0.1` and a TLS reverse proxy in front.
+- [ ] `VS_HOST=127.0.0.1` and a TLS reverse proxy in front for remote access.
+- [ ] `VS_SSL=false` unless you intentionally use the built-in self-signed listener.
 - [ ] `VS_ADMIN_PASSWORD` set to a long, unique value.
 - [ ] Reverse proxy requires HTTPS and restricts source networks.
 - [ ] Firewall allows only the proxy and required agent paths.
@@ -433,7 +442,9 @@ Before exposing the service beyond localhost:
 
 - Basic auth is the only built-in authentication mechanism.
 - There is no RBAC, no per-user attribution and no approval workflow.
-- There is no built-in TLS, WAF, rate limiter or account lockout.
+- The built-in TLS listener uses a self-signed certificate and is optional;
+  there is no WAF, rate limiter or account lockout. Use a reverse proxy for
+  production TLS and edge controls.
 - There are no application-level CSRF tokens. The JSON API, same-origin design
   and CSP reduce exposure, but a proxy with strict origin policy is recommended.
 - Scan workers are in-process and are lost on restart.

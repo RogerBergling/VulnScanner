@@ -9,12 +9,13 @@ import platform as os_platform
 import shlex
 import shutil
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from . import __version__
@@ -36,6 +37,7 @@ from .agents import (
 )
 from .config import (
     AGENT_JOB_TIMEOUT_SECONDS,
+    BASE_DIR,
     ENABLE_EXTERNAL_APIS,
     HOST,
     MAX_CIDR_HOSTS,
@@ -74,6 +76,7 @@ from .jobs import submit_ad_import, submit_agent_result, submit_scan
 from .reporting import build_csv, build_html, build_json
 from .schemas import (
     ADImportRequest,
+    AdminPasswordUpdate,
     AgentEnrollRequest,
     AgentHeartbeatRequest,
     AgentJobResult,
@@ -1931,6 +1934,7 @@ def get_settings() -> dict[str, Any]:
         "nuclei_enabled": get_setting("nuclei_enabled", "true") == "true",
         "nmap_enabled": get_setting("nmap_enabled", "true") == "true",
         "external_apis_available": ENABLE_EXTERNAL_APIS,
+        "admin_auth_enabled": bool(os.getenv("VS_ADMIN_PASSWORD")),
         "kev_last_sync": get_setting("kev_last_sync", ""),
         "kev_count": kev_count,
         "database_path": str(database_path()),
@@ -1941,16 +1945,64 @@ def get_settings() -> dict[str, Any]:
             "top_ports": len(TOP_PORTS),
             "agent_job_timeout_seconds": AGENT_JOB_TIMEOUT_SECONDS,
             "scan_workers": SCAN_WORKERS,
+            "max_web_hosts": int(get_setting("max_web_hosts", "20")),
+            "workers": int(get_setting("workers", "300")),
         },
+        "smtp": {
+            "host": get_setting("smtp_host", ""),
+            "port": get_setting("smtp_port", "587"),
+            "user": get_setting("smtp_user", ""),
+            "from": get_setting("smtp_from", ""),
+        },
+        "notify_default": {
+            "email": get_setting("notify_email_default", ""),
+            "webhook": get_setting("notify_webhook_default", ""),
+        },
+        "max_repo_bytes": int(get_setting("max_repo_bytes", str(512*1024*1024))),
+        "max_source_file_bytes": int(get_setting("max_source_file_bytes", str(1024*1024))),
+        "max_scan_files": int(get_setting("max_scan_files", "20000")),
+        "max_cidr_hosts": int(get_setting("max_cidr_hosts", "256")),
+        "agent_job_timeout": int(get_setting("agent_job_timeout", str(60*60))),
     }
 
 
 @router.patch("/settings")
 def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
+    # ``exclude_unset`` keeps PATCH semantics: fields omitted by the caller are
+    # left untouched instead of being reset to their schema defaults.
+    updates = payload.model_dump(exclude_unset=True)
+
     for key in ("allow_external_apis", "nuclei_enabled", "nmap_enabled"):
-        value = getattr(payload, key)
+        value = updates.get(key)
         if value is not None:
             set_setting(key, "true" if value else "false")
+
+    for key in (
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "notify_email_default",
+        "notify_webhook_default",
+    ):
+        value = updates.get(key)
+        if value is not None:
+            set_setting(key, str(value))
+
+    for key in (
+        "max_web_hosts",
+        "workers",
+        "max_repo_bytes",
+        "max_source_file_bytes",
+        "max_scan_files",
+        "max_cidr_hosts",
+        "agent_job_timeout",
+    ):
+        value = updates.get(key)
+        if value is not None:
+            set_setting(key, str(int(value)))
+
     return get_settings()
 
 
@@ -2155,42 +2207,195 @@ def tools_status() -> dict[str, Any]:
     return {"tools": check_external_tools(), "message": "Run 'nmap --version' / 'nuclei -version' manually to confirm latest releases."}
 
 # ============================================================================
-# Remote server delegation (DMZ / satellite scanner nodes with full tools)
+# SSL / Certificate management
 # ============================================================================
 
-@router.post("/remote/enroll", status_code=201)
-def remote_enroll(
-    payload: dict[str, Any],
-    request: Request,
+@router.get("/certs/status")
+def cert_status() -> dict[str, Any]:
+    from .certs import (
+        INTERNAL_CERT_FILE,
+        INTERNAL_SERVER_CERT,
+        INTERNAL_SERVER_KEY,
+        WEB_CERT_FILE,
+        WEB_KEY_FILE,
+        get_internal_cert_paths,
+        get_web_cert_paths,
+    )
+
+    get_web_cert_paths()
+    get_internal_cert_paths()
+    web_exists = WEB_CERT_FILE.exists() and WEB_KEY_FILE.exists()
+    internal_exists = INTERNAL_SERVER_CERT.exists() and INTERNAL_SERVER_KEY.exists()
+    return {
+        "web": {
+            "cert_path": str(WEB_CERT_FILE) if web_exists else None,
+            "key_path": str(WEB_KEY_FILE) if web_exists else None,
+            "exists": web_exists,
+            "cert_size_bytes": WEB_CERT_FILE.stat().st_size if web_exists else 0,
+            "key_size_bytes": WEB_KEY_FILE.stat().st_size if web_exists else 0,
+        },
+        "internal": {
+            "cert_path": str(INTERNAL_SERVER_CERT) if internal_exists else None,
+            "key_path": str(INTERNAL_SERVER_KEY) if internal_exists else None,
+            "ca_path": str(INTERNAL_CERT_FILE) if INTERNAL_CERT_FILE.exists() else None,
+            "exists": internal_exists,
+            "cert_size_bytes": INTERNAL_SERVER_CERT.stat().st_size if internal_exists else 0,
+            "key_size_bytes": INTERNAL_SERVER_KEY.stat().st_size if internal_exists else 0,
+        },
+    }
+
+
+@router.post("/certs/regenerate")
+def cert_regenerate(mode: str = "web") -> dict[str, Any]:
+    """Regenerate the web certificate, the internal CA, or both."""
+    from .certs import (
+        INTERNAL_SERVER_CERT,
+        INTERNAL_SERVER_KEY,
+        WEB_CERT_FILE,
+        WEB_KEY_FILE,
+        _generate_internal_ca,
+        _generate_self_signed,
+    )
+
+    mode = (mode or "").strip().lower()
+    if mode not in {"web", "internal", "all"}:
+        raise HTTPException(status_code=400, detail="mode must be 'web', 'internal', or 'all'")
+
+    targets: list[str] = []
+    result: dict[str, Any] = {"regenerated": True, "mode": mode}
+    if mode in {"web", "all"}:
+        _generate_self_signed(WEB_CERT_FILE, WEB_KEY_FILE, cn="vulnscanner.local")
+        targets.append("web")
+        result["web"] = {
+            "cert_path": str(WEB_CERT_FILE),
+            "key_path": str(WEB_KEY_FILE),
+            "cert_size_bytes": WEB_CERT_FILE.stat().st_size,
+            "key_size_bytes": WEB_KEY_FILE.stat().st_size,
+        }
+    if mode in {"internal", "all"}:
+        _generate_internal_ca()
+        targets.append("internal")
+        result["internal"] = {
+            "cert_path": str(INTERNAL_SERVER_CERT),
+            "key_path": str(INTERNAL_SERVER_KEY),
+            "cert_size_bytes": INTERNAL_SERVER_CERT.stat().st_size,
+            "key_size_bytes": INTERNAL_SERVER_KEY.stat().st_size,
+        }
+
+    result["targets"] = targets
+    return result
+
+
+@router.post("/certs/upload")
+def cert_upload(
+    cert_file: UploadFile = File(...),
+    key_file: UploadFile = File(...),
+    mode: str = "web",
 ) -> dict[str, Any]:
-    from .security import hash_token, new_agent_token
-    token = payload.get("token", "")
-    # For satellite nodes: validate a server token or use basic auth from main server
-    # This endpoint is called by the DMZ server to register with main server.
-    # For now: require basic auth or a pre-shared token passed in payload
-    # Store remote scanner info
-    customer = payload.get("customer_id")
-    group = payload.get("group_id")
-    name = payload.get("name", "dmz-server")
-    url = payload.get("server_url", str(request.base_url).rstrip("/"))
-    token_hash = hash_token(token)
-    with get_db() as conn:
-        cursor = conn.execute(
-            "INSERT INTO remote_scanners(name, server_url, api_token, customer_id, group_id, capabilities, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (name, url, token_hash, customer, group, json_dump(["network", "web", "authenticated", "nmap", "nuclei"]), "active", utcnow(), utcnow()),
+    from .certs import (
+        INTERNAL_SERVER_CERT,
+        INTERNAL_SERVER_KEY,
+        MAX_CERT_BYTES,
+        WEB_CERT_FILE,
+        WEB_KEY_FILE,
+        CertificateError,
+        save_certificate,
+    )
+
+    mode = (mode or "").strip().lower()
+    if mode not in {"web", "internal"}:
+        raise HTTPException(status_code=400, detail="mode must be 'web' or 'internal'")
+
+    cert_data = cert_file.file.read(MAX_CERT_BYTES + 1)
+    key_data = key_file.file.read(MAX_CERT_BYTES + 1)
+    if len(cert_data) > MAX_CERT_BYTES or len(key_data) > MAX_CERT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Certificate and key files must be smaller than {MAX_CERT_BYTES // 1024} KiB each",
         )
-        rid = int(cursor.lastrowid)
-    return {"id": rid, "name": name, "token": token[:16]+"...", "status": "registered", "url": url}
+    if not cert_data or not key_data:
+        raise HTTPException(status_code=400, detail="Certificate and key files must not be empty")
+
+    target_crt = INTERNAL_SERVER_CERT if mode == "internal" else WEB_CERT_FILE
+    target_key = INTERNAL_SERVER_KEY if mode == "internal" else WEB_KEY_FILE
+    try:
+        save_certificate(target_crt, target_key, cert_data, key_data)
+    except CertificateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "uploaded": True,
+        "mode": mode,
+        "cert_path": str(target_crt),
+        "key_path": str(target_key),
+        "cert_size_bytes": len(cert_data),
+        "key_size_bytes": len(key_data),
+    }
 
 
-@router.get("/remote/scanners")
-def remote_scanners_list(customer_id: int | None = None) -> list[dict[str, Any]]:
-    conditions = []
-    params: list[Any] = []
-    if customer_id is not None:
-        conditions.append("customer_id = ?")
-        params.append(customer_id)
-    query = "SELECT * FROM remote_scanners" + (" WHERE " + " AND ".join(conditions) if conditions else "")
-    with get_db() as conn:
-        rows = conn.execute(query, params).fetchall()
-    return [{"id": r["id"], "name": r["name"], "server_url": r["server_url"], "status": r["status"], "customer_id": r["customer_id"], "group_id": r["group_id"]} for r in rows]
+def _is_admin_password_line(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        stripped = stripped[1:].lstrip()
+    return stripped.startswith("VS_ADMIN_PASSWORD=")
+
+
+def _write_env_file(path: Path, lines: list[str]) -> None:
+    """Atomically replace ``.env`` with mode 0600."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(lines).rstrip("\n") + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix=".env.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temp_name, 0o600)
+        except OSError:
+            pass
+        os.replace(temp_name, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+@router.post("/settings/admin-password")
+def set_admin_password(payload: AdminPasswordUpdate) -> dict[str, Any]:
+    """Set or disable the dashboard password, stored in the project .env file."""
+    env_path = BASE_DIR / ".env"
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    entry = f"VS_ADMIN_PASSWORD={payload.password}" if payload.password else "VS_ADMIN_PASSWORD="
+    new_lines: list[str] = []
+    found = False
+    for line in lines:
+        if _is_admin_password_line(line):
+            if not found:
+                new_lines.append(entry)
+                found = True
+            # Drop duplicate VS_ADMIN_PASSWORD lines.
+        else:
+            new_lines.append(line)
+    if not found:
+        new_lines.append(entry)
+
+    _write_env_file(env_path, new_lines)
+
+    # The auth middleware reads os.environ per request, so the change applies
+    # immediately without a restart.
+    if payload.password:
+        os.environ["VS_ADMIN_PASSWORD"] = payload.password
+    else:
+        os.environ.pop("VS_ADMIN_PASSWORD", None)
+
+    return {"ok": True, "set": bool(payload.password), "restart_required": False}

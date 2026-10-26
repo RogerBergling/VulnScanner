@@ -30,7 +30,9 @@ cp .env.example .env
 ```
 
 `run.sh` creates `.venv`, installs `requirements.txt` when needed, loads `.env`
-and starts Uvicorn on `VS_HOST:VS_PORT`.
+and starts Uvicorn on `VS_HOST:VS_PORT` using HTTP by default. Set
+`VS_SSL=true` in `.env` to start a local HTTPS listener with a self-signed
+certificate instead.
 
 ### Windows
 
@@ -52,8 +54,10 @@ the next start; restart the affected scans from the scan page.
 
 If `VS_ADMIN_PASSWORD` is empty, no login is required. This is convenient on a
 single-user workstation bound to `127.0.0.1`, but it is not safe on a shared
-network. Set a password and preferably place the service behind a TLS reverse
-proxy before remote use.
+network. Set a password from **Settings → Security** (saved to `.env` and
+applied immediately) or in `.env`, and preferably place the service behind a TLS
+reverse proxy before remote use. For local HTTPS, set `VS_SSL=true`; the
+built-in listener uses a self-signed certificate and browsers will warn.
 
 ## 3. Interface tour
 

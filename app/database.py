@@ -340,45 +340,6 @@ def init_db() -> None:
         conn.commit()
 
 
-def add_remote_scanners_table() -> None:
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS remote_scanners (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL DEFAULT '',
-                server_url TEXT NOT NULL DEFAULT '',
-                api_token TEXT NOT NULL DEFAULT '',
-                customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
-                group_id INTEGER REFERENCES asset_groups(id) ON DELETE CASCADE,
-                capabilities TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'active',
-                last_seen TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_customer ON remote_scanners(customer_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_status ON remote_scanners(status)")
-        conn.commit()
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS remote_scanners (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL DEFAULT '',
-                server_url TEXT NOT NULL DEFAULT '',
-                api_token TEXT NOT NULL DEFAULT '',
-                customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
-                group_id INTEGER REFERENCES asset_groups(id) ON DELETE CASCADE,
-                capabilities TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'active',
-                last_seen TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )""")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_customer ON remote_scanners(customer_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_remote_status ON remote_scanners(status)")
-        conn.commit()
-
-
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
