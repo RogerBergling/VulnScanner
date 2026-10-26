@@ -10,6 +10,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from requests.packages import urllib3
@@ -19,6 +20,7 @@ from ..database import get_setting
 from ..utils import parse_ports, truncate, validate_host_target
 from .authenticated import authenticated_scan
 from .base import Finding, ScanContext, ScanResult
+from .testssl import run_testssl
 from .tools import run_tool, tool_path
 from .web import (
     _add_header_findings,
@@ -412,7 +414,13 @@ def scan(ctx: ScanContext) -> ScanResult:
     # Web/TLS checks for likely HTTP ports.
     web_checks = ctx.option_bool("web_checks", True)
     web_budget = _bounded_int(ctx.option("max_web_hosts", 20), 20, 1, 200)
+    testssl_budget = _bounded_int(ctx.option("max_testssl_hosts", 5), 5, 0, 50)
+    testssl_enabled = (
+        ctx.option_bool("external_tools", False) and ctx.option_bool("testssl", False)
+    )
     web_checked = 0
+    testssl_checked = 0
+    testssl_cap_logged = False
     for item in all_open:
         if item.port in HTTP_PORTS:
             ctx.check_cancel()
@@ -438,6 +446,25 @@ def scan(ctx: ScanContext) -> ScanResult:
                 _web_vulnerability_checks(result, ctx, url, response, body)
             except Exception as exc:
                 ctx.log(f"Web vulnerability checks failed on {url}: {exc}", "warning")
+            parsed_url = urlparse(url)
+            if parsed_url.scheme == "https" and testssl_enabled:
+                if testssl_checked < testssl_budget:
+                    testssl_checked += 1
+                    try:
+                        run_testssl(
+                            result,
+                            parsed_url.hostname or item.host,
+                            parsed_url.port or 443,
+                            ctx,
+                        )
+                    except Exception as exc:
+                        ctx.log(f"testssl.sh integration failed on {url}: {exc}", "warning")
+                elif testssl_budget and not testssl_cap_logged:
+                    testssl_cap_logged = True
+                    ctx.log(
+                        f"testssl.sh limited to {testssl_budget} HTTPS service(s)",
+                        "warning",
+                    )
 
     # Nmap is optional and only used to enrich hosts with open services.
     if ctx.option_bool("external_tools", False):

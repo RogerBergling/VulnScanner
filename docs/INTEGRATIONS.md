@@ -12,6 +12,9 @@ This document covers:
 - `osv-scanner`
 - Nmap
 - Nuclei
+- testssl.sh
+- Trivy
+- Subfinder and the SecLists subdomain wordlist
 - Gitleaks
 - Semgrep
 - Git and GitHub
@@ -31,6 +34,10 @@ hardening requirements.
 | `osv-scanner` | Optional CLI | Repository scan with **External tools**, external APIs enabled | Supplemental dependency analysis |
 | Nmap | Optional CLI | Network scan with **External tools**, Nmap enabled in Settings | Service/version detection and optional NSE CVEs |
 | Nuclei | Optional CLI | Web scan with **External tools**, Nuclei enabled in Settings, external APIs enabled | Additional web templates |
+| testssl.sh | Optional CLI | Web or network scan with **External tools** and **Use testssl.sh**, testssl enabled in Settings | Deep TLS protocol, cipher and certificate review |
+| Trivy | Optional CLI | Repository scan with **External tools** and **Use Trivy**, Trivy enabled in Settings | Supplemental dependency, IaC and secret coverage |
+| Subfinder | Optional CLI | Domain scan with **Passive enumeration**, Subfinder enabled in Settings, external APIs enabled | Passive subdomain enumeration |
+| SecLists wordlist | Local file (optional download) | Domain scan with **Wordlist DNS discovery** | Local DNS brute-force names |
 | Gitleaks | Optional CLI | Repository scan with **External tools** | Supplemental secret detection |
 | Semgrep | Optional CLI | Repository scan with **External tools**, external APIs enabled | Additional SAST rules |
 | Git | Required for GitHub scans | GitHub scan | Repository cloning |
@@ -38,24 +45,27 @@ hardening requirements.
 
 The two main gates are:
 
-1. The scan's **External tools** option (or the Settings toggle for Nmap/Nuclei).
+1. The scan's **External tools** option (or the Settings toggle for
+   Nmap/Nuclei/testssl/Trivy/Subfinder).
 2. `VS_ENABLE_EXTERNAL_APIS` plus the **Allow external APIs** setting. This
-   controls OSV.dev, KEV sync, GitHub-related outbound calls, Nuclei, Semgrep
-   and `osv-scanner`.
+   controls OSV.dev, KEV sync, GitHub-related outbound calls, Nuclei, Semgrep,
+   `osv-scanner`, Subfinder and Trivy database updates.
 
-Gitleaks, local Git operations, Nmap and the built-in scanners do not require
-`VS_ENABLE_EXTERNAL_APIS`, although Nmap and Nuclei have their own Settings
-toggles.
+Gitleaks, testssl.sh, local Git operations, Nmap and the built-in scanners do
+not require `VS_ENABLE_EXTERNAL_APIS`, although each optional tool also has its
+own Settings toggle. Wordlist DNS discovery is local and does not require
+external APIs.
 
 Tool paths are resolved in this order:
 
 1. The matching `VS_*_PATH` environment variable, if it points to an existing
    file.
-2. The executable found on `PATH`.
+2. The executable found on `PATH` (`testssl.sh` or `testssl` for testssl.sh).
 3. Not available: the scan logs a warning and continues.
 
-Settings shows availability, path and version for `nmap`, `nuclei`,
-`osv-scanner`, `gitleaks`, `semgrep` and `git`.
+Settings shows availability, path and version for `nmap`, `nuclei`, `testssl`,
+`trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep` and `git`. Paths can
+be edited in Settings; they are written to `.env` and applied immediately.
 
 ## 2. OSV.dev
 
@@ -300,6 +310,105 @@ The cloned code is treated as untrusted data. It is parsed and read, not
 executed. Respect the repository licence and the owner's authorisation when
 cloning private or third-party code.
 
+### 4.7 testssl.sh
+
+testssl.sh adds a deep TLS review that the built-in socket inspection does not
+attempt. It runs only when **External tools** and **Use testssl.sh** are enabled
+for a web or network scan, and **Enable testssl.sh integration** is on in
+Settings.
+
+- Runs against HTTPS endpoints only: the web scan target, or HTTPS services
+  discovered by a network scan.
+- Network scans use `max_testssl_hosts` (default 5, range 0-50) to cap slow
+  handshakes.
+- Command shape:
+
+  ```text
+  testssl.sh --jsonfile <temp>/testssl.json --color 0 --quiet <host>:<port>
+  ```
+
+- The JSON report is parsed defensively. `OK`, `INFO` and informational test
+  records are ignored; `WARN`, `LOW`, `MEDIUM`, `HIGH` and `CRITICAL` records
+  become TLS findings. At most 500 findings are kept.
+- testssl.sh is invoked without a shell and with a 600-second timeout. A
+  missing binary, timeout, malformed report or non-zero exit is logged and the
+  built-in TLS findings remain.
+- It connects directly to the target and does not require
+  `VS_ENABLE_EXTERNAL_APIS`.
+
+Set `VS_TESTSSL_PATH` or use Settings when the script is not named
+`testssl.sh`/`testssl` on `PATH`. Only run it against endpoints you are
+authorised to test.
+
+### 4.8 Trivy
+
+Trivy adds filesystem dependency, infrastructure-as-code and secret coverage to
+repository and GitHub scans. It runs only when **External tools** and **Use
+Trivy** are enabled and **Enable Trivy integration** is on in Settings.
+
+- Command shape:
+
+  ```text
+  trivy fs --format json --scanners vuln,misconfig,secret \
+    --exit-code 0 --no-progress --quiet --cache-dir <data>/trivy-cache <repo>
+  ```
+
+- Trivy's cache lives under `VS_DATA_DIR/trivy-cache`.
+- When external APIs are disabled, `--skip-db-update` is added. Trivy then uses
+  an existing local vulnerability database; if none exists, it logs the failure
+  and the built-in dependency checks remain the result.
+- Findings are de-duplicated against built-in package findings by advisory,
+  package and version. At most 1500 Trivy findings are kept.
+- Vulnerabilities, misconfigurations and detected secrets get stable keys.
+  Detected secret values are truncated in evidence; rotate anything matched.
+- A missing binary, timeout or malformed report is logged without failing the
+  scan.
+
+Set `VS_TRIVY_PATH` or use Settings to pin a version. Trivy is executed without
+a shell.
+
+### 4.9 Subfinder and the subdomain wordlist
+
+The **Domain** scan type has two independent discovery paths:
+
+1. **Passive enumeration** with Subfinder.
+2. **Wordlist DNS discovery**, a local brute-force pass using an editable list.
+
+Subfinder does not accept a wordlist, so the two paths are separate. Subfinder
+runs only with **Passive enumeration** enabled, external APIs enabled and
+**Enable Subfinder integration** on in Settings. Command shape:
+
+```text
+subfinder -d example.com -silent -json -all
+```
+
+Both JSON-lines and plain host-per-line output are accepted. Only names that
+end in the scanned domain are kept.
+
+Wordlist discovery resolves `<name>.<domain>` for each entry. Before scanning it
+probes a random name to detect wildcard DNS; if a wildcard resolves, the
+brute-force pass is skipped to avoid a flood of false positives.
+
+The default wordlist is `VS_DATA_DIR/wordlists/subdomains.txt`. The GUI can edit
+it under **Settings → Subdomain wordlist** while the file is inside the data
+directory. A deployment can point `VS_SUBFINDER_WORDLIST` at another file (for
+example a SecLists checkout), but the GUI then treats it as read-only.
+
+SecLists is the standard source:
+
+- Repository: <https://github.com/danielmiessler/SecLists>
+- Default download: `Discovery/DNS/subdomains-top1million-5000.txt`
+- Override the download with `VS_SECLISTS_SUBDOMAIN_URL`.
+
+**Load SecLists list** downloads the file and replaces the editable wordlist.
+The download is an explicit action; scans never fetch a wordlist on their own.
+The API and GUI cap the editable/downloaded file at 2 MiB and the scan reads at
+most `max_words` entries (default 5000, range 1-50000).
+
+Domain scans report discovered hosts as informational findings and do not scan
+them automatically. Confirm ownership and scope before adding an asset or
+starting a web/network scan against a discovered name.
+
 ## 5. Active Directory collectors
 
 VulnScanner does not bundle PingCastle or Purple Knight, and it does not run
@@ -340,6 +449,12 @@ minimal JSON shape and collector parameters.
 | `osv-scanner` unsupported flags | Legacy command is attempted; failure is logged. |
 | GitHub clone fails | Scan fails with a redacted error and the temporary directory is removed. |
 | Nmap/Nuclei times out | Logged; the built-in result remains. |
+| testssl.sh missing or fails | Logged; built-in TLS observations remain. |
+| Trivy database unavailable offline | Logged; built-in dependency/IaC/secret checks remain. |
+| Subfinder unavailable or external APIs off | Logged; wordlist DNS discovery still runs. |
+| Subdomain wordlist missing or empty | Logged; passive Subfinder results are still reported. |
+| Wildcard DNS detected | Wordlist DNS discovery is skipped; passive results remain. |
+| SecLists download fails | API returns `502`; the existing wordlist is unchanged. |
 
 The scan event log is the first place to look when an integration is not used.
 Settings shows whether the binary is visible and which version it reports.
@@ -348,9 +463,14 @@ Settings shows whether the binary is visible and which version it reports.
 
 | Variable | Integration | Notes |
 | --- | --- | --- |
-| `VS_ENABLE_EXTERNAL_APIS` | OSV, KEV, GitHub, Nuclei, Semgrep, osv-scanner | Process-level switch; disabled in air-gapped deployments. |
+| `VS_ENABLE_EXTERNAL_APIS` | OSV, KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy DB, SecLists download | Process-level switch; disabled in air-gapped deployments. |
 | `VS_NMAP_PATH` | Nmap | Absolute path or empty to use `PATH`. |
 | `VS_NUCLEI_PATH` | Nuclei | Absolute path or empty to use `PATH`. |
+| `VS_TESTSSL_PATH` | testssl.sh | Absolute path or empty to use `PATH` (`testssl.sh` or `testssl`). |
+| `VS_TRIVY_PATH` | Trivy | Absolute path or empty to use `PATH`. |
+| `VS_SUBFINDER_PATH` | Subfinder | Absolute path or empty to use `PATH`. |
+| `VS_SUBFINDER_WORDLIST` | Subdomain wordlist | Defaults to `$VS_DATA_DIR/wordlists/subdomains.txt`; files outside the data directory are read-only in the GUI. |
+| `VS_SECLISTS_SUBDOMAIN_URL` | SecLists download | Raw URL used by **Load SecLists list**. |
 | `VS_OSV_SCANNER_PATH` | osv-scanner | Absolute path or empty to use `PATH`. |
 | `VS_GITLEAKS_PATH` | Gitleaks | Absolute path or empty to use `PATH`. |
 | `VS_SEMGREP_PATH` | Semgrep | Absolute path or empty to use `PATH`. |
@@ -361,6 +481,8 @@ Settings shows whether the binary is visible and which version it reports.
 
 Settings toggles are stored in SQLite and survive restarts. Process environment
 variables are read at startup, so restart the server after changing `.env`.
+Tool paths and the subdomain wordlist are the exception: the Settings page
+writes them to `.env`/disk and applies the change immediately.
 
 ## 8. Adding another integration
 

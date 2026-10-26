@@ -101,10 +101,11 @@ persisted in SQLite.
 
 | Type | Target | Main checks |
 | --- | --- | --- |
-| Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, optional Nuclei |
-| Network | Hostname, IP address or CIDR (`/30` to `/24` by default) | TCP ports, dangerous services, banners, web checks on discovered HTTP ports, optional Nmap service/version detection and NSE CVEs; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
-| Local repository | Absolute path on the server | Secrets, dependency manifests/OSV, source review, optional Gitleaks/Semgrep/osv-scanner |
+| Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, optional Nuclei and testssl.sh |
+| Network | Hostname, IP address or CIDR (`/30` to `/24` by default) | TCP ports, dangerous services, banners, web checks on discovered HTTP ports, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
+| Local repository | Absolute path on the server | Secrets, dependency manifests/OSV, source review, optional Gitleaks/Semgrep/osv-scanner and Trivy |
 | GitHub repository | `https://github.com/owner/repo` or `owner/repo` | Clone plus the same repository checks; private repositories can use a scan-only token |
+| Domain | `example.com` | Passive Subfinder enumeration plus local DNS wordlist discovery from an editable SecLists list; discovered hosts are reported, not scanned |
 | Active Directory | JSON report path or import API | Guest account, password policy, lockout, krbtgt age, delegation, Kerberoasting, AS-REP roasting, stale accounts, privileged groups, AdminCount, machine account quota, recycle bin, functional level |
 
 Optional CLI tools never replace the built-in checks. If a tool is absent, the
@@ -162,8 +163,10 @@ Environment variables can also be exported directly.
 | `VS_DATA_DIR` | `./data` | Database, reports and temporary clone directory. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials. Back it up with the database. |
-| `VS_ENABLE_EXTERNAL_APIS` | `true` | Allow OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep and osv-scanner outbound calls. |
-| `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools; empty searches `PATH`. |
+| `VS_ENABLE_EXTERNAL_APIS` | `true` | Allow OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. |
+| `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings. |
+| `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings when inside the data directory. |
+| `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list** in Settings. |
 | `VS_MAX_REPO_BYTES` | `536870912` | Maximum cloned repository size. |
 | `VS_MAX_SOURCE_FILE_BYTES` | `1048576` | Maximum file size read by source scanners. |
 | `VS_MAX_SCAN_FILES` | `20000` | Maximum files visited per scan. |

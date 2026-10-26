@@ -76,7 +76,7 @@ class AssetUpdate(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-ScanType = Literal["web", "network", "repo", "github", "ad"]
+ScanType = Literal["web", "network", "repo", "github", "domain", "ad"]
 CredentialOS = Literal["linux", "windows"]
 CredentialAuth = Literal["password", "key"]
 CredentialAccount = Literal["local", "domain"]
@@ -145,7 +145,7 @@ class ScanCreate(BaseModel):
 
     @model_validator(mode="after")
     def check_target(self) -> "ScanCreate":
-        if self.scan_type in {"web", "network", "repo", "github", "ad"} and not self.target.strip():
+        if self.scan_type in {"web", "network", "repo", "github", "domain", "ad"} and not self.target.strip():
             raise ValueError("This scan type requires a target")
         if self.credentials and self.scan_type != "network":
             raise ValueError("Credentials can only be supplied for network scans")
@@ -213,6 +213,9 @@ class SettingsUpdate(BaseModel):
     allow_external_apis: bool | None = None
     nuclei_enabled: bool | None = None
     nmap_enabled: bool | None = None
+    testssl_enabled: bool | None = None
+    trivy_enabled: bool | None = None
+    subfinder_enabled: bool | None = None
 
     # SMTP notification settings.
     smtp_host: str | None = Field(default=None, max_length=253)
@@ -248,6 +251,50 @@ class SettingsUpdate(BaseModel):
             return value
         if not value.lower().startswith(("http://", "https://")):
             raise ValueError("Webhook URL must start with http:// or https://")
+        return value
+
+
+class ToolSettingsUpdate(BaseModel):
+    paths: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("paths")
+    @classmethod
+    def validate_paths(cls, value: dict[str, str]) -> dict[str, str]:
+        allowed = {
+            "nmap",
+            "nuclei",
+            "testssl",
+            "trivy",
+            "subfinder",
+            "osv-scanner",
+            "gitleaks",
+            "semgrep",
+            "git",
+        }
+        clean: dict[str, str] = {}
+        for name, raw in value.items():
+            if name not in allowed:
+                raise ValueError(f"Unknown tool: {name}")
+            path = (raw or "").strip()
+            if len(path) > 1000:
+                raise ValueError(f"{name} path must be shorter than 1000 characters")
+            unsafe = set("\r\n\x00 \t;$\"`'|&<>(){}[]*?!~#\\")
+            if any(char in path for char in unsafe):
+                raise ValueError(
+                    f"{name} path contains spaces or characters that are unsafe in .env"
+                )
+            clean[name] = path
+        return clean
+
+
+class WordlistUpdate(BaseModel):
+    content: str = Field(default="", max_length=2_000_000)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("Wordlist contains invalid null bytes")
         return value
 
 

@@ -17,6 +17,7 @@ from .dependencies import scan_dependencies
 from .secrets import scan_secrets
 from .source import scan_source
 from .tools import run_tool, tool_path
+from .trivy import scan_trivy
 
 
 def _directory_size(path: Path) -> int:
@@ -119,12 +120,19 @@ def scan_repository(ctx: ScanContext, target: str, token: str | None = None) -> 
             source = scan_source(ctx, root)
             result.findings.extend(source.findings)
             _merge_metadata(result, source, "source")
+        ctx.progress(86, "Running Trivy (optional)")
+        try:
+            result.metadata["trivy_findings"] = scan_trivy(ctx, root, result)
+        except Exception as exc:
+            ctx.log(f"Trivy integration failed: {exc}", "warning")
+            result.metadata["trivy_findings"] = 0
         result.metadata["options"] = {
             "secrets": include_secrets,
             "dependencies": include_dependencies,
             "source": include_source,
             "git_history": ctx.option_bool("git_history", False),
             "external_tools": ctx.option_bool("external_tools", False),
+            "trivy": ctx.option_bool("trivy", False),
         }
         ctx.progress(96, "Finalizing repository results")
         return result

@@ -183,7 +183,7 @@ def create_schedule(
 ) -> ScanSchedule:
     from .database import transaction
 
-    if scan_type not in {"web", "network", "repo", "github", "ad"}:
+    if scan_type not in {"web", "network", "repo", "github", "domain", "ad"}:
         raise HTTPException(status_code=400, detail=f"Invalid scan type: {scan_type}")
 
     with transaction() as conn:

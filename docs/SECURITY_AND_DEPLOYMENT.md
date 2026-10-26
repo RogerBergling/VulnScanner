@@ -30,7 +30,8 @@ anything.
 | Credential guessing | Repeated Basic auth attempts | Strong password, network allow-list, reverse-proxy rate limiting (not built in) |
 | Stolen agent token | Token copied from an endpoint | Hashed storage, TLS, file permissions, revocation, re-enrolment |
 | Malicious scanned content | A web page, repository file or AD report crafted to attack the scanner | Bounded parsing, size limits, no shell interpolation, read-only collection |
-| Unsafe optional tools | A malicious Nuclei template or Semgrep rule | Install from trusted sources, pin versions, restrict who can change tool directories |
+| Unsafe optional tools | A malicious Nuclei template, Semgrep rule or executable path set in Settings | Install from trusted sources, pin versions, restrict who can change tool directories, enable dashboard authentication |
+| Third-party enumeration | Subfinder queries passive sources about a domain | Authorise the disclosure, or disable passive enumeration and use the local wordlist only |
 | Local privilege abuse | Another user reads the database or `.env` | Dedicated service account, restrictive file modes, host access control |
 | Data loss | Disk failure, accidental deletion, upgrade | Backups of the database plus WAL/SHM, tested restore |
 | CSRF/XSS in the interface | A malicious site causes state changes | Same-origin SPA, strict CSP, no inline handlers, JSON APIs; see limitations |
@@ -388,13 +389,23 @@ repositories, make outbound connections and consume significant CPU or memory.
   plugin paths.
 - Review Nuclei templates and Semgrep rules before use. They are executable
   scanning logic, even when they do not run arbitrary code.
-- Use `VS_*_PATH` to pin the exact executable in a service deployment.
+- Use `VS_*_PATH` to pin the exact executable in a service deployment. Settings
+  can also edit these paths and applies them immediately; anyone who can reach
+  an unauthenticated dashboard can therefore choose which executable the scanner
+  runs. Set `VS_ADMIN_PASSWORD` before exposing the UI beyond loopback.
 - Nmap's `vulners` script sends service/version information to a third-party
   service. Use it only when that disclosure is authorised.
+- Subfinder sends the scanned domain to passive public sources. Use the local
+  wordlist-only mode when that disclosure is not authorised.
+- Trivy may download its vulnerability database when external APIs are enabled.
+  In air-gapped deployments, pre-populate `data/trivy-cache` and leave external
+  APIs disabled (`--skip-db-update` is then used).
+- **Load SecLists list** downloads a wordlist over HTTPS from GitHub. The
+  download is explicit; scans never fetch wordlists automatically.
 - Semgrep `--config auto` contacts the Semgrep registry. Provide local rules or
   disable external tools in restricted environments.
-- Gitleaks findings may contain credential fragments; evidence is redacted but
-  should still be handled as sensitive.
+- Gitleaks and Trivy findings may contain credential fragments; evidence is
+  redacted but should still be handled as sensitive.
 
 The built-in scanners remain available if a tool is missing or disabled.
 

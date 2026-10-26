@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
 from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
@@ -43,9 +44,13 @@ from .config import (
     MAX_CIDR_HOSTS,
     PORT,
     SCAN_WORKERS,
+    SECLISTS_REPOSITORY_URL,
     TOP_PORTS,
+    TOOL_ENV_VARS,
+    TOOL_PATHS,
     database_path,
     reports_dir,
+    subfinder_wordlist_path,
 )
 from .credentials import (
     CredentialError,
@@ -96,9 +101,17 @@ from .schemas import (
     GroupUpdate,
     ScanCreate,
     SettingsUpdate,
+    ToolSettingsUpdate,
+    WordlistUpdate,
 )
 from .scanners.ad import process_ad_report
 from .scanners.kev import KevSyncError, sync_kev
+from .scanners.subdomains import (
+    download_seclists_wordlist,
+    normalize_domain,
+    save_wordlist,
+    wordlist_info,
+)
 from .scanners.tools import tool_status
 from .scans import scan_counts
 from .security import authenticate_agent, create_enrollment_token
@@ -779,7 +792,7 @@ def asset_credentials_update(asset_id: int, payload: AssetCredentialUpdate) -> d
 def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     bool_keys = {
-        "web": ["active", "external_tools"],
+        "web": ["active", "external_tools", "testssl"],
         "network": [
             "external_tools",
             "nmap_vulners",
@@ -787,9 +800,25 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "web_checks",
             "winrm_https",
             "verify_tls",
+            "testssl",
         ],
-        "repo": ["include_secrets", "include_dependencies", "include_source", "git_history", "external_tools"],
-        "github": ["include_secrets", "include_dependencies", "include_source", "git_history", "external_tools"],
+        "repo": [
+            "include_secrets",
+            "include_dependencies",
+            "include_source",
+            "git_history",
+            "external_tools",
+            "trivy",
+        ],
+        "github": [
+            "include_secrets",
+            "include_dependencies",
+            "include_source",
+            "git_history",
+            "external_tools",
+            "trivy",
+        ],
+        "domain": ["subfinder", "bruteforce"],
         "ad": [],
     }.get(scan_type, [])
     for key in bool_keys:
@@ -826,8 +855,22 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             ("max_auth_hosts", 1, 256),
             ("auth_timeout", 3, 90),
             ("max_web_hosts", 1, 200),
+            ("max_testssl_hosts", 0, 50),
             ("ssh_port", 1, 65535),
             ("winrm_port", 1, 65535),
+        ):
+            if key not in options:
+                continue
+            try:
+                value = int(options[key])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+            clean[key] = max(low, min(high, value))
+    if scan_type == "domain":
+        for key, low, high in (
+            ("max_words", 1, 50_000),
+            ("workers", 1, 100),
+            ("max_subdomains", 1, 5_000),
         ):
             if key not in options:
                 continue
@@ -860,6 +903,8 @@ def _normalize_scan_target(scan_type: str, target: str) -> str:
             return normalized
         if scan_type == "repo":
             return normalize_repo_target(target)
+        if scan_type == "domain":
+            return normalize_domain(target)
         if scan_type == "ad":
             path = Path(target).expanduser()
             if not path.is_file():
@@ -1142,7 +1187,7 @@ def rescan(scan_id: int, request: Request) -> dict[str, Any]:
         row = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if row["scan_type"] not in {"web", "network", "repo", "github", "ad"}:
+    if row["scan_type"] not in {"web", "network", "repo", "github", "domain", "ad"}:
         raise HTTPException(status_code=400, detail="Agent scans must be started from the Agents page")
     if not row["customer_id"]:
         raise HTTPException(status_code=400, detail="The original scan no longer has a customer")
@@ -1939,6 +1984,9 @@ def get_settings() -> dict[str, Any]:
         "allow_external_apis": get_setting("allow_external_apis", "true") == "true",
         "nuclei_enabled": get_setting("nuclei_enabled", "true") == "true",
         "nmap_enabled": get_setting("nmap_enabled", "true") == "true",
+        "testssl_enabled": get_setting("testssl_enabled", "true") == "true",
+        "trivy_enabled": get_setting("trivy_enabled", "true") == "true",
+        "subfinder_enabled": get_setting("subfinder_enabled", "true") == "true",
         "external_apis_available": ENABLE_EXTERNAL_APIS,
         "admin_auth_enabled": bool(os.getenv("VS_ADMIN_PASSWORD")),
         "bind_host": configured_bind_host,
@@ -1952,6 +2000,9 @@ def get_settings() -> dict[str, Any]:
         "database_size": db_size,
         "reports_path": str(reports_dir()),
         "tools": tool_status(),
+        "tool_paths": dict(TOOL_PATHS),
+        "wordlist_path": str(subfinder_wordlist_path()),
+        "seclists_url": SECLISTS_REPOSITORY_URL,
         "limits": {
             "top_ports": len(TOP_PORTS),
             "agent_job_timeout_seconds": AGENT_JOB_TIMEOUT_SECONDS,
@@ -1983,7 +2034,14 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
     # left untouched instead of being reset to their schema defaults.
     updates = payload.model_dump(exclude_unset=True)
 
-    for key in ("allow_external_apis", "nuclei_enabled", "nmap_enabled"):
+    for key in (
+        "allow_external_apis",
+        "nuclei_enabled",
+        "nmap_enabled",
+        "testssl_enabled",
+        "trivy_enabled",
+        "subfinder_enabled",
+    ):
         value = updates.get(key)
         if value is not None:
             set_setting(key, "true" if value else "false")
@@ -2076,6 +2134,7 @@ def meta() -> dict[str, Any]:
             {"id": "network", "name": "Server / network services"},
             {"id": "repo", "name": "Local source repository"},
             {"id": "github", "name": "GitHub repository"},
+            {"id": "domain", "name": "Domain subdomain discovery"},
             {"id": "ad", "name": "Active Directory report"},
         ],
         "agent_modules": [
@@ -2215,7 +2274,7 @@ def scan_pdf(
 @router.get("/tools/status")
 def tools_status() -> dict[str, Any]:
     from .tools_check import check_external_tools
-    return {"tools": check_external_tools(), "message": "Run 'nmap --version' / 'nuclei -version' manually to confirm latest releases."}
+    return {"tools": check_external_tools(), "message": "Run --version manually to confirm the latest releases of optional tools."}
 
 # ============================================================================
 # SSL / Certificate management
@@ -2454,3 +2513,73 @@ def set_bind_address(payload: BindAddressUpdate) -> dict[str, Any]:
         "active_bind_port": PORT,
         "restart_required": restart_required,
     }
+
+
+@router.post("/settings/tools")
+def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
+    """Persist optional tool paths to .env and apply them to this process."""
+    entries: dict[str, str] = {}
+    for name, raw in payload.paths.items():
+        path = (raw or "").strip()
+        if not path:
+            entries[TOOL_ENV_VARS[name]] = ""
+            continue
+        expanded = Path(path).expanduser()
+        if not expanded.is_absolute():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} path must be absolute, for example /usr/local/bin/{name}",
+            )
+        if not expanded.is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} path does not exist or is not a file",
+            )
+        entries[TOOL_ENV_VARS[name]] = path
+
+    if entries:
+        _upsert_env_entries(BASE_DIR / ".env", entries)
+        for name, raw in payload.paths.items():
+            path = (raw or "").strip()
+            os.environ[TOOL_ENV_VARS[name]] = path
+            TOOL_PATHS[name] = path
+
+    return {
+        "ok": True,
+        "tool_paths": dict(TOOL_PATHS),
+        "tools": tool_status(),
+    }
+
+
+@router.get("/settings/wordlist")
+def get_wordlist() -> dict[str, Any]:
+    """Return the editable subdomain wordlist and its provenance."""
+    return wordlist_info()
+
+
+@router.post("/settings/wordlist")
+def update_wordlist(payload: WordlistUpdate) -> dict[str, Any]:
+    try:
+        return save_wordlist(payload.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save the wordlist: {exc}") from exc
+
+
+@router.post("/settings/wordlist/seclists")
+def load_seclists_wordlist() -> dict[str, Any]:
+    """Download the standard SecLists DNS wordlist into the editable path."""
+    if not ENABLE_EXTERNAL_APIS or get_setting("allow_external_apis", "true") != "true":
+        raise HTTPException(
+            status_code=400,
+            detail="External APIs are disabled. Enable them in Settings or set VS_ENABLE_EXTERNAL_APIS=true.",
+        )
+    try:
+        return download_seclists_wordlist()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Could not download SecLists: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save the wordlist: {exc}") from exc

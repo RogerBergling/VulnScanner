@@ -81,6 +81,7 @@ Lists scan types and agent modules.
     {"id": "network", "name": "Server / network services"},
     {"id": "repo", "name": "Local source repository"},
     {"id": "github", "name": "GitHub repository"},
+    {"id": "domain", "name": "Domain subdomain discovery"},
     {"id": "ad", "name": "Active Directory report"}
   ],
   "agent_modules": [
@@ -378,7 +379,7 @@ Query parameters:
 | `group_id` | int | Filter by group. |
 | `asset_id` | int | Filter by asset. |
 | `status` | string | `queued`, `running`, `waiting_agent`, `completed`, `failed`, `cancelled`. |
-| `scan_type` | string | `web`, `network`, `repo`, `github`, `ad`, `agent`. |
+| `scan_type` | string | `web`, `network`, `repo`, `github`, `domain`, `ad`, `agent`. |
 | `active` | bool | Only queued/running/waiting_agent. |
 | `q` | string | Search target, stage, customer name or asset name. |
 | `limit` | int | 1-500, default 50. |
@@ -486,7 +487,7 @@ Options are filtered per scan type:
 
 ```json
 {
-  "web": {"active": true, "external_tools": false},
+  "web": {"active": true, "external_tools": false, "testssl": false},
   "network": {
     "ports": "22,80,443,8000-8100",
     "profile": "common",
@@ -495,6 +496,8 @@ Options are filtered per scan type:
     "nmap_vulners": false,
     "web_checks": true,
     "max_web_hosts": 20,
+    "testssl": false,
+    "max_testssl_hosts": 5,
     "authenticated": true,
     "target_os": "auto",
     "max_auth_hosts": 32,
@@ -510,22 +513,34 @@ Options are filtered per scan type:
     "include_dependencies": true,
     "include_source": true,
     "git_history": false,
-    "external_tools": false
+    "external_tools": false,
+    "trivy": false
   },
   "github": {
     "include_secrets": true,
     "include_dependencies": true,
     "include_source": true,
     "git_history": false,
-    "external_tools": false
+    "external_tools": false,
+    "trivy": false
+  },
+  "domain": {
+    "subfinder": true,
+    "bruteforce": true,
+    "max_words": 5000,
+    "workers": 50,
+    "max_subdomains": 5000
   }
 }
 ```
 
 Invalid port profiles, non-numeric timeouts, missing targets and invalid URLs
 return `400`/`422`. Numeric network options are clamped to safe ranges
-(`max_auth_hosts` 1-256, `auth_timeout` 3-90, `max_web_hosts` 1-200, ports
-1-65535); invalid `target_os` or `winrm_transport` values return `400`.
+(`max_auth_hosts` 1-256, `auth_timeout` 3-90, `max_web_hosts` 1-200,
+`max_testssl_hosts` 0-50, ports 1-65535); invalid `target_os` or
+`winrm_transport` values return `400`. Domain options are clamped to
+`max_words` 1-50000, `workers` 1-100 and `max_subdomains` 1-5000. Domain
+targets must be bare domains, not URLs, IP addresses or wildcards.
 
 Authenticated network options:
 
@@ -1003,6 +1018,9 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "allow_external_apis": true,
   "nuclei_enabled": true,
   "nmap_enabled": true,
+  "testssl_enabled": true,
+  "trivy_enabled": true,
+  "subfinder_enabled": true,
   "external_apis_available": true,
   "admin_auth_enabled": false,
   "bind_host": "127.0.0.1",
@@ -1018,6 +1036,9 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "tools": {
     "nmap": {"available": false, "path": "", "version": ""}
   },
+  "tool_paths": {"nmap": "", "testssl": "", "trivy": "", "subfinder": ""},
+  "wordlist_path": "/path/to/data/wordlists/subdomains.txt",
+  "seclists_url": "https://github.com/danielmiessler/SecLists",
   "limits": {
     "top_ports": 58,
     "agent_job_timeout_seconds": 3600,
@@ -1050,6 +1071,9 @@ restart is needed. `smtp_password` is stored but never returned by the API.
   "allow_external_apis": false,
   "nuclei_enabled": false,
   "nmap_enabled": true,
+  "testssl_enabled": true,
+  "trivy_enabled": true,
+  "subfinder_enabled": true,
   "smtp_host": "smtp.example.com",
   "smtp_port": "587",
   "smtp_user": "scanner@example.com",
@@ -1068,7 +1092,8 @@ restart is needed. `smtp_password` is stored but never returned by the API.
 ```
 
 All fields are optional; omitted fields keep their current values. Boolean
-settings are `allow_external_apis`, `nuclei_enabled` and `nmap_enabled`.
+settings are `allow_external_apis`, `nuclei_enabled`, `nmap_enabled`,
+`testssl_enabled`, `trivy_enabled` and `subfinder_enabled`.
 `smtp_port` must be `1`–`65535`, and `notify_webhook_default` must start with
 `http://` or `https://`. Numeric guardrails are bounded: `max_web_hosts`
 1–10000, `workers` 1–32, `max_repo_bytes` 1 MiB–10 GiB,
@@ -1089,6 +1114,42 @@ address (hostnames are rejected) and `bind_port` must be `1`–`65535`; invalid
 values return `422`. Returns the saved values, the currently active address and
 `restart_required`. The GUI exposes this in **Settings → Security → Bind
 address**.
+
+### `POST /api/settings/tools`
+
+```json
+{"paths": {"nmap": "/usr/local/bin/nmap", "trivy": "", "testssl": "/opt/testssl/testssl.sh"}}
+```
+
+Stores the matching `VS_*_PATH` values in `.env` (mode `0600`) and applies them
+to the running process immediately, so a restart is not required. Paths must be
+absolute, free of spaces and shell metacharacters, and must point to an existing
+file; send an empty string to clear an override and search `PATH`. Unknown tool
+names return `422`. Returns the saved overrides and refreshed availability.
+
+### `GET /api/settings/wordlist`
+
+Returns the subdomain wordlist path, contents (up to 2 MiB), entry count, source
+repository and `editable`/`truncated` flags. A file outside `VS_DATA_DIR`, or one
+larger than the editor limit, is read-only in the GUI.
+
+### `POST /api/settings/wordlist`
+
+```json
+{"content": "www\nmail\napi\n"}
+```
+
+Writes the editable subdomain wordlist atomically. The file must be inside
+`VS_DATA_DIR`; content is limited to 2 MiB and null bytes are rejected. Returns
+the same shape as `GET /api/settings/wordlist`.
+
+### `POST /api/settings/wordlist/seclists`
+
+Downloads the standard SecLists DNS wordlist (`Discovery/DNS/subdomains-top1million-5000.txt`
+by default) into the editable path. Requires external APIs; returns `400` when
+they are disabled or the download is invalid, `502` when the download fails, and
+`500` when the file cannot be written. The existing wordlist is left unchanged
+on failure.
 
 ### `POST /api/settings/admin-password`
 

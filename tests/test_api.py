@@ -18,6 +18,7 @@ def test_health_meta_and_dashboard(client):
         "network",
         "repo",
         "github",
+        "domain",
         "ad",
     }
     assert "system" in {item["id"] for item in meta["agent_modules"]}

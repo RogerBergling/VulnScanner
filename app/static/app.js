@@ -18,10 +18,11 @@
     network: { label: 'Server / network', placeholder: '192.168.1.0/24, hostname or IP address' },
     repo: { label: 'Local repository', placeholder: '/path/to/repository (on this server)' },
     github: { label: 'GitHub repository', placeholder: 'https://github.com/owner/repo or owner/repo' },
+    domain: { label: 'Domain / subdomains', placeholder: 'example.com' },
     ad: { label: 'AD report file', placeholder: '/path/to/ad-report.json (on this server)' }
   };
   const ASSET_TYPE = {
-    web: 'web', github: 'github', repo: 'repo', host: 'network', domain: 'network',
+    web: 'web', github: 'github', repo: 'repo', host: 'network', domain: 'domain',
     agent: 'network', other: 'network'
   };
   const ACTIVE_STATUSES = ['queued', 'running', 'waiting_agent'];
@@ -956,6 +957,7 @@
       return '<div class="form-section"><h3>Web scan options</h3><div class="checkbox-row">' +
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-external"><span><strong>Use Nuclei</strong> — run the optional Nuclei templates if installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
         '</div><div class="modal-note" style="margin-top:8px">Only scan applications you are authorized to test. Active checks send real attack payloads.</div></div>';
     }
     if (type === 'network') {
@@ -971,7 +973,8 @@
         '<div class="checkbox-row" style="margin-top:12px">' +
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
-        '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — headers, exposed files and Nuclei on discovered HTTP ports.</span></label></div>' +
+        '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — headers, exposed files and Nuclei on discovered HTTP ports.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label></div>' +
         '<div class="form-section" id="network-auth-fields" style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">' +
         '<div class="checkbox-row"><label class="check"><input type="checkbox" id="opt-auth"><span><strong>Authenticated checks</strong> — log in with a high-privilege account to inventory patches, packages, users and configuration (server scans only).</span></label></div>' +
         '<div class="form-grid" style="margin-top:10px">' +
@@ -1012,9 +1015,21 @@
         '<label class="check"><input type="checkbox" id="opt-deps" checked><span><strong>Dependencies</strong> — manifest and lockfile review with OSV.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-source" checked><span><strong>Source review</strong> — heuristic SAST checks.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-external"><span><strong>Use Gitleaks, Semgrep and osv-scanner</strong> when installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-trivy"><span><strong>Use Trivy</strong> — dependency, IaC and secret coverage when installed.</span></label>' +
         '</div><div class="modal-note" style="margin-top:8px">' +
         (type === 'github' ? 'The repository is cloned to the local data directory. Private repositories need a read-only token.' :
           'The path must be readable by the VulnScanner server process.') + '</div></div>';
+    }
+    if (type === 'domain') {
+      return '<div class="form-section"><h3>Subdomain discovery options</h3><div class="checkbox-row">' +
+        '<label class="check"><input type="checkbox" id="opt-subfinder" checked><span><strong>Passive enumeration</strong> — use Subfinder when installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-bruteforce" checked><span><strong>Wordlist DNS discovery</strong> — resolve names from the editable SecLists wordlist.</span></label>' +
+        '</div><div class="form-grid" style="margin-top:12px">' +
+        '<label class="field"><span>Maximum wordlist entries</span><input class="input" id="opt-max-words" type="number" min="1" max="50000" value="5000"></label>' +
+        '<label class="field"><span>DNS workers</span><input class="input" id="opt-dns-workers" type="number" min="1" max="100" value="50"></label>' +
+        '<label class="field"><span>Maximum discovered hosts</span><input class="input" id="opt-max-subdomains" type="number" min="1" max="5000" value="5000"></label>' +
+        '</div><div class="modal-note" style="margin-top:8px">Passive sources require external APIs. Discovered hosts are reported only; they are not scanned automatically. ' +
+        'Edit the wordlist under Settings; the default source is SecLists.</div></div>';
     }
     return '<div class="form-section"><h3>Active Directory</h3><div class="modal-note">' +
       'This creates a scan from a JSON report already stored on the server. To upload a report from this browser, use ' +
@@ -1082,11 +1097,13 @@
               if (type === 'web') {
                 payload.options.active = !!($('#opt-active', ctx.overlay) || {}).checked;
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
+                payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
               } else if (type === 'network') {
                 payload.options.profile = ($('#opt-profile', ctx.overlay) || {}).value || 'common';
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
                 payload.options.web_checks = !!($('#opt-web-checks', ctx.overlay) || {}).checked;
+                payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 const ports = ($('#opt-ports', ctx.overlay) || {}).value || '';
                 if (ports.trim()) payload.options.ports = ports.trim();
                 const agentId = ($('#opt-agent', ctx.overlay) || {}).value || '';
@@ -1137,8 +1154,15 @@
                 payload.options.include_dependencies = !!($('#opt-deps', ctx.overlay) || {}).checked;
                 payload.options.include_source = !!($('#opt-source', ctx.overlay) || {}).checked;
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
+                payload.options.trivy = !!($('#opt-trivy', ctx.overlay) || {}).checked;
                 const token = ($('#scan-github-token', ctx.overlay) || {}).value || '';
                 if (type === 'github' && token.trim()) payload.github_token = token.trim();
+              } else if (type === 'domain') {
+                payload.options.subfinder = !!($('#opt-subfinder', ctx.overlay) || {}).checked;
+                payload.options.bruteforce = !!($('#opt-bruteforce', ctx.overlay) || {}).checked;
+                payload.options.max_words = Number(($('#opt-max-words', ctx.overlay) || {}).value || 5000);
+                payload.options.workers = Number(($('#opt-dns-workers', ctx.overlay) || {}).value || 50);
+                payload.options.max_subdomains = Number(($('#opt-max-subdomains', ctx.overlay) || {}).value || 5000);
               }
               const created = await post('/scans', payload);
               ctx.close();
@@ -1192,7 +1216,9 @@
           $('#target-hint', overlay).textContent = type === 'github'
             ? 'Public repositories work without a token. The clone is stored locally and deleted after the scan.'
             : (type === 'repo' ? 'Use an absolute path on the server. A relative path is resolved from the server working directory.' :
-              (type === 'ad' ? 'The JSON report must already exist on the server.' : 'Only scan systems you own or have written permission to test.'));
+              (type === 'ad' ? 'The JSON report must already exist on the server.' :
+                (type === 'domain' ? 'Enter a bare domain such as example.com. Discovered subdomains are reported, not scanned automatically.' :
+                  'Only scan systems you own or have written permission to test.')));
           $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type, agentOptionsHtml());
           const agentSelect = $('#opt-agent', overlay);
           if (agentSelect && previousAgent) {
@@ -2688,13 +2714,37 @@
         '<button class="btn btn-sm btn-subtle danger-text" data-action="delete-credential" data-credential="' + item.id + '" data-name="' + esc(item.name) + '">Delete</button></span></div>';
     }).join('') : '<p class="muted small" style="margin:0">No saved credentials. Add a Linux or Windows account to enable authenticated network scans.</p>';
     const tools = settings.tools || {};
-    const toolRows = ['nmap', 'nuclei', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].map(function (name) {
+    const toolPaths = settings.tool_paths || {};
+    const toolRows = ['nmap', 'nuclei', 'testssl', 'trivy', 'subfinder', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].map(function (name) {
       const tool = tools[name] || { available: false, path: '', version: '' };
+      const configured = toolPaths[name] || '';
       return '<div class="tool-row"><span class="tool-name">' + esc(name) + '</span>' +
         '<span class="badge ' + (tool.available ? 'sev-info' : 'sev-none') + '">' + (tool.available ? 'available' : 'not found') + '</span>' +
-        '<span class="tool-path" title="' + esc(tool.path) + '">' + esc(tool.path || 'Install it or set the path in .env') + '</span>' +
+        '<input class="input mono" id="tool-path-' + esc(name) + '" value="' + esc(configured) + '" spellcheck="false" autocomplete="off" ' +
+          'style="flex:1;min-width:180px;font-size:11.5px;padding:5px 8px" placeholder="' +
+          esc(tool.path || 'Auto-detect from PATH') + '" title="Absolute path; leave empty to search PATH">' +
         '<span class="tool-version">' + esc(tool.version || '') + '</span></div>';
     }).join('');
+    let wordlist = null;
+    try { wordlist = await get('/settings/wordlist'); }
+    catch (error) { wordlist = null; }
+    const wordlistPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Subdomain wordlist</h2><span class="spacer"></span>' +
+      '<a class="btn btn-sm" href="' + esc((wordlist && wordlist.source) || 'https://github.com/danielmiessler/SecLists') + '" target="_blank" rel="noopener">SecLists</a></div>' +
+      '<div class="panel-body">' +
+      (wordlist ? (
+        '<div class="kv"><span>Path</span><span class="mono">' + esc(wordlist.path) + '</span></div>' +
+        '<div class="kv"><span>Entries</span><span>' + num(wordlist.line_count) + (wordlist.exists ? '' : ' (file not created yet)') + '</span></div>' +
+        '<div class="kv"><span>Editable here</span><span>' + (wordlist.editable ? 'yes' :
+          (wordlist.truncated ? 'no — the file is larger than the editor limit' : 'no — the path is outside the data directory')) + '</span></div>' +
+        (wordlist.truncated ? '<div class="info-banner info-banner-warn" style="margin:10px 0">This wordlist is larger than the 2 MiB editor limit, so only the beginning is shown. Edit the file on the server or load a smaller list.</div>' : '') +
+        '<label class="field full" style="margin-top:10px"><span>One name per line. Comments start with <span class="mono">#</span>; entries are resolved as <span class="mono">&lt;name&gt;.domain</span>.</span>' +
+        '<textarea class="textarea mono" id="wordlist-content" rows="9" spellcheck="false"' + (wordlist.editable ? '' : ' readonly') + '>' + esc(wordlist.content || '') + '</textarea></label>' +
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px">' +
+        '<button class="btn btn-primary" id="save-wordlist"' + (wordlist.editable ? '' : ' disabled') + '>Save wordlist</button>' +
+        '<button class="btn" id="load-seclists">Load SecLists list</button>' +
+        '<span class="muted small">Downloads <span class="mono">Discovery/DNS/subdomains-top1million-5000.txt</span> from SecLists.</span></div>'
+      ) : '<p class="muted small" style="margin:0">Could not load the wordlist configuration.</p>') +
+      '</div></section>';
 
     view.innerHTML =
       '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Settings</h1>' +
@@ -2709,6 +2759,12 @@
             'Run Nuclei templates during web scans when the nuclei binary is installed.', settings.nuclei_enabled) +
           switchRow('set-nmap', 'Enable Nmap integration',
             'Use Nmap for service detection during network scans when the nmap binary is installed.', settings.nmap_enabled) +
+          switchRow('set-testssl', 'Enable testssl.sh integration',
+            'Run deep TLS checks during web and network scans when testssl.sh is installed.', settings.testssl_enabled) +
+          switchRow('set-trivy', 'Enable Trivy integration',
+            'Run Trivy dependency, IaC and secret checks during repository scans when installed.', settings.trivy_enabled) +
+          switchRow('set-subfinder', 'Enable Subfinder integration',
+            'Use passive subdomain enumeration during domain scans when installed.', settings.subfinder_enabled) +
           '<div style="display:flex;align-items:center;gap:10px;margin-top:16px"><button class="btn btn-primary" id="save-settings">Save settings</button>' +
           '<span class="muted small">Environment-level external API access: ' + (settings.external_apis_available ? 'enabled' : 'disabled') + '</span></div>' +
         '</div></section>' +
@@ -2749,7 +2805,12 @@
           '</div>' +
         '</div></section>' +
         '<section class="panel settings-wide"><div class="panel-head"><h2>Optional command-line tools</h2><span class="spacer"></span>' +
-          '<span class="muted small">Built-in fallbacks remain available when a tool is missing.</span></div><div class="panel-body">' + toolRows + '</div></section>' +
+          '<span class="muted small">Built-in fallbacks remain available when a tool is missing.</span></div><div class="panel-body">' + toolRows +
+          '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px">' +
+          '<button class="btn btn-primary" id="save-tool-paths">Save tool paths</button>' +
+          '<span class="muted small">Absolute paths are written to <span class="mono">.env</span> and applied immediately. Leave a field empty to search <span class="mono">PATH</span>.</span></div>' +
+        '</div></section>' +
+        wordlistPanel +
         '<section class="panel"><div class="panel-head"><h2>Local data</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Database</span><span class="mono">' + esc(settings.database_path) + '</span></div>' +
           '<div class="kv"><span>Database size</span><span>' + bytes(settings.database_size) + '</span></div>' +
@@ -2789,9 +2850,49 @@
           await patch('/settings', {
             allow_external_apis: $('#set-external').checked,
             nuclei_enabled: $('#set-nuclei').checked,
-            nmap_enabled: $('#set-nmap').checked
+            nmap_enabled: $('#set-nmap').checked,
+            testssl_enabled: $('#set-testssl').checked,
+            trivy_enabled: $('#set-trivy').checked,
+            subfinder_enabled: $('#set-subfinder').checked
           });
           toast('Settings saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-tool-paths').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const paths = {};
+          ['nmap', 'nuclei', 'testssl', 'trivy', 'subfinder', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].forEach(function (name) {
+            const input = $('#tool-path-' + name);
+            if (input) paths[name] = input.value.trim();
+          });
+          await post('/settings/tools', { paths: paths });
+          toast('Tool paths saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    const saveWordlist = $('#save-wordlist');
+    if (saveWordlist) saveWordlist.addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const content = $('#wordlist-content').value;
+          await post('/settings/wordlist', { content: content });
+          toast('Wordlist saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    const loadSeclists = $('#load-seclists');
+    if (loadSeclists) loadSeclists.addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const ok = await confirmAction('Replace the current wordlist with the standard SecLists DNS list?', 'Load SecLists');
+          if (!ok) return;
+          const info = await post('/settings/wordlist/seclists', {});
+          toast('SecLists wordlist loaded: ' + num(info.line_count) + ' entries');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });

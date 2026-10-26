@@ -188,6 +188,7 @@ Options:
 | --- | --- | --- |
 | Active checks | on | Send a small number of non-destructive test requests. Disable for a purely passive review. |
 | External tools | off | Run Nuclei if installed and allowed in Settings. |
+| Use testssl.sh | off | Run deep TLS checks when testssl.sh is installed and enabled in Settings. |
 
 Web scanning does not log in, submit destructive forms, brute force, or exploit
 SQL injection/XSS. It reports indicators that require manual validation.
@@ -215,6 +216,7 @@ Options:
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
 | NSE vulners | off | With external tools, run the Nmap `vulners` script (server-side scans only). |
+| Use testssl.sh | off | With external tools, review discovered HTTPS services when testssl.sh is installed. |
 
 Port ranges are limited to 5000 ports per range and the UI/API validate the
 input. A network scan creates an informational finding for each open service
@@ -348,6 +350,7 @@ Options:
 | Source review | on | Run built-in source heuristics. |
 | Git history | off | Clone full Git history for GitHub; otherwise shallow clone. |
 | External tools | off | Allow Gitleaks, Semgrep and osv-scanner and other CLI integrations. |
+| Use Trivy | off | With external tools, run Trivy dependency, IaC and secret checks when installed. |
 
 ### 5.5 GitHub repository scan
 
@@ -369,7 +372,40 @@ disk). Repository size is limited by `VS_MAX_REPO_BYTES`.
 GitHub scans require outbound network access to GitHub and a token with the
 minimum read permission.
 
-### 5.6 Active Directory scan/import
+### 5.6 Domain / subdomain discovery
+
+Target: a bare domain such as `example.com`. URLs, IP addresses, ports and
+wildcards are rejected. Domain scans inventory DNS names; they do not scan the
+discovered hosts.
+
+Two discovery paths can be used together:
+
+- **Passive enumeration** uses Subfinder when installed, external APIs are
+  enabled and the integration is on in Settings.
+- **Wordlist DNS discovery** resolves `<name>.<domain>` for entries in the
+  editable wordlist. A random-name probe checks for wildcard DNS; if a wildcard
+  resolves, this path is skipped to avoid false positives.
+
+Options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| Passive enumeration | on | Run Subfinder when available. |
+| Wordlist DNS discovery | on | Resolve wordlist candidates locally. |
+| Maximum wordlist entries | 5000 | Cap on entries read per scan (1-50000). |
+| DNS workers | 50 | Concurrent resolver threads (1-100). |
+| Maximum discovered hosts | 5000 | Cap on reported subdomains. |
+
+Manage the wordlist under **Settings → Subdomain wordlist**. The default is
+`data/wordlists/subdomains.txt`. **Load SecLists list** downloads the standard
+SecLists DNS list; **Save wordlist** edits the current list. A wordlist outside
+the data directory, or one larger than 2 MiB, is read-only in the GUI.
+
+Each discovered host is reported as an informational finding with its source
+(Subfinder or wordlist) and resolved addresses. Confirm ownership and scope
+before adding it as an asset or scanning it.
+
+### 5.7 Active Directory scan/import
 
 Two supported paths:
 
@@ -553,8 +589,9 @@ and uninstall details.
 The Settings page shows:
 
 - Product version and external API availability.
-- Toggles for external APIs, Nuclei and Nmap.
-- Optional tool installation status and versions.
+- Toggles for external APIs, Nuclei, Nmap, testssl.sh, Trivy and Subfinder.
+- Optional tool installation status, versions and editable absolute paths.
+- **Subdomain wordlist** editor with a **Load SecLists list** action.
 - KEV catalogue count and last sync time.
 - **Target credentials** for authenticated network scans, with encrypted
   passwords/SSH keys, customer/global scope and default flags.
@@ -565,11 +602,15 @@ The Settings page shows:
   (`VS_SCAN_WORKERS`).
 
 Disabling **Allow external APIs** prevents outbound OSV/KEV/GitHub activity
-and the Nuclei, Semgrep and osv-scanner integrations, and is appropriate for
-air-gapped installations. Built-in checks still run. Disabling Nuclei or Nmap
-prevents those tools from being invoked even when installed.
+and the Nuclei, Semgrep, osv-scanner and Subfinder integrations and the SecLists
+download, and is appropriate for air-gapped installations. Built-in checks still
+run. Disabling an individual integration prevents that tool from being invoked
+even when installed. Trivy still runs offline with `--skip-db-update` if a local
+database is already cached.
 The integration toggles are stored in SQLite and survive restarts. The bind
-address, port and admin password are written to `.env`.
+address, port and admin password are written to `.env`. Tool paths are also
+written to `.env` and applied immediately; the subdomain wordlist is stored under
+the data directory.
 
 The bind address and port are edited under **Settings → Security**. The running
 listener keeps its current address; the new value is applied after restarting
@@ -678,11 +719,13 @@ Confirm `VS_ENABLE_EXTERNAL_APIS=true`, the Settings toggle is on, and the
 server can reach `https://api.osv.dev`. Check the scan events for the logged
 error.
 
-### Nmap/Nuclei is not used
+### Nmap/Nuclei/testssl.sh/Trivy/Subfinder is not used
 
 Install the tool, ensure it is executable, and set the matching path variable
 or leave it empty so `PATH` is used. Confirm the scan option and Settings toggle
-are enabled. The Settings page shows availability and version.
+are enabled. The Settings page shows availability and version and accepts an
+absolute path. For Trivy offline, ensure a database is already cached under
+`data/trivy-cache`. For Subfinder, external APIs must be enabled.
 
 ### GitHub clone fails
 

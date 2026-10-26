@@ -30,6 +30,7 @@ from .scanners.kev import enrich_finding
 from .scanners.network import process_agent_network_payload, scan as scan_network
 from .scanners.osv import kev_lookup
 from .scanners.repository import scan_repository
+from .scanners.subdomains import scan_subdomains
 from .scanners.web import scan as scan_web
 from .utils import risk_label, risk_score, severity_summary, truncate, utcnow as now
 
@@ -135,6 +136,8 @@ def _dispatch(scan: dict[str, Any], ctx: ScanContext, runtime_options: dict[str,
     if scan_type in {"repo", "github"}:
         token = runtime_options.get("_github_token") or None
         return scan_repository(ctx, scan["target"], token)
+    if scan_type == "domain":
+        return scan_subdomains(ctx)
     if scan_type == "ad":
         return scan_ad_report(ctx, scan["target"])
     raise ValueError(f"Unsupported scan type: {scan_type}")

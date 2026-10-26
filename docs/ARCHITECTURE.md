@@ -43,14 +43,17 @@ VulnScanner is deliberately small and local-first:
 │  app/reporting.py  JSON, CSV and standalone HTML reports         │
 │                                                                  │
 │  app/scanners/     web, network, repository, dependencies,       │
-│                    secrets, source, AD, agent normalization,     │
-│                    OSV client, KEV enrichment, tool wrappers     │
+│                    secrets, source, AD, subdomains, testssl,     │
+│                    trivy, agent normalization, OSV client, KEV   │
+│                    enrichment, tool wrappers                     │
 └───────────────┬─────────────────────────────┬────────────────────┘
                 │                             │
       SQLite (WAL)                     outbound requests/subprocess
       data/vulnscanner.db              OSV.dev, CISA, GitHub,
-                                       Nmap, Nuclei, Gitleaks,
-                                       Semgrep, osv-scanner, Git
+                                       Nmap, Nuclei, testssl.sh,
+                                       Trivy, Subfinder, SecLists,
+                                       Gitleaks, Semgrep,
+                                       osv-scanner, Git
                                                 ▲
                                                 │ outbound poll only
                                      ┌──────────┴──────────┐
@@ -181,13 +184,16 @@ directly.
 
 | Engine | Module | Approach |
 | --- | --- | --- |
-| Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei. |
-| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, built-in web checks on discovered HTTP ports, optional HTTP/TLS inspection and Nmap XML parsing, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results. |
+| Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei and testssl.sh. |
+| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, built-in web checks on discovered HTTP ports, optional HTTP/TLS inspection, testssl.sh and Nmap XML parsing, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results. |
 | Authenticated host | `scanners/authenticated.py` | Chooses SSH or WinRM per host, performs one authentication attempt, collects OS/patch/package/user/configuration inventory, parses it and emits host findings and OSV package CVEs. |
-| Repository | `scanners/repository.py` | Local path or GitHub clone, then secrets, dependencies and source review. Temporary clones are deleted in a `finally` block. |
+| Repository | `scanners/repository.py` | Local path or GitHub clone, then secrets, dependencies and source review, plus optional Trivy. Temporary clones are deleted in a `finally` block. |
 | Dependencies | `scanners/dependencies.py` | Manifest/lockfile parsers for npm, Python, Go, Rust, PHP, Ruby, Java and .NET; OSV.dev batch queries; optional `osv-scanner` supplement. |
 | Secrets | `scanners/secrets.py` | Pattern and entropy checks with placeholder filtering; optional Gitleaks. |
 | Source | `scanners/source.py` | Transparent heuristic rules for injection sinks, unsafe deserialization, debug mode, weak crypto and similar issues; optional Semgrep. |
+| Trivy | `scanners/trivy.py` | Parses Trivy filesystem JSON for dependency, IaC misconfiguration and secret findings; merges and de-duplicates them with built-in repository results. |
+| testssl.sh | `scanners/testssl.py` | Parses testssl.sh JSON reports into TLS findings for web and network HTTPS services, with bounded host and finding counts. |
+| Subdomains | `scanners/subdomains.py` | Passive Subfinder enumeration plus local wordlist DNS discovery; validates domains, detects wildcard DNS and reports discovered hosts without scanning them. |
 | Active Directory | `scanners/ad.py` | Evaluates a read-only JSON report and turns policy/configuration observations into findings. |
 | Agent | `scanners/agent.py` | Normalises endpoint-collected system, package, port, secrets and AD data into the same finding model. |
 

@@ -24,6 +24,7 @@ from ..config import ENABLE_EXTERNAL_APIS
 from ..database import get_setting
 from ..utils import normalize_target_url, redact_url, truncate
 from .base import Finding, ScanContext, ScanResult
+from .testssl import run_testssl
 from .tools import run_tool, tool_path
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -761,6 +762,10 @@ def scan(ctx: ScanContext) -> ScanResult:
         if parsed.scheme == "https" and parsed.hostname:
             ctx.progress(70, "Inspecting TLS configuration")
             _tls_findings(result, parsed.hostname, parsed.port or 443, ctx)
+            try:
+                run_testssl(result, parsed.hostname, parsed.port or 443, ctx)
+            except Exception as exc:
+                ctx.log(f"testssl.sh integration failed: {exc}", "warning")
 
         ctx.progress(82, "Running Nuclei (optional)")
         _run_nuclei(result, url, ctx)

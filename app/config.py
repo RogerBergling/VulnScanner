@@ -47,6 +47,36 @@ def clone_dir() -> Path:
     return path
 
 
+def wordlists_dir() -> Path:
+    path = data_dir() / "wordlists"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def subfinder_wordlist_path() -> Path:
+    """Return the editable subdomain wordlist path.
+
+    The default lives under the data directory so it is never committed. A
+    deployment that keeps a SecLists checkout elsewhere can point
+    ``VS_SUBFINDER_WORDLIST`` at it; in that case the GUI treats the file as
+    read-only unless it is inside ``VS_DATA_DIR``.
+    """
+    configured = os.getenv("VS_SUBFINDER_WORDLIST", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return wordlists_dir() / "subdomains.txt"
+
+
+# SecLists is the standard source for the editable subdomain wordlist. The
+# download action is deliberately explicit so scans never fetch wordlists on
+# their own.
+SECLISTS_SUBDOMAIN_URL = os.getenv(
+    "VS_SECLISTS_SUBDOMAIN_URL",
+    "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt",
+)
+SECLISTS_REPOSITORY_URL = "https://github.com/danielmiessler/SecLists"
+
+
 HOST = os.getenv("VS_HOST", "127.0.0.1")
 PORT = int(os.getenv("VS_PORT", "8765"))
 
@@ -62,14 +92,21 @@ AGENT_JOB_TIMEOUT_SECONDS = int(os.getenv("VS_AGENT_JOB_TIMEOUT", str(60 * 60)))
 SCAN_WORKERS = max(1, min(32, int(os.getenv("VS_SCAN_WORKERS", "4"))))
 ENABLE_EXTERNAL_APIS = _env_bool("VS_ENABLE_EXTERNAL_APIS", True)
 
-# Optional CLI integrations.  Empty means "look in PATH".
+# Optional CLI integrations. Empty means "look in PATH". The GUI writes these
+# values to .env and updates the in-process mapping immediately.
+TOOL_ENV_VARS = {
+    "nmap": "VS_NMAP_PATH",
+    "nuclei": "VS_NUCLEI_PATH",
+    "testssl": "VS_TESTSSL_PATH",
+    "trivy": "VS_TRIVY_PATH",
+    "subfinder": "VS_SUBFINDER_PATH",
+    "osv-scanner": "VS_OSV_SCANNER_PATH",
+    "gitleaks": "VS_GITLEAKS_PATH",
+    "semgrep": "VS_SEMGREP_PATH",
+    "git": "VS_GIT_PATH",
+}
 TOOL_PATHS = {
-    "nmap": os.getenv("VS_NMAP_PATH", ""),
-    "nuclei": os.getenv("VS_NUCLEI_PATH", ""),
-    "osv-scanner": os.getenv("VS_OSV_SCANNER_PATH", ""),
-    "gitleaks": os.getenv("VS_GITLEAKS_PATH", ""),
-    "semgrep": os.getenv("VS_SEMGREP_PATH", ""),
-    "git": os.getenv("VS_GIT_PATH", ""),
+    name: os.getenv(env_name, "") for name, env_name in TOOL_ENV_VARS.items()
 }
 
 TOP_PORTS = [
