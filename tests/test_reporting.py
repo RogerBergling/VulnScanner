@@ -97,3 +97,21 @@ def test_html_report_escapes_content_and_marks_kev():
 def test_html_report_without_findings():
     html = build_html({**SCAN, "status": "completed"}, [], {**CONTEXT, "summary": {"total": 0}})
     assert "No findings were recorded" in html
+
+
+def test_csv_neutralises_formula_injection():
+    finding = dict(FINDINGS[0])
+    finding["title"] = "=cmd|' /C calc'!A0"
+    finding["evidence"] = "@SUM(1+1)"
+    text = build_csv(SCAN, [finding])
+    rows = list(csv.reader(io.StringIO(text)))
+    assert rows[1][3] == "'=cmd|' /C calc'!A0"
+    assert rows[1][13] == "'@SUM(1+1)"
+
+
+def test_html_report_drops_unsafe_reference_schemes():
+    finding = dict(FINDINGS[0])
+    finding["raw"] = {"references": ["javascript:alert(1)", "https://example.test/advisory"]}
+    html = build_html(SCAN, [finding], {"customer": {}, "group": {}, "asset": {}, "summary": {}})
+    assert "javascript:" not in html
+    assert "https://example.test/advisory" in html

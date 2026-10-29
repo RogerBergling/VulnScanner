@@ -225,3 +225,19 @@ def test_network_option_validation(api_client, customer):
         "/api/scans", json={**base, "options": {"winrm_transport": "telnet"}}
     )
     assert invalid.status_code == 400
+
+
+def test_asset_binding_rejects_credential_from_another_customer(api_client, customer):
+    other = api_client.post("/api/customers", json={"name": "Other"}).json()
+    credential = _create_credential(api_client, customer_id=other["id"])
+    asset = api_client.post(
+        f"/api/groups/{customer['group_id']}/assets",
+        json={"name": "cross-tenant", "kind": "host", "identifier": "192.0.2.10"},
+    ).json()
+
+    response = api_client.put(
+        f"/api/assets/{asset['id']}/credentials",
+        json={"linux": credential["id"]},
+    )
+    assert response.status_code == 400
+    assert "different customer" in response.json()["detail"]

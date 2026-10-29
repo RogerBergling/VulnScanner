@@ -230,10 +230,46 @@ def _safe_text(response: requests.Response, limit: int = 1_500_000) -> str:
     return content.decode(response.encoding or "utf-8", errors="replace")
 
 
+MAX_REDIRECTS = 5
+
+
+def _same_scope(base_url: str, candidate_url: str) -> bool:
+    """Allow redirects only within the same host (or its www variant)."""
+    base = urlparse(base_url)
+    candidate = urlparse(candidate_url)
+    base_host = (base.hostname or "").lower().strip(".")
+    candidate_host = (candidate.hostname or "").lower().strip(".")
+    if not base_host or not candidate_host:
+        return False
+    if base_host == candidate_host:
+        return True
+    return candidate_host == f"www.{base_host}" or base_host == f"www.{candidate_host}"
+
+
 def _get(session: requests.Session, url: str, timeout: float = 10.0, **kwargs: Any) -> requests.Response:
-    kwargs.setdefault("allow_redirects", True)
+    """Fetch a URL without following redirects into another host.
+
+    A target may redirect to an unrelated host. Following that redirect would
+    silently take the scan outside the authorised scope, so redirects are
+    followed manually and only when the hostname stays the same (including the
+    common www/non-www pair).
+    """
+    kwargs.pop("allow_redirects", None)
     kwargs.setdefault("timeout", timeout)
-    return session.get(url, **kwargs)
+    current = url
+    response: requests.Response | None = None
+    for _ in range(MAX_REDIRECTS + 1):
+        response = session.get(current, allow_redirects=False, **kwargs)
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            return response
+        location = response.headers.get("location")
+        if not location:
+            return response
+        target = urljoin(current, location)
+        if not _same_scope(current, target):
+            return response
+        current = target
+    return response if response is not None else session.get(url, **kwargs)
 
 
 def _title(body: str) -> str:
@@ -248,14 +284,14 @@ def _resolve_web_target(ctx: ScanContext, session: requests.Session) -> tuple[st
     ctx.log(f"Fetching {redact_url(requested)}")
     try:
         response = _get(session, requested, timeout=12)
-        return requested, response, _safe_text(response)
+        return response.url or requested, response, _safe_text(response)
     except requests.RequestException as exc:
         parsed = urlparse(requested)
         if parsed.scheme == "https":
             fallback = urlunparse(parsed._replace(scheme="http"))
             ctx.log(f"HTTPS failed ({exc.__class__.__name__}); trying HTTP", "warning")
             response = _get(session, fallback, timeout=12)
-            return fallback, response, _safe_text(response)
+            return response.url or fallback, response, _safe_text(response)
         raise RuntimeError(f"Could not reach {redact_url(requested)}: {exc}") from exc
 
 

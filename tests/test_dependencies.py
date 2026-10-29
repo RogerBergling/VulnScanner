@@ -1,8 +1,6 @@
 import json
 import subprocess
 
-import pytest
-
 from app.scanners import osv
 from app.scanners.base import ScanResult
 from app.scanners.dependencies import (

@@ -51,15 +51,14 @@ def sync_kev() -> dict[str, Any]:
             )
         )
     with get_db() as conn:
+        # Replace the catalogue atomically. Upserting alone leaves CVEs that
+        # CISA has removed from the feed in the local table forever.
+        conn.execute("DELETE FROM kev_catalog")
         conn.executemany(
             "INSERT INTO kev_catalog"
             "(cve_id, vendor_project, product, name, date_added, due_date, "
             "known_ransomware, required_action, synced_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(cve_id) DO UPDATE SET vendor_project = excluded.vendor_project, "
-            "product = excluded.product, name = excluded.name, date_added = excluded.date_added, "
-            "due_date = excluded.due_date, known_ransomware = excluded.known_ransomware, "
-            "required_action = excluded.required_action, synced_at = excluded.synced_at",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()
@@ -73,25 +72,45 @@ def sync_kev() -> dict[str, Any]:
 
 
 def enrich_finding(finding: dict[str, Any], cves: dict[str, dict[str, Any]]) -> None:
-    cve = (finding.get("cve") or "").split(",")[0].strip()
-    entry = cves.get(cve)
-    if not entry:
+    cve_ids = [
+        item.strip()
+        for item in str(finding.get("cve") or "").split(",")
+        if item.strip()
+    ]
+    entries = [cves[cve] for cve in cve_ids if cve in cves]
+    if not entries:
         return
     raw = finding.setdefault("raw", {})
     raw["kev"] = {
-        "cve_id": entry["cve_id"],
-        "name": entry["name"],
-        "date_added": entry["date_added"],
-        "due_date": entry["due_date"],
-        "known_ransomware": entry["known_ransomware"],
-        "required_action": entry["required_action"],
+        "cve_id": entries[0]["cve_id"],
+        "name": entries[0]["name"],
+        "date_added": entries[0]["date_added"],
+        "due_date": entries[0]["due_date"],
+        "known_ransomware": entries[0]["known_ransomware"],
+        "required_action": entries[0]["required_action"],
     }
-    finding["title"] = f"{finding['title']} (CISA KEV)"
-    note = (
-        "This CVE is listed in CISA's Known Exploited Vulnerabilities catalog. "
-        f"Required action: {entry['required_action'] or 'Apply vendor remediation.'}"
-    )
-    if note not in finding.get("description", ""):
-        finding["description"] = (finding.get("description", "") + "\n\n" + note).strip()
-    if entry.get("known_ransomware", "").lower() == "known":
-        finding["description"] += "\nKnown ransomware campaign use: yes."
+    if len(entries) > 1:
+        raw["kev_all"] = [
+            {
+                "cve_id": entry["cve_id"],
+                "name": entry["name"],
+                "date_added": entry["date_added"],
+                "due_date": entry["due_date"],
+                "known_ransomware": entry["known_ransomware"],
+                "required_action": entry["required_action"],
+            }
+            for entry in entries
+        ]
+    if "(CISA KEV)" not in finding.get("title", ""):
+        finding["title"] = f"{finding['title']} (CISA KEV)"
+    for entry in entries:
+        note = (
+            f"{entry['cve_id']} is listed in CISA's Known Exploited Vulnerabilities catalog. "
+            f"Required action: {entry['required_action'] or 'Apply vendor remediation.'}"
+        )
+        if note not in finding.get("description", ""):
+            finding["description"] = (finding.get("description", "") + "\n\n" + note).strip()
+        if entry.get("known_ransomware", "").lower() == "known":
+            ransomware = "Known ransomware campaign use: yes."
+            if ransomware not in finding.get("description", ""):
+                finding["description"] += "\n" + ransomware

@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..config import MAX_SCAN_FILES
+from ..config import MAX_SCAN_FILES, get_limit
 from ..utils import redact_secret, truncate
 from .base import Finding, ScanContext, ScanResult
 from .filesystem import iter_files, read_text_file, relative_path
@@ -322,7 +322,8 @@ def _run_gitleaks(ctx: ScanContext, root: Path, result: ScanResult) -> None:
     ctx.log(f"Gitleaks reported {count} finding(s)")
 
 
-def scan_secrets(ctx: ScanContext, root: Path, max_files: int = MAX_SCAN_FILES) -> ScanResult:
+def scan_secrets(ctx: ScanContext, root: Path, max_files: int | None = None) -> ScanResult:
+    max_files = get_limit("max_scan_files", MAX_SCAN_FILES) if max_files is None else max_files
     result = ScanResult()
     if not root.is_dir():
         raise ValueError(f"Secret scan path is not a directory: {root}")

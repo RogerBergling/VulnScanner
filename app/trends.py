@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from .database import get_db
@@ -15,6 +14,8 @@ def compare_scans(scan_id_older: int, scan_id_newer: int) -> dict[str, Any]:
         new = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id_newer,)).fetchone()
     if not old or not new:
         return {"error": "One or both scans not found"}
+    if old["asset_id"] and new["asset_id"] and old["asset_id"] != new["asset_id"]:
+        return {"error": "Scans belong to different assets and cannot be compared"}
 
     old_findings = _get_findings(scan_id_older)
     new_findings = _get_findings(scan_id_newer)
@@ -64,6 +65,7 @@ def compare_scans(scan_id_older: int, scan_id_newer: int) -> dict[str, Any]:
 
 
 def asset_trend(asset_id: int, limit: int = 10) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 10), 100))
     with get_db() as conn:
         scans = conn.execute(
             "SELECT id, scan_type, target, status, summary, created_at, completed_at FROM scans WHERE asset_id = ? AND status = 'completed' ORDER BY created_at DESC LIMIT ?",
@@ -77,11 +79,9 @@ def asset_trend(asset_id: int, limit: int = 10) -> dict[str, Any]:
         s = dict(row)
         summary_obj = s.get("summary") or {}
         if isinstance(summary_obj, str):
-            import json
-            try:
-                summary_obj = json.loads(summary_obj)
-            except:
-                summary_obj = {}
+            from .database import json_load
+
+            summary_obj = json_load(summary_obj, {})
         s["summary"] = summary_obj
         s["findings"] = _get_findings(s["id"])
         results.append(s)
@@ -117,16 +117,24 @@ def asset_trend(asset_id: int, limit: int = 10) -> dict[str, Any]:
 def _get_findings(scan_id: int) -> list[dict[str, Any]]:
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT severity, title, fingerprint, status FROM findings WHERE scan_id = ? ORDER BY severity ASC",
+            "SELECT severity, title, fingerprint, status FROM findings WHERE scan_id = ? "
+            "ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
+            "WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id",
             (scan_id,),
         ).fetchall()
-    return [{"severity": r["severity"], "title": r["title"], "fingerprint": r["fingerprint"], "status": r["status"]} for r in rows]
+    return [
+        {
+            "severity": r["severity"],
+            "title": r["title"],
+            "fingerprint": r["fingerprint"],
+            "status": r["status"],
+        }
+        for r in rows
+    ]
 
 
 def _summary(scan_row: Any) -> dict[str, Any]:
-    s = (scan_row["summary"] or "{}")
-    import json
-    try:
-        return json.loads(s) if isinstance(s, str) else s
-    except:
-        return {}
+    from .database import json_load
+
+    value = scan_row["summary"] or {}
+    return value if isinstance(value, dict) else json_load(value, {})

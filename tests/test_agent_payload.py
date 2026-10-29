@@ -1,5 +1,3 @@
-import pytest
-
 from app.scanners import agent as agent_scanner
 from app.scanners.agent import _address_exposed, process_agent_payload
 from tests.helpers import DummyContext

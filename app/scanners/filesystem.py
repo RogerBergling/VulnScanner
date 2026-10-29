@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-from ..config import MAX_SCAN_FILES, MAX_SOURCE_FILE_BYTES
+from ..config import MAX_SCAN_FILES, MAX_SOURCE_FILE_BYTES, get_limit
 
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "bower_components", ".venv", "venv",
@@ -24,7 +24,8 @@ BINARY_SUFFIXES = {
 }
 
 
-def safe_file(path: Path, max_size: int = MAX_SOURCE_FILE_BYTES) -> bool:
+def safe_file(path: Path, max_size: int | None = None) -> bool:
+    max_size = get_limit("max_source_file_bytes", MAX_SOURCE_FILE_BYTES) if max_size is None else max_size
     try:
         if path.is_symlink() or not path.is_file():
             return False
@@ -39,10 +40,12 @@ def safe_file(path: Path, max_size: int = MAX_SOURCE_FILE_BYTES) -> bool:
 
 def iter_files(
     root: str | Path,
-    max_files: int = MAX_SCAN_FILES,
-    max_size: int = MAX_SOURCE_FILE_BYTES,
+    max_files: int | None = None,
+    max_size: int | None = None,
     extra_skip_dirs: set[str] | None = None,
 ) -> Iterator[Path]:
+    max_files = get_limit("max_scan_files", MAX_SCAN_FILES) if max_files is None else max_files
+    max_size = get_limit("max_source_file_bytes", MAX_SOURCE_FILE_BYTES) if max_size is None else max_size
     root = Path(root).resolve()
     skip = SKIP_DIRS | (extra_skip_dirs or set())
     count = 0
@@ -61,7 +64,8 @@ def iter_files(
                 return
 
 
-def read_text_file(path: Path, limit: int = MAX_SOURCE_FILE_BYTES) -> str:
+def read_text_file(path: Path, limit: int | None = None) -> str:
+    limit = get_limit("max_source_file_bytes", MAX_SOURCE_FILE_BYTES) if limit is None else limit
     data = path.read_bytes()[:limit]
     if b"\x00" in data[:4096]:
         return ""

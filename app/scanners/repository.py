@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ..config import MAX_REPO_BYTES, clone_dir
+from ..config import MAX_REPO_BYTES, clone_dir, get_limit
 from ..utils import normalize_repo_target, redact_url, truncate
 from .base import ScanContext, ScanResult
 from .dependencies import scan_dependencies
@@ -21,6 +21,7 @@ from .trivy import scan_trivy
 
 
 def _directory_size(path: Path) -> int:
+    limit = get_limit("max_repo_bytes", MAX_REPO_BYTES)
     total = 0
     for root, _dirs, files in os.walk(path):
         for name in files:
@@ -28,7 +29,7 @@ def _directory_size(path: Path) -> int:
                 total += (Path(root) / name).stat().st_size
             except OSError:
                 pass
-            if total > MAX_REPO_BYTES * 2:
+            if total > limit * 2:
                 return total
     return total
 
@@ -49,7 +50,7 @@ def _clone_github(ctx: ScanContext, target: str, token: str | None = None) -> Pa
     if not git:
         raise RuntimeError("Git is required to scan GitHub repositories but was not found")
     parsed = urlparse(target)
-    if parsed.scheme not in {"https", "http"}:
+    if parsed.scheme != "https":
         raise ValueError("GitHub scans require an https:// repository URL")
     destination = clone_dir() / f"scan-{ctx.scan_id}-{uuid.uuid4().hex[:8]}"
     command = [git, "clone", "--no-tags"]
@@ -74,11 +75,12 @@ def _clone_github(ctx: ScanContext, target: str, token: str | None = None) -> Pa
         message = message.replace(token, "***") if token else message
         raise RuntimeError(f"Git clone failed: {truncate(message, 800)}")
     size = _directory_size(destination)
+    limit = get_limit("max_repo_bytes", MAX_REPO_BYTES)
     ctx.log(f"Repository cloned ({size / (1024 * 1024):.1f} MiB)")
-    if size > MAX_REPO_BYTES:
+    if size > limit:
         _remove_tree(destination)
         raise RuntimeError(
-            f"Repository is larger than the configured limit ({MAX_REPO_BYTES // (1024 * 1024)} MiB)"
+            f"Repository is larger than the configured limit ({limit // (1024 * 1024)} MiB)"
         )
     return destination
 

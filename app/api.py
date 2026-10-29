@@ -13,11 +13,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import requests
 from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import JSONResponse
 
 from . import __version__
 from .agents import (
@@ -48,7 +46,9 @@ from .config import (
     TOP_PORTS,
     TOOL_ENV_VARS,
     TOOL_PATHS,
+    clear_limit_cache,
     database_path,
+    get_limit,
     reports_dir,
     subfinder_wordlist_path,
 )
@@ -58,6 +58,7 @@ from .credentials import (
     copy_scan_credentials,
     create_credential,
     delete_credential,
+    encrypt_secret,
     list_credentials,
     normalize_input,
     scan_credentials_public,
@@ -71,11 +72,9 @@ from .database import (
     get_setting,
     json_dump,
     json_load,
-    log_event,
     set_setting,
     transaction,
     utcnow,
-    rows_to_dicts,
 )
 from .jobs import submit_ad_import, submit_agent_result, submit_scan
 from .reporting import build_csv, build_html, build_json
@@ -100,11 +99,12 @@ from .schemas import (
     GroupCreate,
     GroupUpdate,
     ScanCreate,
+    ScheduleCreate,
+    ScheduleUpdate,
     SettingsUpdate,
     ToolSettingsUpdate,
     WordlistUpdate,
 )
-from .scanners.ad import process_ad_report
 from .scanners.kev import KevSyncError, sync_kev
 from .scanners.subdomains import (
     download_seclists_wordlist,
@@ -125,7 +125,6 @@ from .utils import (
     risk_label,
     risk_score,
     secure_filename,
-    severity_summary,
     utcnow as now_iso,
     validate_host_target,
 )
@@ -189,7 +188,13 @@ def _scan_public(row: Any) -> dict[str, Any]:
     data = dict(row)
     data["summary"] = json_load(data.get("summary"), {})
     data["options"] = json_load(data.get("options"), {})
-    data["duration_seconds"] = None
+    started = parse_dt(data.get("started_at"))
+    completed = parse_dt(data.get("completed_at"))
+    data["duration_seconds"] = (
+        max(0, int((completed - started).total_seconds()))
+        if started and completed
+        else None
+    )
     return data
 
 
@@ -890,10 +895,11 @@ def _normalize_scan_target(scan_type: str, target: str) -> str:
             kind, value = validate_host_target(target)
             if kind == "cidr":
                 network = ipaddress.ip_network(value, strict=False)
-                if network.num_addresses > MAX_CIDR_HOSTS:
+                limit = get_limit("max_cidr_hosts", MAX_CIDR_HOSTS)
+                if network.num_addresses > limit:
                     raise ValueError(
                         f"Network contains {network.num_addresses} addresses; "
-                        f"limit is {MAX_CIDR_HOSTS}. Scan smaller ranges."
+                        f"limit is {limit}. Scan smaller ranges."
                     )
             return value
         if scan_type == "github":
@@ -1270,9 +1276,8 @@ def update_finding(finding_id: int, payload: FindingStatusUpdate) -> dict[str, A
     return _finding_public(updated)
 
 
-@router.get("/scans/{scan_id}/export")
-def export_scan(scan_id: int, format: str = "html") -> Response:
-    scan = _scan_detail(scan_id)
+def _report_context(scan: dict[str, Any]) -> dict[str, Any]:
+    """Build the customer/group/asset context shared by all export formats."""
     context: dict[str, Any] = {
         "generated_at": now_iso(),
         "customer": None,
@@ -1290,6 +1295,13 @@ def export_scan(scan_id: int, format: str = "html") -> Response:
         if scan.get("asset_id"):
             row = conn.execute("SELECT * FROM assets WHERE id = ?", (scan["asset_id"],)).fetchone()
             context["asset"] = dict(row) if row else None
+    return context
+
+
+@router.get("/scans/{scan_id}/export")
+def export_scan(scan_id: int, format: str = "html") -> Response:
+    scan = _scan_detail(scan_id)
+    context = _report_context(scan)
     findings = scan.get("findings") or []
     filename = secure_filename(
         f"vulnscan-{scan_id}-{scan.get('customer_name') or 'customer'}-{scan.get('scan_type')}"
@@ -1504,6 +1516,7 @@ def create_agent_token(payload: AgentTokenRequest, request: Request) -> dict[str
         payload.group_id,
         payload.agent_name,
         hours=payload.hours,
+        days=payload.days or 0,
         months=payload.months or 0,
         years=payload.years or 0,
     )
@@ -2050,7 +2063,6 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
         "smtp_host",
         "smtp_port",
         "smtp_user",
-        "smtp_password",
         "smtp_from",
         "notify_email_default",
         "notify_webhook_default",
@@ -2058,6 +2070,13 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
         value = updates.get(key)
         if value is not None:
             set_setting(key, str(value))
+
+    # SMTP passwords are secrets, not ordinary preferences. Encrypt them with
+    # the same Fernet key used for target credentials. An empty value clears the
+    # stored password.
+    if "smtp_password" in updates and updates["smtp_password"] is not None:
+        password = str(updates["smtp_password"])
+        set_setting("smtp_password", encrypt_secret(password) if password else "")
 
     for key in (
         "max_web_hosts",
@@ -2072,6 +2091,7 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
         if value is not None:
             set_setting(key, str(int(value)))
 
+    clear_limit_cache()
     return get_settings()
 
 
@@ -2101,6 +2121,8 @@ def import_ad_report(payload: ADImportRequest) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="Asset does not belong to the selected customer")
     if not isinstance(payload.report, dict):
         raise HTTPException(status_code=400, detail="AD report must be a JSON object")
+    if len(json.dumps(payload.report, default=str)) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="AD report exceeds the 20 MiB limit")
     domain = (payload.report.get("domain") or {})
     domain_name = domain.get("name") if isinstance(domain, dict) else str(domain)
     scan_payload = ScanCreate(
@@ -2165,56 +2187,57 @@ def schedules_list(
 
 
 @router.post("/schedules", status_code=201)
-def schedules_create(
-    customer_id: int,
-    group_id: int,
-    asset_id: int,
-    scan_type: str,
-    target: str,
-    options: dict[str, Any] = {},
-    cron_expression: str = "",
-    notify_email: str | None = None,
-    notify_webhook: str | None = None,
-    enabled: bool = False,
-) -> dict[str, Any]:
+def schedules_create(payload: ScheduleCreate) -> dict[str, Any]:
     from .scheduler import create_schedule
-    s = create_schedule(
-        customer_id, group_id, asset_id, scan_type, target, options,
-        cron_expression=cron_expression, notify_email=notify_email,
-        notify_webhook=notify_webhook, enabled=enabled,
-    )
-    return s.to_dict()
+
+    try:
+        schedule = create_schedule(
+            payload.customer_id,
+            payload.group_id,
+            payload.asset_id,
+            payload.scan_type,
+            payload.target,
+            payload.options,
+            cron_expression=payload.cron_expression,
+            notify_email=payload.notify_email,
+            notify_webhook=payload.notify_webhook,
+            enabled=payload.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schedule.to_dict()
 
 
 @router.get("/schedules/{schedule_id}")
 def schedules_get(schedule_id: int) -> dict[str, Any]:
     from .scheduler import get_schedule
-    s = get_schedule(schedule_id)
-    if not s:
+
+    schedule = get_schedule(schedule_id)
+    if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    return s.to_dict()
+    return schedule.to_dict()
 
 
 @router.patch("/schedules/{schedule_id}")
-def schedules_update(
-    schedule_id: int,
-    scan_type: str | None = None,
-    target: str | None = None,
-    options: dict[str, Any] | None = None,
-    cron_expression: str | None = None,
-    notify_email: str | None = None,
-    notify_webhook: str | None = None,
-    enabled: bool | None = None,
-) -> dict[str, Any]:
+def schedules_update(schedule_id: int, payload: ScheduleUpdate) -> dict[str, Any]:
     from .scheduler import update_schedule
-    s = update_schedule(
-        schedule_id, scan_type=scan_type, target=target, options=options,
-        cron_expression=cron_expression, notify_email=notify_email,
-        notify_webhook=notify_webhook, enabled=enabled,
-    )
-    if not s:
+
+    try:
+        schedule = update_schedule(
+            schedule_id,
+            scan_type=payload.scan_type,
+            target=payload.target,
+            options=payload.options,
+            cron_expression=payload.cron_expression,
+            notify_email=payload.notify_email,
+            notify_webhook=payload.notify_webhook,
+            enabled=payload.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    return s.to_dict()
+    return schedule.to_dict()
 
 
 @router.delete("/schedules/{schedule_id}")
@@ -2238,7 +2261,8 @@ def trends_compare(
 
 
 @router.get("/trends/assets/{asset_id}")
-def trends_asset(asset_id: int, limit: int = 10) -> dict[str, Any]:
+def trends_asset(asset_id: int, limit: int = Query(default=10, ge=1, le=100)) -> dict[str, Any]:
+    _fetch_asset(asset_id)
     from .trends import asset_trend
     return asset_trend(asset_id, limit)
 
@@ -2252,24 +2276,26 @@ def scan_pdf(
     scan_id: int,
     report_type: str = "technical",
 ) -> Response:
-    from .database import get_db
     from .reporting import build_pdf
-    with get_db() as conn:
-        scan_row = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-    if not scan_row:
-        raise HTTPException(status_code=404, detail="Scan not found")
-    findings_rows = conn.execute(
-        "SELECT severity, title, category, description, evidence, remediation, cve, cwe, cvss, location, fingerprint, status FROM findings WHERE scan_id = ?",
-        (scan_id,),
-    ).fetchall()
-    findings = [dict(r) for r in findings_rows]
+
+    report_type = (report_type or "").strip().lower()
+    if report_type not in {"technical", "executive"}:
+        raise HTTPException(status_code=400, detail="report_type must be technical or executive")
+
+    scan = _scan_detail(scan_id)
+    context = _report_context(scan)
     pdf_bytes = build_pdf(
-        dict(scan_row),
-        findings,
-        {"generated_at": str(datetime.now()), "customer": {}, "group": {}, "asset": {}},
+        scan,
+        scan.get("findings") or [],
+        context,
         report_type=report_type,
     )
-    return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="scan-{scan_id}-{report_type}.pdf"'})
+    filename = f"scan-{scan_id}-{report_type}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @router.get("/tools/status")
 def tools_status() -> dict[str, Any]:

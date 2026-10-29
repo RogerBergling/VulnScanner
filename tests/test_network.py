@@ -154,3 +154,13 @@ def test_scan_runs_web_checks_on_http_ports(monkeypatch):
         DummyContext({"ports": "80", "web_checks": True}, target="127.0.0.1")
     )
     assert checked == ["http://127.0.0.1:80/"]
+
+
+def test_scan_tolerates_invalid_workers_option(monkeypatch):
+    import app.scanners.network as network
+
+    monkeypatch.setattr(network, "_probe_port", lambda host, port, timeout: None)
+    result = network.scan(
+        DummyContext({"ports": "80", "workers": "not-a-number"}, target="127.0.0.1")
+    )
+    assert result.findings == []

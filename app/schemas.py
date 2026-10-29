@@ -22,6 +22,12 @@ def _non_blank(value: str, name: str) -> str:
     return value
 
 
+def _optional_non_blank(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    return _non_blank(value, name)
+
+
 class CustomerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
@@ -35,6 +41,11 @@ class CustomerCreate(BaseModel):
 class CustomerUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return _optional_non_blank(value, "Customer name")
 
 
 class GroupCreate(BaseModel):
@@ -50,6 +61,11 @@ class GroupCreate(BaseModel):
 class GroupUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return _optional_non_blank(value, "Group name")
 
 
 AssetKind = Literal["host", "web", "repo", "github", "domain", "agent", "other"]
@@ -74,6 +90,11 @@ class AssetUpdate(BaseModel):
     identifier: str | None = Field(default=None, max_length=2000)
     description: str | None = Field(default=None, max_length=2000)
     metadata: dict[str, Any] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        return _optional_non_blank(value, "Asset name")
 
 
 ScanType = Literal["web", "network", "repo", "github", "domain", "ad"]
@@ -145,8 +166,15 @@ class ScanCreate(BaseModel):
 
     @model_validator(mode="after")
     def check_target(self) -> "ScanCreate":
-        if self.scan_type in {"web", "network", "repo", "github", "domain", "ad"} and not self.target.strip():
-            raise ValueError("This scan type requires a target")
+        # An asset may supply the target. create_scan() fills it from
+        # assets.identifier before normalisation, so a blank target is valid
+        # when asset_id is present.
+        if (
+            self.scan_type in {"web", "network", "repo", "github", "domain", "ad"}
+            and not self.target.strip()
+            and not self.asset_id
+        ):
+            raise ValueError("This scan type requires a target or an asset_id")
         if self.credentials and self.scan_type != "network":
             raise ValueError("Credentials can only be supplied for network scans")
         return self
@@ -161,6 +189,7 @@ class AgentTokenRequest(BaseModel):
     group_id: int
     agent_name: str = Field(default="", max_length=160)
     hours: int = Field(default=24, ge=1, le=168)
+    days: int | None = Field(default=None, ge=0, le=365)
     months: int | None = Field(default=None, ge=0, le=12)
     years: int | None = Field(default=None, ge=0, le=10)
 
@@ -334,6 +363,49 @@ class AdminPasswordUpdate(BaseModel):
                 "Admin password contains unsupported characters. Use letters, digits, "
                 "and . _ ~ @ + = : , / -"
             )
+        return value
+
+
+class ScheduleCreate(BaseModel):
+    customer_id: int
+    group_id: int | None = None
+    asset_id: int | None = None
+    scan_type: ScanType
+    target: str = Field(default="", max_length=4000)
+    options: dict[str, Any] = Field(default_factory=dict)
+    cron_expression: str = Field(default="", max_length=120)
+    notify_email: str | None = Field(default=None, max_length=320)
+    notify_webhook: str | None = Field(default=None, max_length=2048)
+    enabled: bool = False
+
+    @model_validator(mode="after")
+    def check_target(self) -> "ScheduleCreate":
+        if not self.target.strip() and not self.asset_id:
+            raise ValueError("A schedule needs a target or an asset_id")
+        return self
+
+    @field_validator("notify_webhook")
+    @classmethod
+    def validate_webhook(cls, value: str | None) -> str | None:
+        if value and not value.lower().startswith(("http://", "https://")):
+            raise ValueError("Webhook URL must start with http:// or https://")
+        return value
+
+
+class ScheduleUpdate(BaseModel):
+    scan_type: ScanType | None = None
+    target: str | None = Field(default=None, max_length=4000)
+    options: dict[str, Any] | None = None
+    cron_expression: str | None = Field(default=None, max_length=120)
+    notify_email: str | None = Field(default=None, max_length=320)
+    notify_webhook: str | None = Field(default=None, max_length=2048)
+    enabled: bool | None = None
+
+    @field_validator("notify_webhook")
+    @classmethod
+    def validate_webhook(cls, value: str | None) -> str | None:
+        if value and not value.lower().startswith(("http://", "https://")):
+            raise ValueError("Webhook URL must start with http:// or https://")
         return value
 
 

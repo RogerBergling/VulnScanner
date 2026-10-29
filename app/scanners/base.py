@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from ..database import log_event, scan_cancelled, update_scan
 from ..utils import clean_text, normalize_severity, severity_summary, utcnow

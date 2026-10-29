@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from ..config import ENABLE_EXTERNAL_APIS
+from ..config import ENABLE_EXTERNAL_APIS, MAX_SCAN_FILES, get_limit
 from ..utils import truncate
 from .base import Finding, ScanContext, ScanResult
 from .filesystem import iter_files, read_text_file, relative_path
@@ -236,7 +236,7 @@ def scan_source(ctx: ScanContext, root: Path) -> ScanResult:
     result = ScanResult()
     files = 0
     count = 0
-    for path in iter_files(root, max_files=20000):
+    for path in iter_files(root, max_files=get_limit("max_scan_files", MAX_SCAN_FILES)):
         ctx.check_cancel()
         extension = path.suffix.lower()
         if not any(extension in rule["extensions"] for rule in RULES):

@@ -142,7 +142,9 @@ def normalize_repo_target(target: str) -> str:
         return f"https://github.com/{target}.git"
     if target.startswith("git@") or target.startswith("ssh://"):
         raise ValueError("SSH clone URLs are not supported. Use HTTPS or a local path.")
-    if target.startswith("http://") or target.startswith("https://"):
+    if target.startswith("http://"):
+        raise ValueError("Plain HTTP clone URLs are not supported. Use HTTPS or a local path.")
+    if target.startswith("https://"):
         return target
     path = Path(target).expanduser()
     if not path.is_absolute():
@@ -226,6 +228,20 @@ def redact_url(value: str) -> str:
         port = f":{parsed.port}" if parsed.port else ""
         return parsed._replace(netloc=f"***@{host}{port}").geturl()
     return value
+
+
+def safe_xml_fromstring(text: str):
+    """Parse XML while rejecting DTD/entity declarations.
+
+    The scanners parse manifests and tool output from untrusted repositories.
+    ``ElementTree`` does not fetch external entities by default, but rejecting
+    DTDs outright also blocks entity-expansion denial-of-service payloads.
+    """
+    if re.search(r"<!DOCTYPE|<!ENTITY", text or "", re.IGNORECASE):
+        raise ValueError("XML with DTD or entity declarations is not accepted")
+    import xml.etree.ElementTree as ET
+
+    return ET.fromstring(text)
 
 
 def clean_text(value: str | None, limit: int = 5000) -> str:

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import ipaddress
-import re
+
 from typing import Any
 
 from ..config import DANGEROUS_PORTS, SERVICE_NAMES
-from ..utils import normalize_severity, truncate
+from ..utils import truncate
 from .ad import process_ad_report
 from .base import Finding, ScanContext, ScanResult, normalize_finding
 from .dependencies import PackageRef, enrich_packages

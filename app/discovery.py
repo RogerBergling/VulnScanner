@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import ipaddress
+import json
 import logging
+import re
 import socket
 import time
-from datetime import datetime
 from typing import Any
 
-from .database import get_db, json_dump, utcnow
-from .scanners.base import PortResult
+from .config import MAX_CIDR_HOSTS, get_limit
+from .database import json_dump, transaction, utcnow
 
 logger = logging.getLogger("discovery")
 
 PORT_INDICATORS = [22, 80, 443, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443]
 VERSION_SNIFFERS = [
     ("SSH", ["SSH-2.0-"]),
-    ("OpenSSH", ["SSH-" + "-"]),  # e.g. SSH-2.0-OpenSSH_8.9
+    ("OpenSSH", ["SSH-"]),
     ("Redis", ["redis_"]),
     ("MySQL", ["mysql"]),
     ("PostgreSQL", ["postgresql"]),
@@ -30,7 +32,6 @@ VERSION_SNIFFERS = [
     ("HTTP", []),
 ]
 
-# OS signature patterns for typing devices
 OS_SIGNATURES = {
     "linux": ["Linux"],
     "windows": ["Windows"],
@@ -56,45 +57,59 @@ def discover_hosts(
 ) -> list[dict[str, Any]]:
     """Auto-discover hosts on a subnet by probing well-known ports.
 
-    Returns a list of new inventory entries (with discovered host info).
-    Uses standard library only — no external dependencies.
+    Returns a list of discovered host/service records. This is a discovery
+    helper; callers decide whether to persist them with
+    :func:`create_inventory_entry`.
     """
-    import concurrent.futures
-    from .config import MAX_CIDR_HOSTS
+    if not subnet:
+        raise ValueError("A subnet is required")
 
     probes: list[tuple[int, int]] = []
     if custom_ports:
-        for p in custom_ports.split(","):
-            p = p.strip()
-            if not p:
+        for item in custom_ports.split(","):
+            item = item.strip()
+            if not item:
                 continue
             try:
-                probes.append((port := int(p), port))
+                port = int(item)
             except ValueError:
-                pass
+                continue
+            if 1 <= port <= 65535:
+                probes.append((port, port))
+    if not probes:
+        probes = [(port, port) for port in PORT_INDICATORS]
 
-    host_list = _expand_subnet(subnet, MAX_CIDR_HOSTS)
-    discovered: list[dict[str, Any]] = []
+    host_list = _expand_subnet(subnet, get_limit("max_cidr_hosts", MAX_CIDR_HOSTS))
+    if not host_list:
+        return []
 
     total_probes = len(host_list) * len(probes)
-    succeeded = 0
+    if total_probes <= 0:
+        return []
+    discovered: list[dict[str, Any]] = []
+    max_workers = max(1, min(int(workers or 100), total_probes, 512))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, total_probes)) as executor:
-        future_to_host = {}
-        for host in host_list:
-            for port in probes:
-                future_to_host[executor.submit(_probe_one, host, port, timeout)] = host
-
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_host = {
+            executor.submit(_probe_one, host, port, timeout): host
+            for host in host_list
+            for _port, port in probes
+        }
         for future in concurrent.futures.as_completed(future_to_host):
             try:
                 result = future.result()
-                if result:
-                    succeeded += 1
-                    discovered.append(result)
             except Exception as exc:
                 logger.warning("Probe failed for %s: %s", future_to_host[future], exc)
+                continue
+            if result:
+                discovered.append(result)
 
-    logger.info("Discovered %d/%d hosts on subnet %s", succeeded, len(host_list), subnet or "?")
+    logger.info(
+        "Discovered %d service(s) across %d host(s) on subnet %s",
+        len(discovered),
+        len(host_list),
+        subnet,
+    )
     return discovered
 
 
@@ -102,12 +117,13 @@ def _expand_subnet(subnet: str, max_hosts: int) -> list[str]:
     """Expand a CIDR subnet to individual IPs."""
     try:
         net = ipaddress.ip_network(subnet, strict=False)
-        if net.num_addresses > max_hosts:
-            raise ValueError(f"Subnet {subnet} has too many hosts ({net.num_addresses})")
-        ips = list(net.hosts()) if net.num_addresses <= max_hosts else list(net)[1:]
-        return [str(ip) for ip in ips]
     except ValueError as exc:
-        raise ValueError(str(exc)) from exc
+        raise ValueError(f"Invalid subnet: {subnet}") from exc
+    if net.num_addresses > max_hosts:
+        raise ValueError(f"Subnet {subnet} has too many hosts ({net.num_addresses})")
+    if net.num_addresses == 1:
+        return [str(net.network_address)]
+    return [str(ip) for ip in net.hosts()]
 
 
 def _probe_one(host: str, port: int, timeout: float) -> dict[str, Any] | None:
@@ -115,58 +131,59 @@ def _probe_one(host: str, port: int, timeout: float) -> dict[str, Any] | None:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.connect((host, port))
             banner = _fetch_banner(sock, port, timeout)
             service = _match_service(port, banner)
         return {"host": host, "port": port, "service": service, "banner": banner}
-    except (OSError, socket.timeout, ConnectionRefusedError):
+    except (OSError, socket.timeout):
         return None
 
 
 def _fetch_banner(sock: socket.socket, port: int, timeout: float) -> str:
     try:
-        sock.sendall(b"\r\n\r\n")  # SMTP triggers server greeting; most just ignore
-        time.sleep(0.1)
+        if port in {25, 110, 143, 587}:
+            sock.sendall(b"\r\n\r\n")
+        time.sleep(0.05)
         data = sock.recv(1024).decode("utf-8", errors="replace").strip()
         return data[:256]
     except Exception:
         return ""
 
 
-def _match_service(port: int, banner: str) -> str:
+def _match_service(port: int, banner: str) -> dict[str, Any]:
     """Detect service name and OS from banner text."""
-    services = []
+    services: list[str] = []
     lowered = banner.lower()
 
     for name, patterns in VERSION_SNIFFERS:
-        for pat in patterns:
-            if lowered.find(pat.lower()) >= 0:
-                if pat == "SSH-2.0-":
-                    services.append("SSH-2.0")
-                else:
-                    services.append(name)
+        for pattern in patterns:
+            if pattern.lower() in lowered:
+                services.append(name)
                 break
 
     os_guess = ""
     for os_type, patterns in OS_SIGNATURES.items():
-        for pattern in patterns:
-            if pattern.lower() in lowered:
-                os_guess = os_type.upper()
-                break
-
-    hostname = _resolve_hostname(None)
+        if any(pattern.lower() in lowered for pattern in patterns):
+            os_guess = os_type.upper()
+            break
 
     return {"services": services, "os": os_guess}
 
 
-def _resolve_hostname(_unused: None) -> str:
-    """Placeholder host resolution (not needed on localhost scans)."""
-    import socket as s
-    try:
-        return s.gethostname() or "localhost"
-    except Exception:
-        return "unknown"
+def _default_group(conn: Any, customer_id: int) -> int:
+    row = conn.execute(
+        "SELECT id FROM asset_groups WHERE customer_id = ? ORDER BY id LIMIT 1",
+        (customer_id,),
+    ).fetchone()
+    if row:
+        return int(row["id"])
+    return int(
+        conn.execute(
+            "INSERT INTO asset_groups(customer_id, name, description, created_at) "
+            "VALUES (?, 'General', 'Default asset group', ?)",
+            (customer_id, utcnow()),
+        ).lastrowid
+    )
 
 
 def create_inventory_entry(
@@ -178,74 +195,81 @@ def create_inventory_entry(
     service: dict[str, Any],
 ) -> dict[str, Any]:
     """Insert or update an asset inventory entry from a discovered host."""
-    ip = f"{host}.{port}" if "." in host else host
+    host = (host or "").strip()
+    if not host:
+        raise ValueError("A discovered host is required")
+    service = service if isinstance(service, dict) else {}
     now_str = utcnow()
 
-    with get_db() as conn:
-        # Check if this IP already exists in inventory
+    with transaction() as conn:
         row = conn.execute(
             "SELECT * FROM asset_inventory WHERE ip_address = ? AND scan_id = ?",
-            (ip, scan_id),
+            (host, scan_id),
         ).fetchone()
 
         if row:
-            update_fields = {"last_seen": now_str, "status": "active"}
-            if row["hostname"]:
-                update_fields["hostname"] = row["hostname"]
+            ports = []
+            try:
+                ports = json.loads(row["ports"] or "[]")
+            except (TypeError, ValueError):
+                ports = []
+            if port not in ports:
+                ports.append(port)
             conn.execute(
-                f"UPDATE asset_inventory SET {', '.join(k + ' = ' + repr(v) for k, v in update_fields.items())}, "
-                f"last_seen = ? WHERE id = ?",
-                (now_str, row["id"]),
+                "UPDATE asset_inventory SET last_seen = ?, status = 'active', "
+                "ports = ?, hostname = COALESCE(NULLIF(hostname, ''), ?), "
+                "asset_id = COALESCE(asset_id, ?) WHERE id = ?",
+                (now_str, json_dump(ports), host, asset_id, row["id"]),
             )
-            asset = conn.execute(
-                "SELECT id FROM asset_inventory WHERE id = ?", (row["id"],)
+            return _build_result({**dict(row), "ports": ports}, port)
+
+        hostname = host
+        device_type = DEVICE_TYPE_MAP.get(
+            _guess_os_from_service(service.get("os", "")), "Unknown Device"
+        )
+        mac_guess = _guess_mac_from_service(service)
+        new_asset_id = asset_id
+
+        if new_asset_id is None and customer_id is not None:
+            existing = conn.execute(
+                "SELECT id FROM assets WHERE customer_id = ? "
+                "AND (identifier = ? OR name = ?) LIMIT 1",
+                (customer_id, host, host),
             ).fetchone()
-            return _build_result(dict(row), port)
-        else:
-            hostname = host
-            mac = ""
-            device_type = DEVICE_TYPE_MAP.get(_guess_os_from_service(service.get("os", "")), "Unknown Device")
-            mac_guess = _guess_mac_from_service(service)
-            conn.execute(
-                "INSERT INTO asset_inventory("
-                "scan_id, asset_id, customer_id, ip_address, hostname, mac_address, device_type, ports, os_guess, first_seen, last_seen, status"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    scan_id,
-                    asset_id,
-                    customer_id,
-                    ip,
-                    hostname,
-                    mac_guess,
-                    device_type,
-                    json_dump([port]),
-                    service.get("os", ""),
-                    now_str,
-                    now_str,
-                    "active",
-                ),
-            )
+            if existing:
+                new_asset_id = int(existing["id"])
+            else:
+                group_id = _default_group(conn, customer_id)
+                new_asset_id = int(
+                    conn.execute(
+                        "INSERT INTO assets("
+                        "customer_id, group_id, name, kind, identifier, description, "
+                        "metadata, created_at"
+                        ") VALUES (?, ?, ?, 'network', ?, '', '{}', ?)",
+                        (customer_id, group_id, host, host, now_str),
+                    ).lastrowid
+                )
 
-            # Check if an asset with this identifier already exists
-            existing_asset = None
-            if host:
-                existing_asset = conn.execute(
-                    "SELECT * FROM assets WHERE identifier LIKE ? OR name LIKE ? LIMIT 1",
-                    (f"%{host}%", f"%{host}%"),
-                ).fetchone()
-
-            new_asset_id = existing_asset["id"] if existing_asset else None
-            if new_asset_id is None and customer_id is not None and asset_id is None:
-                # Auto-create asset entry (no group match — orphaned but tracked)
-                with transaction() as conn2:
-                    cur = conn2.execute(
-                        "INSERT INTO assets(customer_id, group_id, name, kind, identifier, description, metadata, created_at) VALUES (?, ?, ?, 'network', ?, '', '', ?)",
-                        (customer_id, 0, host, now_str),
-                    )
-                    new_asset_id = cur.lastrowid
-                    conn2.commit()
-
-            return _build_result({"asset_id": new_asset_id}, port)
+        conn.execute(
+            "INSERT INTO asset_inventory("
+            "scan_id, asset_id, customer_id, ip_address, hostname, mac_address, "
+            "device_type, ports, os_guess, first_seen, last_seen, status"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+            (
+                scan_id,
+                new_asset_id,
+                customer_id,
+                host,
+                hostname,
+                mac_guess,
+                device_type,
+                json_dump([port]),
+                service.get("os", ""),
+                now_str,
+                now_str,
+            ),
+        )
+        return _build_result({"asset_id": new_asset_id, "ip_address": host, "hostname": hostname}, port)
 
 
 def _guess_os_from_service(os_str: str) -> str:
@@ -257,15 +281,19 @@ def _guess_os_from_service(os_str: str) -> str:
 
 def _guess_mac_from_service(service: dict[str, Any]) -> str:
     mac = ""
-    parts = service.get("banner", "") or ""
-    mac_match = __import__("re").search(r"(?:MAC|Address)\s*:\s*([0-9a-fA-F:]{17})", parts, re.IGNORECASE)
+    banner = service.get("banner", "") or ""
+    mac_match = re.search(
+        r"(?:MAC|Address)\s*:\s*([0-9a-fA-F:]{17})", banner, re.IGNORECASE
+    )
     if mac_match:
         mac = mac_match.group(1).upper().replace("-", ":")
-    elif parts:
-        # Try NVIDIA MAC pattern
-        mac_match2 = __import__("re").search(r"[0-9a-fA-F]{8}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\:[0-9a-fA-F]{12}", parts)
-        if mac_match2:
-            mac = mac_match2.group(0).upper().replace(":", "-")
+    else:
+        mac_match = re.search(
+            r"[0-9a-fA-F]{8}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0-9a-fA-F]{12}",
+            banner,
+        )
+        if mac_match:
+            mac = mac_match.group(0).upper().replace(":", "-")
     return mac
 
 
@@ -285,46 +313,50 @@ def track_historical_findings(
     findings: list[dict[str, Any]],
 ) -> None:
     """Save finding history rows for trend analysis across scans of same asset."""
-    if not findings:
+    if not findings or not asset_id:
         return
 
-    with get_db() as conn:
+    with transaction() as conn:
         for finding in findings:
-            fp = finding.get("fingerprint") or f"{finding.get('category', '')}:{finding.get('title', '')}"
-            sev = finding.get("severity", "info")
-
+            fingerprint = finding.get("fingerprint") or (
+                f"{finding.get('category', '')}:{finding.get('title', '')}"
+            )
+            severity = finding.get("severity", "info")
+            first_seen = str(finding.get("first_seen") or utcnow())
+            last_seen = str(finding.get("last_seen") or first_seen)
             row = conn.execute(
-                "SELECT * FROM finding_history WHERE fingerprint = ?", (fp,)
+                "SELECT id, count FROM finding_history WHERE asset_id = ? AND fingerprint = ?",
+                (asset_id, fingerprint),
             ).fetchone()
-
             if row:
-                updates = {
-                    "last_seen": str(finding.get("first_seen", "")) or row["last_seen"],
-                    "status_at_last": finding.get("status", row["status_at_last"]),
-                    "severity_at_last": sev,
-                    "count": row["count"] + 1,
-                }
-                if finding.get("scan_id"):
-                    updates["last_seen_scan_id"] = finding["scan_id"]
                 conn.execute(
-                    "UPDATE finding_history SET ? WHERE fingerprint = ?",
-                    (updates, fp),
+                    "UPDATE finding_history SET last_seen = ?, last_seen_scan_id = ?, "
+                    "severity_at_last = ?, status_at_last = ?, count = ? WHERE id = ?",
+                    (
+                        last_seen,
+                        scan_id,
+                        severity,
+                        finding.get("status", "open"),
+                        int(row["count"]) + 1,
+                        row["id"],
+                    ),
                 )
             else:
                 conn.execute(
                     "INSERT INTO finding_history("
-                    "asset_id, fingerprint, severity_at_first, severity_at_last, status_at_first, status_at_last, count, first_seen, last_seen"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "asset_id, fingerprint, first_seen_scan_id, last_seen_scan_id, "
+                    "severity_at_first, severity_at_last, status_at_first, status_at_last, "
+                    "first_seen, last_seen, count"
+                    ") VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, 1)",
                     (
-                        asset_id, fp, sev, sev, "open", "open", 1,
-                        str(finding.get("first_seen", "")),
-                        str(finding.get("first_seen", "")),
+                        asset_id,
+                        fingerprint,
+                        scan_id,
+                        scan_id,
+                        severity,
+                        severity,
+                        finding.get("status", "open"),
+                        first_seen,
+                        last_seen,
                     ),
                 )
-                if asset_id:
-                    conn.execute(
-                        "INSERT INTO assets(customer_id, group_id, name, kind, identifier, description, metadata, created_at) "
-                        "VALUES (NULL, NULL, ?, 'host', ?, '', '{}', ?)",
-                        (f"{fp}", str(finding.get("location", "")), str(finding.get("first_seen", ""))),
-                    )
-        conn.commit()

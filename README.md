@@ -56,7 +56,8 @@ warning on first use.
 
 The default listener is HTTPS on loopback with a self-signed certificate, which
 is suitable for a single-user workstation. The certificate and key are created
-under `data/certs/` on first start. Set `VS_SSL=false` in `.env` for plain HTTP,
+under `$VS_DATA_DIR/certs/` (default `./data/certs/`) on first start. Set
+`VS_SSL=false` in `.env` for plain HTTP,
 for example when a TLS-terminating reverse proxy is in front of the app. For
 anything reachable from another machine, use a reverse proxy for production TLS
 (see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
@@ -157,10 +158,10 @@ Environment variables can also be exported directly.
 | --- | --- | --- |
 | `VS_HOST` | `127.0.0.1` | Bind address. Editable in Settings → Security. Keep loopback unless protected by a firewall/reverse proxy. |
 | `VS_PORT` | `8765` | HTTP/HTTPS port. Editable in Settings → Security. |
-| `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `data/certs/`. Set to `false` for plain HTTP behind a TLS reverse proxy. |
+| `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `$VS_DATA_DIR/certs/`. Set to `false` for plain HTTP behind a TLS reverse proxy. |
 | `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. |
 | `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. Can also be set from Settings → Security. |
-| `VS_DATA_DIR` | `./data` | Database, reports and temporary clone directory. |
+| `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. For production use an absolute path **outside the Git checkout**, such as `/var/lib/vulnscanner`. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Allow OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. |
@@ -171,24 +172,58 @@ Environment variables can also be exported directly.
 | `VS_MAX_SOURCE_FILE_BYTES` | `1048576` | Maximum file size read by source scanners. |
 | `VS_MAX_SCAN_FILES` | `20000` | Maximum files visited per scan. |
 | `VS_MAX_CIDR_HOSTS` | `256` | Maximum addresses expanded from one CIDR target. |
-| `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before an agent job is considered stale. |
+| `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before a running agent job is marked failed and its scan is closed. |
 | `VS_SCAN_WORKERS` | `4` | Parallel server-side scan workers (1-32). Requires a restart. |
+| `VS_SSH_KNOWN_HOSTS` | empty | Optional known_hosts file. When set, authenticated SSH scans verify the remote host key before sending credentials. |
 
-## Data and backup
+## Data, backup and upgrades
 
 Everything is local by default:
 
-- Database: `data/vulnscanner.db` (SQLite WAL mode).
-- Credential key: `data/credential.key` (or `VS_CREDENTIAL_KEY`). A restored
-  database needs the same key to decrypt saved credentials.
-- Reports are generated on demand; no external report service is used.
+- Database: `$VS_DATA_DIR/vulnscanner.db` (SQLite WAL mode; default `data/vulnscanner.db`).
+- Credential key: `$VS_DATA_DIR/credential.key` (or `VS_CREDENTIAL_KEY`). A
+  restored database needs the same key to decrypt saved credentials.
+- Certificates: `$VS_DATA_DIR/certs/`.
+- Reports are generated on demand; backups are written under
+  `$VS_DATA_DIR/reports/backups/`.
 - GitHub clones are temporary and removed after the scan.
 
-Stop the server before copying the database, or use **Server → Back up
-database** in the UI for a consistent online copy under
-`data/reports/backups/`. You can also copy the database plus its `-wal` and
-`-shm` files while the server is stopped. See
-[docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md).
+### Does `git pull` delete scans?
+
+**No.** The database, WAL files, credential key, certificates, `.env` and
+backups are ignored by Git. `git pull`, `git checkout` and `git reset --hard`
+only touch tracked files.
+
+The dangerous command is:
+
+```bash
+git clean -fdx
+```
+
+The `-x` flag deletes ignored files, including the entire data directory. A
+delete-and-reclone of the project directory does the same. Do not run
+`git clean -fdx` against a production checkout.
+
+For production, put data outside the Git checkout:
+
+```bash
+VS_DATA_DIR=/var/lib/vulnscanner
+VS_DATABASE=/var/lib/vulnscanner/vulnscanner.db
+```
+
+Then a code update or a new checkout cannot touch the scans. Back up the whole
+data directory — not just the `.db` file — before every update. The database,
+`-wal`, `-shm`, `credential.key` and `certs/` belong together; back up `.env`
+separately.
+
+Use **Server → Back up database** in the UI for a consistent online copy, or
+stop the service and copy the data directory. See
+[docs/UPGRADING.md](docs/UPGRADING.md) for the safe update and rollback
+procedure, and [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)
+for deployment hardening.
+
+`scripts/update.sh` performs a backup and a `git pull --ff-only`; it never runs
+`git clean` or deletes the data directory.
 
 ## Security
 
@@ -214,6 +249,7 @@ scanning a production network.
 - [Agent guide](docs/AGENT_GUIDE.md)
 - [API reference](docs/API.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Upgrading safely](docs/UPGRADING.md)
 - [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md)
 - [Authorised use](docs/AUTHORIZED_USE.md)
 - [Integrations](docs/INTEGRATIONS.md)

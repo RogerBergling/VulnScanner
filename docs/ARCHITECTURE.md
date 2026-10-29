@@ -74,7 +74,8 @@ VulnScanner is deliberately small and local-first:
 | `app/security.py` | Generates enrolment/agent tokens, stores only SHA-256 hashes and authenticates agent requests. |
 | `app/credentials.py` | Fernet-encrypted credential profiles, asset bindings, per-scan credentials and resolution order. |
 | `app/scanners/` | Independent scan engines and shared finding types. |
-| `app/reporting.py` | Builds JSON, CSV and self-contained HTML reports on demand. |
+| `app/reporting.py` | Builds JSON, CSV, self-contained HTML and PDF reports on demand. |
+| `app/scheduler.py` | Cron-based scheduled scans, notification delivery and stale agent-job expiry. |
 | `app/database.py` | SQLite schema, connections, transactions, settings helpers and event logging. |
 | `app/static/` | Dependency-free single-page interface. |
 | `agent/` | Python and PowerShell agents, installers and read-only AD collector. |
@@ -167,7 +168,13 @@ settings, osv_cache, kev_catalog
 | `scan_events` | Timestamped log used by the scan detail page and troubleshooting. |
 | `findings` | Normalised result rows with severity, evidence, CVE/CWE/CVSS, fingerprint and review status. |
 | `agent_jobs` | Queued/claimed/completed work for an agent. |
-| `settings` | Operator toggles and metadata such as the last KEV sync time. |
+| `credentials` | Fernet-encrypted reusable Linux/Windows credential profiles. |
+| `asset_credential_bindings` | Per-asset credential selection by operating system. |
+| `scan_credentials` | Encrypted per-scan credential overrides. |
+| `scan_schedules` | Recurring scan definitions, cron expressions and notification targets. |
+| `asset_inventory` | Discovered hosts, ports, device type and first/last seen. |
+| `finding_history` | Per-asset fingerprint history used for trends. |
+| `settings` | Operator toggles, SMTP configuration and metadata such as the last KEV sync time. |
 | `osv_cache` | Time-limited cache of OSV batch queries and advisory details. |
 | `kev_catalog` | Locally cached CISA KEV entries. |
 

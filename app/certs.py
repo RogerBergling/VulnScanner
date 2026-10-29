@@ -13,7 +13,10 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-CERT_DIR = Path(__file__).resolve().parent.parent / "data" / "certs"
+from .config import data_dir
+
+# Keep certificates alongside the database so VS_DATA_DIR moves both together.
+CERT_DIR = data_dir() / "certs"
 CERT_FILE = CERT_DIR / "server.crt"
 KEY_FILE = CERT_DIR / "server.key"
 

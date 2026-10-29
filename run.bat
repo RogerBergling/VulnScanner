@@ -15,12 +15,12 @@ if not exist .venv\Scripts\python.exe (
   if errorlevel 1 goto :error
 )
 
-if not exist .venv\.deps-ok (
-  echo [vulnscanner] Installing Python dependencies
-  .venv\Scripts\python.exe -m pip install --disable-pip-version-check -r requirements.txt
-  if errorlevel 1 goto :error
-  type nul > .venv\.deps-ok
-)
+rem Always verify dependencies. pip is idempotent when the requirements are
+rem already satisfied, and this avoids stale packages when requirements.txt
+rem changes after the first run.
+echo [vulnscanner] Checking Python dependencies
+.venv\Scripts\python.exe -m pip install --disable-pip-version-check -r requirements.txt
+if errorlevel 1 goto :error
 
 if not defined VS_HOST set "VS_HOST=127.0.0.1"
 if not defined VS_PORT set "VS_PORT=8765"

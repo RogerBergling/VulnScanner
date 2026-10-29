@@ -15,9 +15,9 @@ from urllib.parse import urlparse
 import requests
 from requests.packages import urllib3
 
-from ..config import DANGEROUS_PORTS, MAX_CIDR_HOSTS, SERVICE_NAMES
+from ..config import DANGEROUS_PORTS, MAX_CIDR_HOSTS, SERVICE_NAMES, get_limit
 from ..database import get_setting
-from ..utils import parse_ports, truncate, validate_host_target
+from ..utils import parse_ports, safe_xml_fromstring, truncate, validate_host_target
 from .authenticated import authenticated_scan
 from .base import Finding, ScanContext, ScanResult
 from .testssl import run_testssl
@@ -25,6 +25,7 @@ from .tools import run_tool, tool_path
 from .web import (
     _add_header_findings,
     _exposed_files,
+    _get as safe_get,
     _injection_checks,
     _run_nuclei,
     _session as web_session,
@@ -39,7 +40,10 @@ BANNER_PORTS = {
     5900, 6379, 9200, 11211, 27017,
 }
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
-HTTP_PORTS = {80, 443, 591, 8000, 8008, 8080, 8081, 8443, 8888, 9000, 9443}
+HTTP_PORTS = {
+    80, 443, 591, 3000, 5000, 5601, 7001, 8000, 8008, 8080, 8081,
+    8443, 8888, 9000, 9090, 9443,
+}
 TLS_PORTS = {443, 465, 636, 993, 995, 8443, 9443}
 
 
@@ -55,9 +59,10 @@ def _expand_hosts(target: str) -> list[str]:
     kind, value = validate_host_target(target)
     if kind == "cidr":
         network = ipaddress.ip_network(value, strict=False)
-        if network.num_addresses > MAX_CIDR_HOSTS:
+        limit = get_limit("max_cidr_hosts", MAX_CIDR_HOSTS)
+        if network.num_addresses > limit:
             raise ValueError(
-                f"Network contains {network.num_addresses} addresses; limit is {MAX_CIDR_HOSTS}. "
+                f"Network contains {network.num_addresses} addresses; limit is {limit}. "
                 "Scan smaller ranges."
             )
         if network.num_addresses == 1:
@@ -96,25 +101,77 @@ def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
     return max(low, min(high, parsed))
 
 
+def _probe_ports(
+    hosts: list[str],
+    ports: list[int],
+    timeout: float,
+    workers: int,
+    ctx: ScanContext,
+) -> list[PortResult]:
+    """Probe hosts/ports with a bounded in-flight window.
+
+    Submitting every host×port pair at once can consume gigabytes for a large
+    CIDR and a broad port range. Keep at most a few multiples of the worker
+    count in flight, matching the agent-side implementation.
+    """
+    results: list[PortResult] = []
+    total = max(1, len(hosts) * len(ports))
+    finished = 0
+    window = max(workers * 4, 32)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        pending: set[concurrent.futures.Future] = set()
+        for host in hosts:
+            for port in ports:
+                if ctx.cancelled():
+                    for future in pending:
+                        future.cancel()
+                    return results
+                pending.add(executor.submit(_probe_port, host, port, timeout))
+                if len(pending) < window:
+                    continue
+                done, pending = concurrent.futures.wait(
+                    pending, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                for future in done:
+                    finished += 1
+                    try:
+                        item = future.result()
+                    except Exception:
+                        continue
+                    if item:
+                        results.append(item)
+                ctx.progress(5 + int(finished / total * 70), "Probing TCP ports")
+        for future in concurrent.futures.as_completed(pending):
+            finished += 1
+            try:
+                item = future.result()
+            except Exception:
+                continue
+            if item:
+                results.append(item)
+            if finished % max(1, total // 100) == 0 or finished == total:
+                ctx.progress(5 + int(finished / total * 70), "Probing TCP ports")
+    return results
+
+
 def _http_service(
     result: ScanResult, host: str, port: int, open_ports: list[int], ctx: ScanContext
 ) -> tuple[str, requests.Response, str] | None:
     schemes = ["https", "http"] if port in TLS_PORTS else ["http", "https"]
     response = None
     used_scheme = schemes[0]
-    for scheme in schemes:
-        try:
-            response = requests.get(
-                f"{scheme}://{host}:{port}/",
-                timeout=6,
-                verify=False,
-                allow_redirects=True,
-                headers={"User-Agent": "VulnScanner/1.0 (authorized local scan)"},
-            )
-            used_scheme = scheme
-            break
-        except requests.RequestException:
-            continue
+    session = web_session()
+    try:
+        for scheme in schemes:
+            try:
+                response = safe_get(session, f"{scheme}://{host}:{port}/", timeout=6)
+                used_scheme = scheme
+                break
+            except requests.RequestException:
+                continue
+    finally:
+        session.close()
     if response is None:
         return None
     body = (response.content or b"")[:200_000].decode(response.encoding or "utf-8", errors="replace")
@@ -122,19 +179,21 @@ def _http_service(
     result.add(
         Finding(
             severity="info",
-            title=f"Web server detected on port {port} — deep scan executed",
+            title=f"Web server detected on port {port}",
             category="network",
-            description="An HTTP/HTTPS web service was discovered. Deep web vulnerability checks (headers, exposed paths, injection probes, Nuclei CVE scan) were performed.",
+            description=(
+                "An HTTP/HTTPS web service was discovered. Header, exposed-file and "
+                "injection checks run when web checks are enabled for this scan."
+            ),
             evidence=(
                 f"URL: {used_scheme}://{host}:{port}/\n"
                 f"HTTP {response.status_code}\nTitle: {title or '(none)'}\n"
-                f"Server: {truncate(response.headers.get('server', ''), 150)}\n"
-                f"Scan type: deep web vulnerability assessment (headers + injection + Nuclei + exposed files)"
+                f"Server: {truncate(response.headers.get('server', ''), 150)}"
             ),
             remediation="Review all web findings below. Patch web server software, remove exposed admin interfaces, and restrict access with a WAF or reverse proxy.",
             location=f"{host}:{port}",
-            key=f"http-service-deep:{host}:{port}",
-            raw={"status": response.status_code, "title": title, "scan_type": "deep_web"},
+            key=f"http-service:{host}:{port}",
+            raw={"status": response.status_code, "title": title, "scan_type": "web"},
         )
     )
     result.metadata.setdefault("web_services", []).append(
@@ -246,8 +305,8 @@ def parse_nmap_xml(xml_text: str) -> list[dict[str, Any]]:
     """Parse service and script/CVE data from nmap -oX output."""
     findings: list[dict[str, Any]] = []
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
+        root = safe_xml_fromstring(xml_text)
+    except (ET.ParseError, ValueError):
         return findings
     for host in root.findall("host"):
         address = ""
@@ -258,7 +317,10 @@ def parse_nmap_xml(xml_text: str) -> list[dict[str, Any]]:
             state = port.find("state")
             if state is None or state.attrib.get("state") != "open":
                 continue
-            port_id = int(port.attrib.get("portid", "0"))
+            try:
+                port_id = int(port.attrib.get("portid", "0"))
+            except (TypeError, ValueError):
+                continue
             service = port.find("service")
             name = service.attrib.get("name", "unknown") if service is not None else "unknown"
             product = service.attrib.get("product", "") if service is not None else ""
@@ -359,39 +421,21 @@ def scan(ctx: ScanContext) -> ScanResult:
     hosts = _expand_hosts(ctx.target)
     timeout = float(ctx.option("connect_timeout", 0.45))
     timeout = max(0.1, min(timeout, 3.0))
-    workers = int(ctx.option("workers", 300))
-    workers = max(10, min(workers, 600))
+    workers = _bounded_int(
+        ctx.option("workers", get_limit("workers", 300)), 300, 10, 600
+    )
     ctx.log(
         f"Scanning {len(hosts)} host(s) across {len(ports)} TCP port(s) "
         f"with a {timeout:.2f}s connect timeout"
     )
     ctx.progress(3, "Resolving target")
-    total = len(hosts) * len(ports)
-    finished = 0
     open_by_host: dict[str, list[PortResult]] = {host: [] for host in hosts}
     started = time.monotonic()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(_probe_port, host, port, timeout): (host, port)
-            for host in hosts
-            for port in ports
-        }
-        for future in concurrent.futures.as_completed(futures):
-            finished += 1
-            if finished % max(1, len(futures) // 100) == 0 or finished == len(futures):
-                ctx.progress(5 + int(finished / max(1, total) * 70), "Probing TCP ports")
-            if ctx.cancelled():
-                for pending in futures:
-                    pending.cancel()
-                ctx.log("Port scan cancelled", "warning")
-                break
-            try:
-                item = future.result()
-            except Exception:
-                continue
-            if item:
-                open_by_host.setdefault(item.host, []).append(item)
+    for item in _probe_ports(hosts, ports, timeout, workers, ctx):
+        open_by_host.setdefault(item.host, []).append(item)
+    if ctx.cancelled():
+        ctx.log("Port scan cancelled", "warning")
 
     all_open = [item for items in open_by_host.values() for item in items]
     ctx.log(f"Found {len(all_open)} open TCP port(s) in {time.monotonic() - started:.1f}s")
@@ -413,7 +457,9 @@ def scan(ctx: ScanContext) -> ScanResult:
 
     # Web/TLS checks for likely HTTP ports.
     web_checks = ctx.option_bool("web_checks", True)
-    web_budget = _bounded_int(ctx.option("max_web_hosts", 20), 20, 1, 200)
+    web_budget = _bounded_int(
+        ctx.option("max_web_hosts", get_limit("max_web_hosts", 20)), 20, 1, 10_000
+    )
     testssl_budget = _bounded_int(ctx.option("max_testssl_hosts", 5), 5, 0, 50)
     testssl_enabled = (
         ctx.option_bool("external_tools", False) and ctx.option_bool("testssl", False)

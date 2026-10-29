@@ -6,10 +6,11 @@ import csv
 import io
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
@@ -37,6 +38,28 @@ footer{margin-top:40px;color:var(--muted);font-size:11px;border-top:1px solid va
 @media print{body{background:#fff}.wrap{max-width:none;padding:0}.finding{break-inside:avoid}a{color:inherit;text-decoration:none}}
 @media(max-width:800px){.cards{grid-template-columns:repeat(3,1fr)}.two{grid-template-columns:1fr}}
 """
+
+
+def _csv_cell(value: Any) -> Any:
+    """Neutralise spreadsheet formula injection in exported cells."""
+    if value is None:
+        return ""
+    text = str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r", "\n")):
+        return "'" + text
+    return text
+
+
+def _safe_reference_url(value: Any) -> str | None:
+    """Return a reference URL only when it uses a safe web scheme."""
+    text = str(value or "").strip()
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    return text
 
 
 def build_json(scan: dict[str, Any], findings: list[dict[str, Any]], context: dict[str, Any]) -> str:
@@ -67,21 +90,21 @@ def build_csv(scan: dict[str, Any], findings: list[dict[str, Any]]) -> str:
     for finding in findings:
         writer.writerow(
             [
-                scan.get("id"),
-                finding.get("severity"),
-                finding.get("category"),
-                finding.get("title"),
-                finding.get("cve"),
-                finding.get("cwe"),
-                finding.get("cvss"),
-                finding.get("location"),
-                finding.get("resource"),
-                finding.get("status"),
-                finding.get("first_seen"),
-                finding.get("last_seen"),
-                finding.get("description"),
-                finding.get("evidence"),
-                finding.get("remediation"),
+                _csv_cell(scan.get("id")),
+                _csv_cell(finding.get("severity")),
+                _csv_cell(finding.get("category")),
+                _csv_cell(finding.get("title")),
+                _csv_cell(finding.get("cve")),
+                _csv_cell(finding.get("cwe")),
+                _csv_cell(finding.get("cvss")),
+                _csv_cell(finding.get("location")),
+                _csv_cell(finding.get("resource")),
+                _csv_cell(finding.get("status")),
+                _csv_cell(finding.get("first_seen")),
+                _csv_cell(finding.get("last_seen")),
+                _csv_cell(finding.get("description")),
+                _csv_cell(finding.get("evidence")),
+                _csv_cell(finding.get("remediation")),
             ]
         )
     return output.getvalue()
@@ -106,10 +129,15 @@ def build_html(scan: dict[str, Any], findings: list[dict[str, Any]], context: di
         kev = '<span class="kev">CISA KEV</span>' if raw.get("kev") else ""
         references = ""
         refs = raw.get("references") or []
-        if refs:
+        safe_refs = [
+            safe
+            for safe in (_safe_reference_url(url) for url in refs[:8])
+            if safe
+        ]
+        if safe_refs:
             links = " ".join(
                 f'<a href="{escape(url)}" rel="noreferrer">{escape(url)}</a>'
-                for url in refs[:8]
+                for url in safe_refs
             )
             references = f'<div class="lbl">References</div><div class="meta">{links}</div>'
         finding_html.append(
@@ -188,7 +216,8 @@ def build_pdf(
     p.setFont("Helvetica", 10)
     p.drawString(20 * mm, 280 * mm, f"Report Type: {report_type.capitalize()}")
     p.drawString(20 * mm, 270 * mm, f"Generated: {context.get('generated_at', '')}")
-    p.drawString(20 * mm, 260 * mm, f"Customer: {context.get('customer', {}).get('name', '—')}")
+    customer = context.get("customer") or {}
+    p.drawString(20 * mm, 260 * mm, f"Customer: {customer.get('name', '—')}")
     p.drawString(20 * mm, 250 * mm, f"Scan ID: {scan.get('id')}")
     p.drawString(20 * mm, 240 * mm, f"Target: {scan.get('target')}")
 

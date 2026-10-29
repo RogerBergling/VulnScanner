@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .database import get_db, json_dump, json_load, transaction, utcnow
-from .security import (
-    authenticate_agent,
-    consume_enrollment_token,
-    hash_token,
-    new_agent_token,
-)
+from .security import consume_enrollment_token, hash_token, new_agent_token
 from .utils import parse_dt
 
 
@@ -130,16 +124,6 @@ def enroll_agent(
         "asset_id": asset_id,
         "poll_interval": 30,
     }
-
-
-def _ensure_audit_table() -> None:
-    with get_db() as conn:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS audit_events("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, "
-            "actor TEXT NOT NULL, action TEXT NOT NULL, details TEXT NOT NULL DEFAULT '')"
-        )
-        conn.commit()
 
 
 def heartbeat(agent: dict[str, Any], payload: dict[str, Any], ip: str) -> dict[str, Any]:
@@ -511,13 +495,57 @@ def rotate_agent_token(agent_id: str) -> str:
     return token
 
 
+def expire_stale_agent_jobs(timeout_seconds: int | None = None) -> int:
+    """Fail agent jobs that have been running longer than the configured limit.
+
+    The agent is a polling client and may disappear without sending a result.
+    Without this cleanup the job and its scan remain ``running`` forever.
+    """
+    from .config import AGENT_JOB_TIMEOUT_SECONDS, get_limit
+
+    timeout = int(timeout_seconds or get_limit("agent_job_timeout", AGENT_JOB_TIMEOUT_SECONDS))
+    timeout = max(60, timeout)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout)
+    now = utcnow()
+    expired = 0
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT id, scan_id, claimed_at, created_at FROM agent_jobs "
+            "WHERE status IN ('running', 'processing')"
+        ).fetchall()
+        for row in rows:
+            claimed = parse_dt(row["claimed_at"] or row["created_at"])
+            if claimed is None or claimed >= cutoff:
+                continue
+            message = f"Agent job exceeded the {timeout}s timeout"
+            conn.execute(
+                "UPDATE agent_jobs SET status = 'failed', completed_at = ?, error = ? "
+                "WHERE id = ?",
+                (now, message, row["id"]),
+            )
+            if row["scan_id"]:
+                conn.execute(
+                    "UPDATE scans SET status = 'failed', progress = 100, stage = 'Agent timeout', "
+                    "completed_at = ?, error = ? WHERE id = ? AND status IN "
+                    "('queued','running','waiting_agent')",
+                    (now, message, row["scan_id"]),
+                )
+                conn.execute(
+                    "INSERT INTO scan_events(scan_id, created_at, level, message) "
+                    "VALUES (?, ?, 'error', ?)",
+                    (row["scan_id"], now, message),
+                )
+            expired += 1
+    return expired
+
+
 def revoke_agent(agent_id: str) -> None:
     now = utcnow()
     with get_db() as conn:
         conn.execute("UPDATE agents SET status = 'revoked' WHERE id = ?", (agent_id,))
         conn.execute(
             "UPDATE agent_jobs SET status = 'cancelled', completed_at = ? "
-            "WHERE agent_id = ? AND status IN ('queued', 'running')",
+            "WHERE agent_id = ? AND status IN ('queued', 'running', 'processing')",
             (now, agent_id),
         )
         conn.execute(

@@ -402,7 +402,9 @@ def resolve_credential(
             row = conn.execute(
                 "SELECT c.* FROM asset_credential_bindings b "
                 "JOIN credentials c ON c.id = b.credential_id "
-                "WHERE b.asset_id = ? AND b.os = ? AND c.os = ?",
+                "JOIN assets a ON a.id = b.asset_id "
+                "WHERE b.asset_id = ? AND b.os = ? AND c.os = ? "
+                "AND (c.customer_id IS NULL OR c.customer_id = a.customer_id)",
                 (asset_id, os_name, os_name),
             ).fetchone()
             if row:
@@ -432,6 +434,11 @@ def set_asset_credential(asset_id: int, os_name: str, credential_id: int | None)
                 (asset_id, os_name),
             )
             return
+        asset = conn.execute(
+            "SELECT customer_id FROM assets WHERE id = ?", (asset_id,)
+        ).fetchone()
+        if not asset:
+            raise CredentialError("Asset not found")
         row = conn.execute(
             "SELECT * FROM credentials WHERE id = ?", (credential_id,)
         ).fetchone()
@@ -439,6 +446,10 @@ def set_asset_credential(asset_id: int, os_name: str, credential_id: int | None)
             raise CredentialError("Credential not found")
         if row["os"] != os_name:
             raise CredentialError("The credential operating system does not match the binding")
+        if row["customer_id"] is not None and int(row["customer_id"]) != int(asset["customer_id"]):
+            raise CredentialError(
+                "The credential belongs to a different customer and cannot be bound to this asset"
+            )
         conn.execute(
             "INSERT INTO asset_credential_bindings(asset_id, os, credential_id) VALUES (?, ?, ?) "
             "ON CONFLICT(asset_id, os) DO UPDATE SET credential_id = excluded.credential_id",

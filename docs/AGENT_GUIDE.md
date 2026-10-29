@@ -501,8 +501,11 @@ ACLs on Windows. Never copy it between hosts; enrol each host separately.
   interrupted/failed. Start a new scan.
 
 `VS_AGENT_JOB_TIMEOUT` controls the server-side stale-job limit (default one
-hour). The current agent does not kill a local job at that limit, but an analyst
-can cancel the scan from the UI.
+hour, minimum 60 seconds). The server checks once a minute; a job still
+`running` or `processing` after the limit is marked failed, its scan is closed
+as failed, and an explanatory event is recorded. The agent does not kill an
+already-running local job at that limit, so an analyst should also cancel the
+scan from the UI if the endpoint is still working.
 
 Server-side scans run in parallel up to `VS_SCAN_WORKERS` (default 4, range
 1-32). The configured value appears in the dashboard and server status. Agent

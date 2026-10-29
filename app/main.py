@@ -7,8 +7,6 @@ import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
-from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response

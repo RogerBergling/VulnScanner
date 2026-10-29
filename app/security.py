@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import hmac
 import secrets
@@ -30,6 +31,21 @@ def constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+def _add_months(moment: datetime, months: int) -> datetime:
+    """Add calendar months without the dateutil dependency.
+
+    ``timedelta`` cannot represent months or years. Clamp the day to the last
+    valid day of the target month (for example 31 January + 1 month = 28/29
+    February).
+    """
+    months = int(months)
+    month_index = moment.month - 1 + months
+    year = moment.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(moment.day, calendar.monthrange(year, month)[1])
+    return moment.replace(year=year, month=month, day=day)
+
+
 def create_enrollment_token(
     customer_id: int,
     group_id: int,
@@ -43,12 +59,10 @@ def create_enrollment_token(
     token_id = secrets.token_hex(12)
     now = datetime.now(timezone.utc)
     # Calculate expiration: default is max(1, min(hours, 168)) for hourly mode.
-    # If any of days/months/years provided, use those instead.
+    # If any of days/months/years provided, use calendar-aware arithmetic.
     if days or months or years:
-        delta_args = {"days": days, "months": months, "years": years}
-        # Filter zero values
-        delta_args = {k: v for k, v in delta_args.items() if v > 0}
-        expires = now + timedelta(**delta_args)
+        expires = now + timedelta(days=max(0, int(days or 0)))
+        expires = _add_months(expires, max(0, int(months or 0)) + max(0, int(years or 0)) * 12)
     else:
         expires = now + timedelta(hours=max(1, min(hours, 168)))
     with get_db() as conn:

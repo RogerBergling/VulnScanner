@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import traceback
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from .database import (
@@ -18,21 +16,14 @@ from .database import (
 )
 from .scanners.ad import process_ad_report, scan_ad_report
 from .scanners.agent import process_agent_payload
-from .scanners.base import (
-    ScanCancelled,
-    ScanContext,
-    ScanResult,
-    deduplicate_findings,
-    normalize_finding,
-)
-from .scanners.dependencies import scan_dependencies
+from .scanners.base import ScanCancelled, ScanContext, ScanResult
 from .scanners.kev import enrich_finding
 from .scanners.network import process_agent_network_payload, scan as scan_network
 from .scanners.osv import kev_lookup
 from .scanners.repository import scan_repository
 from .scanners.subdomains import scan_subdomains
 from .scanners.web import scan as scan_web
-from .utils import risk_label, risk_score, severity_summary, truncate, utcnow as now
+from .utils import risk_label, risk_score, severity_summary, truncate
 
 
 def _fetch_scan(scan_id: int) -> dict[str, Any] | None:
@@ -143,6 +134,21 @@ def _dispatch(scan: dict[str, Any], ctx: ScanContext, runtime_options: dict[str,
     raise ValueError(f"Unsupported scan type: {scan_type}")
 
 
+def _notify_schedule(
+    runtime_options: dict[str, Any], scan_id: int, status: str, message: str
+) -> None:
+    schedule_id = runtime_options.get("_schedule_id")
+    if not schedule_id:
+        return
+    try:
+        from .scheduler import notify_scheduled_scan
+
+        notify_scheduled_scan(scan_id, int(schedule_id), status, message)
+    except Exception:
+        # Notification failure must not change the scan result.
+        pass
+
+
 def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) -> None:
     runtime_options = runtime_options or {}
     scan = _fetch_scan(scan_id)
@@ -150,6 +156,7 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
         return
     if scan_cancelled(scan_id):
         update_scan(scan_id, status="cancelled", stage="Cancelled", completed_at=utcnow())
+        _notify_schedule(runtime_options, scan_id, "cancelled", "Scan cancelled before execution")
         return
     options = json_load(scan.get("options"), {})
     ctx = ScanContext(scan_id, scan["target"], options)
@@ -170,6 +177,12 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
                 error="Scan cancelled by user",
             )
             log_event(scan_id, "Scan cancelled; partial findings were saved", "warning")
+            _notify_schedule(
+                runtime_options,
+                scan_id,
+                "cancelled",
+                f"Scan cancelled with {summary.get('total', 0)} partial finding(s).",
+            )
             return
         ctx.progress(98, "Saving findings")
         summary = persist_result(scan_id, result)
@@ -186,6 +199,13 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
             f"Scan completed with {summary.get('total', 0)} finding(s) "
             f"(risk score {summary.get('risk_score', 0)})",
         )
+        _notify_schedule(
+            runtime_options,
+            scan_id,
+            "completed",
+            f"Scan completed with {summary.get('total', 0)} finding(s); "
+            f"risk score {summary.get('risk_score', 0)}.",
+        )
     except ScanCancelled:
         update_scan(
             scan_id,
@@ -196,6 +216,7 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
             error="Scan cancelled by user",
         )
         log_event(scan_id, "Scan cancelled", "warning")
+        _notify_schedule(runtime_options, scan_id, "cancelled", "Scan cancelled by user.")
     except Exception as exc:
         message = truncate(f"{exc.__class__.__name__}: {exc}", 1500)
         update_scan(
@@ -208,6 +229,7 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
         )
         log_event(scan_id, f"Scan failed: {message}", "error")
         log_event(scan_id, truncate(traceback.format_exc(), 4000), "debug")
+        _notify_schedule(runtime_options, scan_id, "failed", message)
 
 
 def execute_ad_import(scan_id: int, report: dict[str, Any]) -> None:

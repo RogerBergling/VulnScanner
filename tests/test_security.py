@@ -112,3 +112,11 @@ def test_revoked_agent_cannot_authenticate(data_dir):
         conn.commit()
     assert authenticate_agent(result["token"]) is None
     assert authenticate_agent(None) is None
+
+
+def test_enrollment_token_with_months_is_valid(data_dir):
+    customer_id, group_id = _customer_and_group()
+    token, meta = create_enrollment_token(customer_id, group_id, "web01", months=1)
+    expires = datetime.fromisoformat(meta["expires_at"])
+    assert expires > datetime.now(timezone.utc) + timedelta(days=25)
+    assert consume_enrollment_token(token) is not None

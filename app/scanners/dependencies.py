@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ..config import ENABLE_EXTERNAL_APIS
+from ..config import ENABLE_EXTERNAL_APIS, MAX_SCAN_FILES, get_limit
 from ..database import get_setting
-from ..utils import truncate
+from ..utils import safe_xml_fromstring, truncate
 from .base import Finding, ScanContext, ScanResult
 from .cvss import osv_severity
 from .filesystem import iter_files, read_text_file, relative_path
@@ -277,8 +277,8 @@ def _parse_cargo_lock(path: Path) -> list[PackageRef]:
 def _parse_pom(path: Path) -> list[PackageRef]:
     packages = []
     try:
-        root = ET.fromstring(read_text_file(path))
-    except ET.ParseError:
+        root = safe_xml_fromstring(read_text_file(path))
+    except (ET.ParseError, ValueError):
         return packages
     namespace = ""
     if root.tag.startswith("{"):
@@ -309,8 +309,8 @@ def _parse_gradle(path: Path) -> list[PackageRef]:
 def _parse_nuget(path: Path) -> list[PackageRef]:
     packages = []
     try:
-        root = ET.fromstring(read_text_file(path))
-    except ET.ParseError:
+        root = safe_xml_fromstring(read_text_file(path))
+    except (ET.ParseError, ValueError):
         return packages
     for package in root.iter("package"):
         name = package.attrib.get("id")
@@ -367,7 +367,11 @@ def parse_manifest(path: Path) -> list[PackageRef]:
 def discover_and_parse(root: Path, log: Callable[[str], None] | None = None) -> list[PackageRef]:
     packages: list[PackageRef] = []
     manifest_count = 0
-    for path in iter_files(root, max_files=10000, max_size=8 * 1024 * 1024):
+    for path in iter_files(
+        root,
+        max_files=get_limit("max_scan_files", MAX_SCAN_FILES),
+        max_size=8 * 1024 * 1024,
+    ):
         if path.name not in MANIFEST_NAMES and path.suffix.lower() not in MANIFEST_SUFFIXES:
             continue
         manifest_count += 1

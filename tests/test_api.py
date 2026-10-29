@@ -370,7 +370,6 @@ def test_server_status_backup_and_vacuum(api_client, customer, data_dir):
     backup_path = payload["path"]
     assert backup_path.startswith(str(data_dir))
     import sqlite3
-    from pathlib import Path
 
     assert Path(backup_path).exists()
     with sqlite3.connect(backup_path) as conn:

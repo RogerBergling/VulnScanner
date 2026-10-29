@@ -29,12 +29,10 @@ import socket
 import ssl
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
-import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1089,6 +1087,14 @@ def collect_manifest_packages(paths: list[str]) -> tuple[list[dict[str, Any]], l
     return list(deduped.values())[:6000], errors
 
 
+def _safe_xml_fromstring(text: str):
+    if re.search(r"<!DOCTYPE|<!ENTITY", text or "", re.IGNORECASE):
+        raise ValueError("XML with DTD or entity declarations is not accepted")
+    import xml.etree.ElementTree as ET
+
+    return ET.fromstring(text)
+
+
 def _parse_manifest_text(name: str, text: str) -> list[dict[str, Any]]:
     packages: list[dict[str, Any]] = []
     if name in {"package-lock.json", "npm-shrinkwrap.json"}:
@@ -1163,8 +1169,7 @@ def _parse_manifest_text(name: str, text: str) -> list[dict[str, Any]]:
                 if match:
                     packages.append({"name": match.group(1), "version": match.group(2), "ecosystem": "RubyGems", "source": "Gemfile.lock"})
     elif name == "pom.xml":
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(text)
+        root = _safe_xml_fromstring(text)
         ns = root.tag.split("}", 1)[0] + "}" if root.tag.startswith("{") else ""
         for dep in root.iter(f"{ns}dependency"):
             group = dep.findtext(f"{ns}groupId") or ""
@@ -1173,8 +1178,7 @@ def _parse_manifest_text(name: str, text: str) -> list[dict[str, Any]]:
             if group and artifact and version and "${" not in version:
                 packages.append({"name": f"{group}:{artifact}", "version": version, "ecosystem": "Maven", "source": "pom.xml"})
     elif name.endswith(".csproj"):
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(text)
+        root = _safe_xml_fromstring(text)
         for element in root.iter():
             if element.tag.endswith("PackageReference"):
                 package_name = element.attrib.get("Include")

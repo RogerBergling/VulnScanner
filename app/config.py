@@ -7,9 +7,11 @@ scanners you enable (OSV, CISA KEV, GitHub, or optional CLI tools).
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+_LIMIT_CACHE: dict[tuple[str, int, str, int], tuple[float, int]] = {}
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -25,14 +27,60 @@ def data_dir() -> Path:
     return path
 
 
-def database_path() -> Path:
+def _database_file() -> Path:
+    """Return the configured database path without creating directories.
+
+    ``database_path()`` is the normal accessor used by the database layer. This
+    helper exists so read-only consumers such as ``get_limit()`` can check
+    whether a database exists without accidentally creating ``data/`` during
+    tests or one-off CLI imports.
+    """
     configured = os.getenv("VS_DATABASE")
     if configured:
-        path = Path(configured).expanduser().resolve()
-    else:
-        path = data_dir() / "vulnscanner.db"
+        return Path(configured).expanduser().resolve()
+    return Path(os.getenv("VS_DATA_DIR", BASE_DIR / "data")).expanduser().resolve() / "vulnscanner.db"
+
+
+def database_path() -> Path:
+    path = _database_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def clear_limit_cache() -> None:
+    _LIMIT_CACHE.clear()
+
+
+def get_limit(name: str, default: int) -> int:
+    """Return an operator-editable guardrail from SQLite, with env fallback.
+
+    The Settings UI stores guardrails in the ``settings`` table. Scanners must
+    read the current value at scan time rather than the process-start constant,
+    otherwise changing a setting has no effect until a restart. A short cache
+    avoids opening SQLite for every file visited by the repository scanners.
+    """
+    now = time.monotonic()
+    try:
+        path = _database_file()
+        stamp = path.stat().st_mtime_ns if path.is_file() else 0
+    except OSError:
+        path = Path("")
+        stamp = 0
+    key = (name, int(default), str(path), stamp)
+    cached = _LIMIT_CACHE.get(key)
+    if cached and now - cached[0] < 5.0:
+        return cached[1]
+    try:
+        if not path.is_file():
+            value = default
+        else:
+            from .database import get_setting
+
+            value = int(get_setting(name, str(default)))
+    except (ImportError, OSError, TypeError, ValueError):
+        value = default
+    _LIMIT_CACHE[key] = (now, value)
+    return value
 
 
 def reports_dir() -> Path:
@@ -86,6 +134,11 @@ MAX_SOURCE_FILE_BYTES = int(os.getenv("VS_MAX_SOURCE_FILE_BYTES", str(1024 * 102
 MAX_SCAN_FILES = int(os.getenv("VS_MAX_SCAN_FILES", "20000"))
 MAX_CIDR_HOSTS = int(os.getenv("VS_MAX_CIDR_HOSTS", "256"))
 AGENT_JOB_TIMEOUT_SECONDS = int(os.getenv("VS_AGENT_JOB_TIMEOUT", str(60 * 60)))
+# Optional known-hosts file for authenticated SSH scans. When set, the server
+# verifies the remote host key before sending credentials. When unset, the
+# fingerprint is logged but the connection is allowed (compatible with existing
+# lab deployments). Production deployments should set this.
+SSH_KNOWN_HOSTS = os.getenv("VS_SSH_KNOWN_HOSTS", "").strip()
 # Background scans are independent jobs. Raise this on a larger host to run more
 # server-side scans at the same time. Delegated agent scans wait on the agent
 # and do not consume a worker slot.

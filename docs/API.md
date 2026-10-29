@@ -637,6 +637,11 @@ Query parameter `format`:
 
 Other values return `400`. JSON/CSV are sent as attachments.
 
+### `GET /api/scans/{scan_id}/report/pdf`
+
+Returns a PDF report. Query parameter `report_type` is `technical` (default) or
+`executive`; any other value returns `400`.
+
 ## 8. Agents
 
 ### `GET /api/agents`
@@ -710,6 +715,11 @@ immediately. Revoked agents return `409`.
   "hours": 24
 }
 ```
+
+`hours` (1-168) is used when no calendar lifetime is supplied. To issue a
+longer-lived token, set `days` (0-365), `months` (0-12) and/or `years` (0-10);
+calendar months are clamped to the last valid day (for example 31 January plus
+one month is 28/29 February).
 
 Returns `201`:
 
@@ -914,6 +924,62 @@ Returns `201` with the created AD scan detail. The report must be a JSON object
 under 20 MiB. Customer/group/asset relationships are validated. Processing is
 asynchronous; poll the scan.
 
+## 9a. Scheduled scans
+
+Schedules run a scan on a five-field crontab expression. An empty
+`cron_expression` means once per day. All timestamps are ISO 8601 UTC.
+
+### `GET /api/schedules`
+
+Optional filters: `customer_id`, `group_id`, `asset_id`, `scan_type`, `enabled`.
+
+### `POST /api/schedules`
+
+```json
+{
+  "customer_id": 1,
+  "group_id": 1,
+  "asset_id": 4,
+  "scan_type": "web",
+  "target": "",
+  "options": {},
+  "cron_expression": "0 2 * * *",
+  "notify_email": "soc@example.com",
+  "notify_webhook": "https://hooks.example.com/vulnscanner",
+  "enabled": true
+}
+```
+
+A blank `target` uses the selected asset's identifier. Invalid cron expressions
+return `400`. Returns `201` with the schedule.
+
+### `GET /api/schedules/{schedule_id}`
+
+Returns one schedule or `404`.
+
+### `PATCH /api/schedules/{schedule_id}`
+
+Accepts any of `scan_type`, `target`, `options`, `cron_expression`,
+`notify_email`, `notify_webhook`, `enabled`. Enabling or changing the cron
+expression recomputes `next_run`.
+
+### `DELETE /api/schedules/{schedule_id}`
+
+Deletes the schedule. Existing scans are retained.
+
+## 9b. Trends
+
+### `GET /api/trends/compare?older_scan_id=1&newer_scan_id=2`
+
+Compares two scans for the same asset. Returns counts and samples of new, fixed
+and unchanged findings. Comparing scans from different assets returns an error
+object.
+
+### `GET /api/trends/assets/{asset_id}?limit=10`
+
+Returns the latest completed scans for an asset, severity totals and the latest
+findings. `limit` is 1–100.
+
 ## 10. Server status and maintenance
 
 ### `GET /api/server/status`
@@ -949,7 +1015,7 @@ be downloaded as a diagnostics snapshot.
     "page_count": 30,
     "page_size": 4096,
     "free_pages": 0,
-    "schema_version": 1,
+    "schema_version": 3,
     "integrity": "ok",
     "writable": true
   },
@@ -1062,7 +1128,8 @@ requires a server restart. `admin_auth_enabled` reflects whether
 configured listener values from `VS_HOST`/`VS_PORT`; `active_bind_host` and
 `active_bind_port` show the address the current process is bound to, and
 `bind_restart_required` is `true` when the configured values differ and a
-restart is needed. `smtp_password` is stored but never returned by the API.
+restart is needed. `smtp_password` is encrypted at rest and never returned by
+the API.
 
 ### `PATCH /api/settings`
 

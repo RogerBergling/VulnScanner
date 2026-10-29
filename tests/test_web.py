@@ -171,3 +171,37 @@ def test_optional_tools_are_skipped_by_default():
     _run_nuclei(result, "https://example.test/", ctx)
     assert result.findings == []
     assert ctx.logs == []
+
+
+def test_get_does_not_follow_cross_host_redirects():
+    from app.scanners.web import _get
+
+    def handler(url):
+        return FakeResponse(
+            url=url,
+            status_code=302,
+            headers={"Location": "https://elsewhere.test/secret"},
+        )
+
+    session = FakeSession(handler)
+    response = _get(session, "https://example.test/")
+    assert response.status_code == 302
+    assert len(session.calls) == 1
+
+
+def test_get_follows_same_host_redirect():
+    from app.scanners.web import _get
+
+    def handler(url):
+        if url.endswith("/start"):
+            return FakeResponse(
+                url=url,
+                status_code=302,
+                headers={"Location": "/final"},
+            )
+        return FakeResponse(url=url, status_code=200, body="ok")
+
+    session = FakeSession(handler)
+    response = _get(session, "https://example.test/start")
+    assert response.status_code == 200
+    assert session.calls == ["https://example.test/start", "https://example.test/final"]

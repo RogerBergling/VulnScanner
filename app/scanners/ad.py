@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..utils import risk_label, risk_score, severity_summary, truncate
+from ..utils import risk_label, risk_score, severity_summary
 from .base import Finding, ScanContext, ScanResult, normalize_finding
 
 

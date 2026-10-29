@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from app.scanners.base import ScanResult
 from app.scanners.secrets import _looks_placeholder, scan_secrets, scan_text, shannon_entropy
 from tests.helpers import DummyContext

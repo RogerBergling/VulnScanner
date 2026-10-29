@@ -18,10 +18,10 @@ import ipaddress
 import json
 import re
 import socket
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from ..config import DANGEROUS_PORTS, ENABLE_EXTERNAL_APIS, SERVICE_NAMES
+from ..config import DANGEROUS_PORTS, ENABLE_EXTERNAL_APIS, SSH_KNOWN_HOSTS
 from ..credentials import CredentialError, resolve_for_scan
 from ..database import get_setting
 from ..utils import truncate
@@ -493,7 +493,45 @@ def _attempt_host(
 # ---------------------------------------------------------------------------
 
 
-def _ssh_connect(host: str, port: int, credential: dict[str, Any], timeout: float):
+def _verify_ssh_host_key(transport, host: str, port: int, ctx: ScanContext | None) -> None:
+    """Verify the remote SSH host key when a known_hosts file is configured."""
+    paramiko = _paramiko()
+    remote = transport.get_remote_server_key()
+    fingerprint = ":".join(f"{byte:02x}" for byte in remote.get_fingerprint())
+    known_hosts = (SSH_KNOWN_HOSTS or "").strip()
+    if not known_hosts:
+        if ctx:
+            ctx.log(
+                f"SSH host key for {host}:{port} is {remote.get_name()} "
+                f"MD5:{fingerprint} (set VS_SSH_KNOWN_HOSTS to enforce verification)",
+                "warning",
+            )
+        return
+    try:
+        host_keys = paramiko.HostKeys(known_hosts)
+    except (OSError, paramiko.SSHException) as exc:
+        raise ConnectionFailed(f"Could not load SSH known_hosts file: {exc}") from exc
+    candidates = [host, f"[{host}]:{port}"]
+    entry = next((host_keys.lookup(item) for item in candidates if host_keys.lookup(item)), None)
+    if not entry:
+        raise ConnectionFailed(
+            f"SSH host key for {host}:{port} is not present in {known_hosts}; "
+            "add it before scanning"
+        )
+    expected = entry.get(remote.get_name())
+    if expected is None or expected != remote:
+        raise ConnectionFailed(
+            f"SSH host key mismatch for {host}:{port}; possible man-in-the-middle"
+        )
+
+
+def _ssh_connect(
+    host: str,
+    port: int,
+    credential: dict[str, Any],
+    timeout: float,
+    ctx: ScanContext | None = None,
+):
     paramiko = _paramiko()
     if not paramiko:
         raise ConnectionFailed("The 'paramiko' package is not installed")
@@ -506,6 +544,11 @@ def _ssh_connect(host: str, port: int, credential: dict[str, Any], timeout: floa
         except paramiko.SSHException as exc:
             transport.close()
             raise ConnectionFailed(f"SSH negotiation failed: {exc}") from exc
+        try:
+            _verify_ssh_host_key(transport, host, port, ctx)
+        except Exception:
+            transport.close()
+            raise
         username = str(credential.get("username") or "")
         try:
             if credential.get("auth_type") == "key":
@@ -592,7 +635,7 @@ def collect_linux(
     port = _int_option(
         ctx.option("ssh_port") or credential.get("port") or 22, 22, 1, 65535
     )
-    transport = _ssh_connect(host, port, credential, timeout)
+    transport = _ssh_connect(host, port, credential, timeout, ctx)
     try:
         output = _ssh_run(transport, LINUX_SCRIPT, timeout)
     finally:

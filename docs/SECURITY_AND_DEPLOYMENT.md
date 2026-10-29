@@ -15,6 +15,7 @@ anything.
 
 - The SQLite database, which contains customers, assets, scans, findings,
   evidence, agent records and cached vulnerability data.
+- Certificates and the credential encryption key under `VS_DATA_DIR`.
 - Agent tokens, even though only their SHA-256 hashes are stored.
 - API responses and exported reports.
 - Secrets discovered in repositories or endpoint files, which may appear in
@@ -199,7 +200,7 @@ sudo install -d -o vulnscanner -g vulnscanner -m 0750 /var/lib/vulnscanner
 sudo install -d -o vulnscanner -g vulnscanner -m 0750 /var/lib/vulnscanner/reports
 ```
 
-The database and reports should not be world-readable:
+The database, certificates and reports should not be world-readable:
 
 ```bash
 chmod 700 /var/lib/vulnscanner
@@ -301,6 +302,22 @@ removed afterwards. Report exports are generated in memory and streamed; they
 are not retained by the application.
 
 ### Backup
+
+### Keep data outside the Git checkout
+
+For any deployment that uses Git, set `VS_DATA_DIR` to an absolute path outside
+the repository, for example:
+
+```bash
+VS_DATA_DIR=/var/lib/vulnscanner
+VS_DATABASE=/var/lib/vulnscanner/vulnscanner.db
+```
+
+`data/`, `*.db`, `*.db-wal`, `*.db-shm`, `.env` and `reports/` are ignored by
+Git, so a normal `git pull` does not remove them. However, `git clean -fdx`
+deletes ignored files and will remove the database, certificates, credential key
+and backups. Never use `git clean -fdx` on a production checkout. See
+[UPGRADING.md](UPGRADING.md) for the safe update procedure.
 
 The safest backup is taken while the service is stopped:
 

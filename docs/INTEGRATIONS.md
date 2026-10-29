@@ -45,16 +45,17 @@ hardening requirements.
 
 The two main gates are:
 
-1. The scan's **External tools** option (or the Settings toggle for
-   Nmap/Nuclei/testssl/Trivy/Subfinder).
+1. The scan's **External tools** option. Nmap, Nuclei, testssl.sh, Trivy and
+   Subfinder also have a Settings enable switch, which can disable them but
+   does not turn them on by itself.
 2. `VS_ENABLE_EXTERNAL_APIS` plus the **Allow external APIs** setting. This
    controls OSV.dev, KEV sync, GitHub-related outbound calls, Nuclei, Semgrep,
    `osv-scanner`, Subfinder and Trivy database updates.
 
 Gitleaks, testssl.sh, local Git operations, Nmap and the built-in scanners do
-not require `VS_ENABLE_EXTERNAL_APIS`, although each optional tool also has its
-own Settings toggle. Wordlist DNS discovery is local and does not require
-external APIs.
+not require `VS_ENABLE_EXTERNAL_APIS`. Gitleaks, Semgrep and `osv-scanner` have
+no separate Settings toggle; the scan's **External tools** option is their only
+gate. Wordlist DNS discovery is local and does not require external APIs.
 
 Tool paths are resolved in this order:
 
@@ -165,7 +166,7 @@ lockfiles that the built-in parser does not understand and can provide its own
 view of OSV data.
 
 - Run only for repository/GitHub scans with **External tools** enabled.
-- Requires external APIs and the Settings toggle.
+- Requires external APIs; there is no separate Settings toggle.
 - Command used (v2 syntax first, legacy syntax as fallback):
 
   ```text
