@@ -68,6 +68,168 @@ reverse proxy before remote use. The default local listener uses HTTPS with a
 self-signed certificate, so browsers will warn; set `VS_SSL=false` to use HTTP
 on loopback instead.
 
+## 2a. Installing optional external tools (Ubuntu and Fedora)
+
+VulnScanner does not bundle the optional command-line tools. Without them the
+built-in scanners still run; the missing integration is logged and skipped.
+Install only the tools you need, then check **Settings → Optional command-line
+tools**. That page shows the detected path and version and lets you set an
+absolute path.
+
+The Settings toggles for Nmap, Nuclei, testssl.sh, Trivy and Subfinder can
+disable an installed tool. Gitleaks, Semgrep and `osv-scanner` are controlled by
+the scan's **External tools** option. Nuclei, Semgrep, Subfinder and Trivy
+database updates also require external APIs to be enabled.
+
+### Prerequisites
+
+```bash
+# Ubuntu 22.04/24.04
+sudo apt update
+sudo apt install -y curl git unzip tar nmap python3 python3-venv pipx
+
+# Fedora
+sudo dnf install -y curl git unzip tar nmap python3 python3-pip pipx
+```
+
+Nmap and Git are installed by these commands. The other tools are not in the
+standard Ubuntu repositories, so use the official release binaries. The
+commands are the same on Ubuntu and Fedora and assume x86_64. On ARM servers,
+replace `amd64` with `arm64`; for Trivy replace `Linux-64bit` with
+`Linux-ARM64`.
+
+### Nuclei, Subfinder, OSV-Scanner, Gitleaks and Trivy
+
+```bash
+TMP_DIR="$(mktemp -d)"
+cd "$TMP_DIR"
+
+# Nuclei
+NUCLEI_VERSION=3.11.1
+curl -fsSLO "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_amd64.zip"
+unzip -q "nuclei_${NUCLEI_VERSION}_linux_amd64.zip" nuclei
+sudo install -m 0755 nuclei /usr/local/bin/nuclei
+
+# Subfinder
+SUBFINDER_VERSION=2.17.0
+curl -fsSLO "https://github.com/projectdiscovery/subfinder/releases/download/v${SUBFINDER_VERSION}/subfinder_${SUBFINDER_VERSION}_linux_amd64.zip"
+unzip -q "subfinder_${SUBFINDER_VERSION}_linux_amd64.zip" subfinder
+sudo install -m 0755 subfinder /usr/local/bin/subfinder
+
+# OSV-Scanner
+OSV_VERSION=2.3.8
+curl -fsSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+sudo install -m 0755 osv-scanner /usr/local/bin/osv-scanner
+
+# Gitleaks
+GITLEAKS_VERSION=8.30.0
+curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+tar xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+
+# Trivy
+TRIVY_VERSION=0.69.3
+curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+tar xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy
+sudo install -m 0755 trivy /usr/local/bin/trivy
+```
+
+Fedora also provides a Gitleaks package; `sudo dnf install -y gitleaks` is an
+alternative to the binary install. Keep the version reasonably current because
+secret-detection rules change over time.
+
+Nuclei needs its templates once:
+
+```bash
+nuclei -update-templates
+```
+
+VulnScanner does not update Nuclei templates automatically. Review template
+changes before using them against production targets.
+
+Trivy downloads its vulnerability database on first use when external APIs are
+enabled. Its cache is `VS_DATA_DIR/trivy-cache`. For an offline deployment,
+populate that cache first, or Trivy runs with `--skip-db-update` and uses the
+existing database.
+
+### testssl.sh
+
+testssl.sh is a shell script rather than a distribution package.
+
+```bash
+# Runtime dependencies
+# Ubuntu
+sudo apt install -y bash openssl procps dnsutils bsdextrautils socat
+# Fedora
+sudo dnf install -y bash openssl procps-ng bind-utils util-linux socat
+
+# Install the script (both distributions)
+sudo git clone --depth 1 https://github.com/testssl/testssl.sh.git /opt/testssl.sh
+sudo ln -sf /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh
+```
+
+If the script is not on `PATH`, set `VS_TESTSSL_PATH` to
+`/opt/testssl.sh/testssl.sh` or choose the path in Settings.
+
+### Semgrep
+
+Semgrep is a Python package. For a VulnScanner service, install it into a
+dedicated virtual environment so its dependencies cannot change VulnScanner's
+own packages:
+
+```bash
+sudo python3 -m venv /opt/semgrep
+sudo /opt/semgrep/bin/python -m pip install --upgrade pip semgrep
+sudo ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+```
+
+If `/usr/local/bin` is not on the service's `PATH`, add the absolute path to
+`.env` or the systemd environment file:
+
+```bash
+VS_SEMGREP_PATH=/usr/local/bin/semgrep
+```
+
+For a per-user installation, `pipx install semgrep` is also supported. Set
+`VS_SEMGREP_PATH` to the absolute path printed by `command -v semgrep` if the
+service does not inherit the user's `PATH`.
+
+### Verify the installation
+
+```bash
+nmap --version
+nuclei -version
+testssl.sh --version
+trivy --version
+subfinder -version
+osv-scanner --version
+gitleaks version
+semgrep --version
+git --version
+```
+
+The exact output differs between versions. What matters is that each command
+exits successfully and that **Settings → Optional command-line tools** shows
+the tool as available. If the service cannot find a tool that works in your
+shell, set the matching absolute path in `.env`:
+
+```bash
+VS_NMAP_PATH=/usr/bin/nmap
+VS_NUCLEI_PATH=/usr/local/bin/nuclei
+VS_TESTSSL_PATH=/opt/testssl.sh/testssl.sh
+VS_TRIVY_PATH=/usr/local/bin/trivy
+VS_SUBFINDER_PATH=/usr/local/bin/subfinder
+VS_OSV_SCANNER_PATH=/usr/local/bin/osv-scanner
+VS_GITLEAKS_PATH=/usr/local/bin/gitleaks
+VS_SEMGREP_PATH=/usr/local/bin/semgrep
+VS_GIT_PATH=/usr/bin/git
+```
+
+Restart the service after changing `.env`, or set the path in Settings and let
+the server apply it immediately. See
+[INTEGRATIONS.md](INTEGRATIONS.md) for the command each integration runs and
+its safety limits.
+
 ## 3. Interface tour
 
 The left navigation contains:

@@ -22,7 +22,8 @@ This document covers:
   reports)
 
 See [USER_MANUAL.md](USER_MANUAL.md) for scan options and
-[SECURITY_AND_DEPLOYMENT.md](SECURITY_AND_DEPLOYMENT.md) for network and
+[the Ubuntu/Fedora installation commands](USER_MANUAL.md#2a-installing-optional-external-tools-ubuntu-and-fedora),
+and [SECURITY_AND_DEPLOYMENT.md](SECURITY_AND_DEPLOYMENT.md) for network and
 hardening requirements.
 
 ## 1. Integration model

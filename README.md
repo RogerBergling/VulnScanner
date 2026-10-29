@@ -32,9 +32,9 @@ inbound firewall rules on scanned endpoints.
 ## Quick start
 
 Requirements: Python 3.11 or newer (3.14 is used by the project virtual
-environment), and optionally Git, Nmap, Nuclei, Gitleaks, Semgrep and
-osv-scanner. Authenticated host scans use `paramiko` (SSH) and `pywinrm`
-(WinRM), which are installed from `requirements.txt`.
+environment), and optionally Git, Nmap, Nuclei, testssl.sh, Trivy, Subfinder,
+Gitleaks, Semgrep and osv-scanner. Authenticated host scans use `paramiko`
+(SSH) and `pywinrm` (WinRM), which are installed from `requirements.txt`.
 
 Linux/macOS:
 
@@ -84,6 +84,123 @@ for plain HTTP. The API reference is available at
 <https://127.0.0.1:8765/api/docs>. The full user manual is at
 <https://127.0.0.1:8765/manual> and in
 [docs/USER_MANUAL.md](docs/USER_MANUAL.md).
+
+## Optional external tools
+
+VulnScanner works without these tools. They add coverage only; if a tool is
+missing, the scan continues with the built-in checks and logs a warning. The
+Settings page shows whether each tool is available, its version and its path.
+For a service installation, use an absolute `VS_*_PATH` when the service user
+cannot see your shell `PATH`.
+
+### Ubuntu and Fedora prerequisites
+
+```bash
+# Ubuntu 22.04/24.04
+sudo apt update
+sudo apt install -y curl git unzip tar nmap python3 python3-venv pipx
+
+# Fedora
+sudo dnf install -y curl git unzip tar nmap python3 python3-pip pipx
+```
+
+Nmap and Git are now installed. The remaining tools are not in the standard
+Ubuntu repositories, so install the official release binaries. The commands
+below are the same on Ubuntu and Fedora and use x86_64 packages; replace
+`amd64` with `arm64` (and `Linux-64bit` with `Linux-ARM64` for Trivy) on ARM
+servers.
+
+```bash
+TMP_DIR="$(mktemp -d)"
+cd "$TMP_DIR"
+
+# Nuclei
+NUCLEI_VERSION=3.11.1
+curl -fsSLO "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_amd64.zip"
+unzip -q "nuclei_${NUCLEI_VERSION}_linux_amd64.zip" nuclei
+sudo install -m 0755 nuclei /usr/local/bin/nuclei
+
+# Subfinder
+SUBFINDER_VERSION=2.17.0
+curl -fsSLO "https://github.com/projectdiscovery/subfinder/releases/download/v${SUBFINDER_VERSION}/subfinder_${SUBFINDER_VERSION}_linux_amd64.zip"
+unzip -q "subfinder_${SUBFINDER_VERSION}_linux_amd64.zip" subfinder
+sudo install -m 0755 subfinder /usr/local/bin/subfinder
+
+# OSV-Scanner
+OSV_VERSION=2.3.8
+curl -fsSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64"
+sudo install -m 0755 osv-scanner /usr/local/bin/osv-scanner
+
+# Gitleaks
+GITLEAKS_VERSION=8.30.0
+curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+tar xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+
+# Trivy
+TRIVY_VERSION=0.69.3
+curl -fsSLO "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+tar xzf "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy
+sudo install -m 0755 trivy /usr/local/bin/trivy
+```
+
+Fedora also packages Gitleaks, so `sudo dnf install -y gitleaks` is an
+alternative to the binary above.
+
+### testssl.sh
+
+```bash
+# Runtime dependencies
+# Ubuntu
+sudo apt install -y bash openssl procps dnsutils bsdextrautils socat
+# Fedora
+sudo dnf install -y bash openssl procps-ng bind-utils util-linux socat
+
+# Install the script (both distributions)
+sudo git clone --depth 1 https://github.com/testssl/testssl.sh.git /opt/testssl.sh
+sudo ln -sf /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh
+```
+
+### Semgrep
+
+Semgrep is a Python package. For a service installation, use a dedicated
+virtual environment so its dependencies cannot change VulnScanner's own
+packages:
+
+```bash
+sudo python3 -m venv /opt/semgrep
+sudo /opt/semgrep/bin/python -m pip install --upgrade pip semgrep
+sudo ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+```
+
+If `/usr/local/bin` is not on the service's `PATH`, set
+`VS_SEMGREP_PATH=/usr/local/bin/semgrep` in `.env` or the systemd environment
+file. For a per-user installation, `pipx install semgrep` is also supported;
+set `VS_SEMGREP_PATH` to the absolute path printed by `command -v semgrep` if
+the service does not inherit your shell `PATH`.
+
+### Verify and enable
+
+```bash
+nmap --version
+nuclei -version
+testssl.sh --version
+trivy --version
+subfinder -version
+osv-scanner --version
+gitleaks version
+semgrep --version
+git --version
+
+# One-time Nuclei template download
+nuclei -update-templates
+```
+
+Then open **Settings → Optional command-line tools**, confirm each tool is
+detected and enable the integrations you need. Nuclei, Semgrep, Subfinder and
+Trivy database updates also require external APIs to be enabled. See the
+[user manual](docs/USER_MANUAL.md#2a-installing-optional-external-tools-ubuntu-and-fedora)
+for the full integration behaviour and scan options.
 
 ## First scan
 
