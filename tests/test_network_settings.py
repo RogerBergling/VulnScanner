@@ -120,7 +120,17 @@ def test_admin_password_update_still_preserves_other_env_entries(api_client, mon
     assert response.status_code == 200, response.text
 
     text = env_path.read_text(encoding="utf-8")
-    assert "VS_ADMIN_PASSWORD=a-new-password-123" in text
+    assert "VS_ADMIN_PASSWORD=\n" in text or text.endswith("VS_ADMIN_PASSWORD=")
     assert text.count("VS_ADMIN_PASSWORD=") == 1
     assert "VS_HOST=127.0.0.1" in text
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+    from app.database import get_setting
+
+    stored = get_setting("admin_password_hash", "")
+    assert stored.startswith("pbkdf2_sha256$")
+    assert "a-new-password-123" not in stored
+    assert "VS_ADMIN_PASSWORD" not in os.environ
+    assert api_client.get(
+        "/api/customers", auth=("admin", "a-new-password-123")
+    ).status_code == 200

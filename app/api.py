@@ -70,6 +70,7 @@ from .database import (
     ensure_default_group,
     get_db,
     get_setting,
+    get_setting_optional,
     json_dump,
     json_load,
     set_setting,
@@ -99,6 +100,8 @@ from .schemas import (
     GroupCreate,
     GroupUpdate,
     ScanCreate,
+    DatabaseBackupRequest,
+    DatabaseRestoreRequest,
     ScheduleCreate,
     ScheduleUpdate,
     SettingsUpdate,
@@ -114,7 +117,13 @@ from .scanners.subdomains import (
 )
 from .scanners.tools import tool_status
 from .scans import scan_counts
-from .security import authenticate_agent, create_enrollment_token
+from .security import (
+    admin_auth_enabled,
+    admin_user,
+    authenticate_agent,
+    create_enrollment_token,
+    hash_password,
+)
 from .utils import (
     format_duration,
     human_age,
@@ -142,6 +151,7 @@ LEFT JOIN agents ag ON ag.id = s.agent_id
 """
 
 _SERVER_STARTED_AT = datetime.now(timezone.utc).replace(microsecond=0)
+_ACTIVE_SSL = os.getenv("VS_SSL", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _uptime_text(seconds: int) -> str:
@@ -1899,6 +1909,7 @@ def server_status() -> dict[str, Any]:
         "paths": {
             "data_dir": str(db_path.parent),
             "reports_dir": str(reports_path),
+            "backup_dir": str(reports_path / "backups"),
             "reports_count": report_count,
             "reports_size": report_size,
         },
@@ -1917,46 +1928,91 @@ def server_status() -> dict[str, Any]:
         "tools": tools,
         "limits": {
             "top_ports": len(TOP_PORTS),
-            "agent_job_timeout_seconds": AGENT_JOB_TIMEOUT_SECONDS,
+            "agent_job_timeout_seconds": get_limit(
+                "agent_job_timeout", AGENT_JOB_TIMEOUT_SECONDS
+            ),
             "scan_workers": SCAN_WORKERS,
         },
         "checks": checks,
         "last_backup_at": get_setting("last_backup_at", ""),
         "last_backup_path": get_setting("last_backup_path", ""),
+        "last_restore_at": get_setting("last_restore_at", ""),
+        "last_restore_source": get_setting("last_restore_source", ""),
+        "last_restore_mode": get_setting("last_restore_mode", ""),
+        "last_restore_safety_backup": get_setting(
+            "last_restore_safety_backup", ""
+        ),
+        "last_restore_error": get_setting("last_restore_error", ""),
     }
+
+
+@router.get("/server/database/backups")
+def database_backups(directory: str | None = None) -> dict[str, Any]:
+    from .backup import list_backups
+
+    try:
+        return list_backups(directory)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/server/database/backup", status_code=201)
-def backup_database() -> dict[str, Any]:
-    target_dir = reports_dir() / "backups"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    target = target_dir / f"vulnscanner-{stamp}.db"
+def backup_database(
+    payload: DatabaseBackupRequest | None = None,
+) -> dict[str, Any]:
+    from .backup import create_backup
+
     try:
-        with get_db() as source:
-            destination = sqlite3.connect(target)
-            try:
-                source.backup(destination)
-            finally:
-                destination.close()
+        return create_backup(
+            payload.destination if payload else None,
+            overwrite=payload.overwrite if payload else False,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (OSError, sqlite3.Error) as exc:
-        try:
-            target.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise HTTPException(status_code=500, detail=f"Database backup failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Database backup failed: {exc}"
+        ) from exc
+
+
+@router.post("/server/database/restore")
+def restore_database_endpoint(payload: DatabaseRestoreRequest) -> dict[str, Any]:
+    from .backup import restore_database
+    from .scans import recover_interrupted_scans
+
+    before = (
+        get_setting("bind_host", os.getenv("VS_HOST", HOST)),
+        get_setting("bind_port", os.getenv("VS_PORT", str(PORT))),
+        get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false"),
+    )
     try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
-    set_setting("last_backup_at", utcnow())
-    set_setting("last_backup_path", str(target))
-    return {
-        "ok": True,
-        "path": str(target),
-        "size": _file_size(target),
-        "created_at": utcnow(),
-    }
+        result = restore_database(payload.path, payload.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Database restore failed: {exc}"
+        ) from exc
+
+    if payload.mode in {"all", "settings"}:
+        try:
+            _sync_env_from_settings()
+        except Exception as exc:
+            result["env_sync_error"] = str(exc)
+    if payload.mode in {"all", "scans"}:
+        try:
+            recover_interrupted_scans()
+        except Exception as exc:
+            result["recovery_error"] = str(exc)
+    after = (
+        get_setting("bind_host", os.getenv("VS_HOST", HOST)),
+        get_setting("bind_port", os.getenv("VS_PORT", str(PORT))),
+        get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false"),
+    )
+    result["restart_required"] = before != after
+    return result
 
 
 @router.post("/server/database/vacuum")
@@ -1986,11 +2042,15 @@ def get_settings() -> dict[str, Any]:
     with get_db() as conn:
         kev_count = conn.execute("SELECT COUNT(*) c FROM kev_catalog").fetchone()["c"]
         db_size = database_path().stat().st_size if database_path().exists() else 0
-    configured_bind_host = os.getenv("VS_HOST") or HOST
+    configured_bind_host = get_setting("bind_host", os.getenv("VS_HOST") or HOST)
     try:
-        configured_bind_port = int(os.getenv("VS_PORT", str(PORT)))
+        configured_bind_port = int(
+            get_setting("bind_port", os.getenv("VS_PORT", str(PORT)))
+        )
     except ValueError:
         configured_bind_port = PORT
+    ssl_setting = get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false")
+    ssl_enabled = ssl_setting.strip().lower() in {"1", "true", "yes", "on"}
     return {
         "product": "VulnScanner",
         "version": __version__,
@@ -2001,12 +2061,20 @@ def get_settings() -> dict[str, Any]:
         "trivy_enabled": get_setting("trivy_enabled", "true") == "true",
         "subfinder_enabled": get_setting("subfinder_enabled", "true") == "true",
         "external_apis_available": ENABLE_EXTERNAL_APIS,
-        "admin_auth_enabled": bool(os.getenv("VS_ADMIN_PASSWORD")),
+        "admin_auth_enabled": admin_auth_enabled(),
+        "admin_user": admin_user(),
         "bind_host": configured_bind_host,
         "bind_port": configured_bind_port,
         "active_bind_host": HOST,
         "active_bind_port": PORT,
-        "bind_restart_required": configured_bind_host != HOST or configured_bind_port != PORT,
+        "ssl_enabled": ssl_enabled,
+        "active_ssl_enabled": _ACTIVE_SSL,
+        "bind_restart_required": (
+            configured_bind_host != HOST
+            or configured_bind_port != PORT
+            or ssl_enabled != _ACTIVE_SSL
+        ),
+        "ssl_restart_required": ssl_enabled != _ACTIVE_SSL,
         "kev_last_sync": get_setting("kev_last_sync", ""),
         "kev_count": kev_count,
         "database_path": str(database_path()),
@@ -2018,7 +2086,9 @@ def get_settings() -> dict[str, Any]:
         "seclists_url": SECLISTS_REPOSITORY_URL,
         "limits": {
             "top_ports": len(TOP_PORTS),
-            "agent_job_timeout_seconds": AGENT_JOB_TIMEOUT_SECONDS,
+            "agent_job_timeout_seconds": get_limit(
+                "agent_job_timeout", AGENT_JOB_TIMEOUT_SECONDS
+            ),
             "scan_workers": SCAN_WORKERS,
             "max_web_hosts": int(get_setting("max_web_hosts", "20")),
             "workers": int(get_setting("workers", "300")),
@@ -2471,6 +2541,48 @@ def _upsert_env_entries(path: Path, entries: dict[str, str]) -> None:
     _write_env_file(path, lines)
 
 
+def _sync_env_from_settings() -> None:
+    """Write database-backed runtime settings to .env for the launcher.
+
+    The database is authoritative. The .env file remains the interface used by
+    ``run.sh``/``run.bat`` for the listener and by older installations for tool
+    paths, so it is refreshed after a settings restore.
+    """
+    bind_host = get_setting("bind_host", os.getenv("VS_HOST", HOST))
+    bind_port = get_setting("bind_port", os.getenv("VS_PORT", str(PORT)))
+    ssl_setting = get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false")
+    ssl_text = (
+        "true"
+        if ssl_setting.strip().lower() in {"1", "true", "yes", "on"}
+        else "false"
+    )
+    entries = {
+        "VS_HOST": bind_host,
+        "VS_PORT": str(bind_port),
+        "VS_SSL": ssl_text,
+        "VS_ADMIN_USER": get_setting(
+            "admin_user", os.getenv("VS_ADMIN_USER", "admin")
+        ),
+        "VS_ADMIN_PASSWORD": "",
+    }
+
+    if get_setting_optional("tool_paths") is None:
+        for name, env_name in TOOL_ENV_VARS.items():
+            entries[env_name] = ""
+            TOOL_PATHS[name] = ""
+            os.environ.pop(env_name, None)
+    else:
+        for name, env_name in TOOL_ENV_VARS.items():
+            entries[env_name] = TOOL_PATHS.get(name, "")
+
+    _upsert_env_entries(BASE_DIR / ".env", entries)
+    os.environ["VS_HOST"] = bind_host
+    os.environ["VS_PORT"] = str(bind_port)
+    os.environ["VS_SSL"] = ssl_text
+    os.environ["VS_ADMIN_USER"] = entries["VS_ADMIN_USER"]
+    os.environ.pop("VS_ADMIN_PASSWORD", None)
+
+
 def _write_env_file(path: Path, lines: list[str]) -> None:
     """Atomically replace ``.env`` with mode 0600."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2500,55 +2612,76 @@ def _write_env_file(path: Path, lines: list[str]) -> None:
 
 @router.post("/settings/admin-password")
 def set_admin_password(payload: AdminPasswordUpdate) -> dict[str, Any]:
-    """Set or disable the dashboard password, stored in the project .env file."""
-    env_path = BASE_DIR / ".env"
-    _upsert_env_entries(env_path, {"VS_ADMIN_PASSWORD": payload.password})
-
-    # The auth middleware reads os.environ per request, so the change applies
-    # immediately without a restart.
-    if payload.password:
-        os.environ["VS_ADMIN_PASSWORD"] = payload.password
-    else:
-        os.environ.pop("VS_ADMIN_PASSWORD", None)
+    """Set or disable the dashboard password, stored as a hash in SQLite."""
+    set_setting(
+        "admin_password_hash",
+        hash_password(payload.password) if payload.password else "",
+    )
+    # The database is authoritative. Clear the legacy plaintext environment
+    # value so disabling authentication cannot fall back to an old password.
+    _upsert_env_entries(BASE_DIR / ".env", {"VS_ADMIN_PASSWORD": ""})
+    os.environ.pop("VS_ADMIN_PASSWORD", None)
 
     return {"ok": True, "set": bool(payload.password), "restart_required": False}
 
 
 @router.post("/settings/network")
 def set_bind_address(payload: BindAddressUpdate) -> dict[str, Any]:
-    """Persist the listener bind address to .env; a restart is required.
+    """Persist the listener bind address and HTTPS choice.
 
-    Uvicorn binds the socket at startup, so this only writes configuration.
-    ``run.sh`` and ``run.bat`` load ``.env`` and apply it on the next start.
+    Values are stored in SQLite and mirrored to .env because ``run.sh`` and
+    ``run.bat`` read .env before the application starts. Uvicorn binds the
+    socket at startup, so a restart is required.
     """
-    env_path = BASE_DIR / ".env"
+    set_setting("bind_host", payload.bind_host)
+    set_setting("bind_port", str(payload.bind_port))
+    if payload.ssl_enabled is not None:
+        set_setting("ssl_enabled", "true" if payload.ssl_enabled else "false")
+    ssl_enabled = get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false")
+    ssl_text = (
+        "true"
+        if ssl_enabled.strip().lower() in {"1", "true", "yes", "on"}
+        else "false"
+    )
     _upsert_env_entries(
-        env_path,
-        {"VS_HOST": payload.bind_host, "VS_PORT": str(payload.bind_port)},
+        BASE_DIR / ".env",
+        {
+            "VS_HOST": payload.bind_host,
+            "VS_PORT": str(payload.bind_port),
+            "VS_SSL": ssl_text,
+        },
     )
 
     # Reflect the saved configuration in the UI immediately, without rebinding.
     os.environ["VS_HOST"] = payload.bind_host
     os.environ["VS_PORT"] = str(payload.bind_port)
-    restart_required = payload.bind_host != HOST or payload.bind_port != PORT
+    os.environ["VS_SSL"] = ssl_text
+    restart_required = (
+        payload.bind_host != HOST
+        or payload.bind_port != PORT
+        or ssl_text != ("true" if _ACTIVE_SSL else "false")
+    )
     return {
         "ok": True,
         "bind_host": payload.bind_host,
         "bind_port": payload.bind_port,
+        "ssl_enabled": ssl_text == "true",
         "active_bind_host": HOST,
         "active_bind_port": PORT,
+        "active_ssl_enabled": _ACTIVE_SSL,
         "restart_required": restart_required,
+        "ssl_restart_required": ssl_text != ("true" if _ACTIVE_SSL else "false"),
     }
 
 
 @router.post("/settings/tools")
 def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
-    """Persist optional tool paths to .env and apply them to this process."""
-    entries: dict[str, str] = {}
+    """Persist optional tool paths to SQLite and mirror them to .env."""
+    paths = dict(TOOL_PATHS)
     for name, raw in payload.paths.items():
         path = (raw or "").strip()
         if not path:
-            entries[TOOL_ENV_VARS[name]] = ""
+            paths[name] = ""
             continue
         expanded = Path(path).expanduser()
         if not expanded.is_absolute():
@@ -2561,14 +2694,21 @@ def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
                 status_code=400,
                 detail=f"{name} path does not exist or is not a file",
             )
-        entries[TOOL_ENV_VARS[name]] = path
+        paths[name] = path
 
-    if entries:
-        _upsert_env_entries(BASE_DIR / ".env", entries)
-        for name, raw in payload.paths.items():
-            path = (raw or "").strip()
-            os.environ[TOOL_ENV_VARS[name]] = path
-            TOOL_PATHS[name] = path
+    set_setting(
+        "tool_paths",
+        json.dumps(paths, ensure_ascii=False, separators=(",", ":")),
+    )
+    TOOL_PATHS.clear()
+    TOOL_PATHS.update(paths)
+    entries = {
+        env_name: paths.get(name, "")
+        for name, env_name in TOOL_ENV_VARS.items()
+    }
+    _upsert_env_entries(BASE_DIR / ".env", entries)
+    for name, env_name in TOOL_ENV_VARS.items():
+        os.environ[env_name] = paths.get(name, "")
 
     return {
         "ok": True,

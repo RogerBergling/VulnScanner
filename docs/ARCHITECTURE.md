@@ -75,6 +75,7 @@ VulnScanner is deliberately small and local-first:
 | `app/credentials.py` | Fernet-encrypted credential profiles, asset bindings, per-scan credentials and resolution order. |
 | `app/scanners/` | Independent scan engines and shared finding types. |
 | `app/reporting.py` | Builds JSON, CSV, self-contained HTML and PDF reports on demand. |
+| `app/backup.py` | Online SQLite backups, selective restores, safety backups and validation. |
 | `app/scheduler.py` | Cron-based scheduled scans, notification delivery and stale agent-job expiry. |
 | `app/database.py` | SQLite schema, connections, transactions, settings helpers and event logging. |
 | `app/static/` | Dependency-free single-page interface. |
@@ -174,7 +175,7 @@ settings, osv_cache, kev_catalog
 | `scan_schedules` | Recurring scan definitions, cron expressions and notification targets. |
 | `asset_inventory` | Discovered hosts, ports, device type and first/last seen. |
 | `finding_history` | Per-asset fingerprint history used for trends. |
-| `settings` | Operator toggles, SMTP configuration and metadata such as the last KEV sync time. |
+| `settings` | Operator toggles, SMTP, scan guardrails, tool paths, listener/HTTPS choices, admin password hash and metadata such as the last KEV sync time. |
 | `osv_cache` | Time-limited cache of OSV batch queries and advisory details. |
 | `kev_catalog` | Locally cached CISA KEV entries. |
 

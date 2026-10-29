@@ -2401,7 +2401,11 @@
   }
 
   async function renderServer(view) {
-    const data = await get('/server/status');
+    const [data, backupListing] = await Promise.all([
+      get('/server/status'),
+      get('/server/database/backups').catch(function () { return { backups: [] }; })
+    ]);
+    const backups = (backupListing && backupListing.backups) || [];
     const counts = data.counts || {};
     const queue = data.queue || {};
     const database = data.database || {};
@@ -2491,7 +2495,9 @@
           '<span class="muted small">Change the bind address under Settings → Security. Environment-level changes require a restart.</span></div>' +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Maintenance</h2></div><div class="panel-body">' +
-          '<p class="muted small" style="margin-top:0">Back up the SQLite database before upgrades. The copy is stored under the reports directory and excluded from normal report exports.</p>' +
+          '<p class="muted small" style="margin-top:0">Back up the SQLite database before upgrades. Settings, credentials and scan history are inside the database. The copy is excluded from normal report exports.</p>' +
+          '<label class="field full" style="margin-top:8px"><span>Backup destination <span class="muted">(absolute directory or .db file; empty uses the default)</span></span>' +
+          '<input class="input mono" id="backup-destination" placeholder="' + esc((data.paths || {}).backup_dir || '') + '" spellcheck="false" autocomplete="off"></label>' +
           '<div class="kv"><span>Last backup</span><span>' + esc(data.last_backup_at ? fmtDate(data.last_backup_at) : 'never') + '</span></div>' +
           '<div class="kv"><span>Backup path</span><span class="mono">' + esc(data.last_backup_path || '—') + '</span></div>' +
           '<div class="row-actions" style="margin-top:14px">' +
@@ -2499,6 +2505,27 @@
             '<button class="btn" data-action="vacuum-db">Compact database</button>' +
             '<button class="btn" data-action="download-diagnostics">Download diagnostics</button></div>' +
         '</div></section></div>' +
+      '<section class="panel" style="margin-bottom:16px"><div class="panel-head"><h2>Restore database</h2></div><div class="panel-body">' +
+        '<p class="muted small" style="margin-top:0">Restore a VulnScanner .db backup. A safety backup of the current database is created first. Choose what to restore:</p>' +
+        '<div class="form-grid">' +
+          '<label class="field full"><span>Backup file <span class="muted">(absolute path on the server)</span></span>' +
+          '<input class="input mono" id="restore-path" list="restore-backup-list" value="' + esc(data.last_backup_path || '') + '" placeholder="/var/lib/vulnscanner/backups/vulnscanner-....db" spellcheck="false" autocomplete="off"></label>' +
+          '<datalist id="restore-backup-list">' + backups.map(function (item) {
+            return '<option value="' + esc(item.path) + '">' + esc(item.name + ' · ' + bytes(item.size)) + '</option>';
+          }).join('') + '</datalist>' +
+          '<label class="field full"><span>Restore mode</span><select class="select" id="restore-mode">' +
+            '<option value="all">Everything — scans, customers, assets, settings, agents and credentials</option>' +
+            '<option value="scans">Scan data only — keep current settings, agents and credentials</option>' +
+            '<option value="settings">Settings only — keep current scans</option>' +
+          '</select></label>' +
+        '</div>' +
+        '<div class="info-banner info-banner-warn" style="margin:10px 0"><strong>Restore replaces data.</strong> Scan-data restore replaces the current scan history and merges customers/assets by name. A database restore may also change the admin password or listener settings; sign in again or restart when prompted.</div>' +
+        '<div class="kv"><span>Last restore</span><span>' + esc(data.last_restore_at ? fmtDate(data.last_restore_at) : 'never') + (data.last_restore_mode ? ' · ' + esc(data.last_restore_mode) : '') + '</span></div>' +
+        '<div class="kv"><span>Restore source</span><span class="mono">' + esc(data.last_restore_source || '—') + '</span></div>' +
+        '<div class="kv"><span>Safety backup</span><span class="mono">' + esc(data.last_restore_safety_backup || '—') + '</span></div>' +
+        (data.last_restore_error ? '<div class="kv danger-text"><span>Last error</span><span>' + esc(data.last_restore_error) + '</span></div>' : '') +
+        '<div class="row-actions" style="margin-top:14px"><button class="btn btn-primary" data-action="restore-db">Restore database</button></div>' +
+      '</div></section>' +
       '<section class="panel"><div class="panel-head"><h2>Optional command-line tools</h2><span class="spacer"></span>' +
         '<span class="muted small">Failures never abort a scan; built-in checks remain available.</span></div>' +
         '<div class="panel-body">' + toolRows + '</div></section>';
@@ -2525,10 +2552,38 @@
       if (name === 'backup-db') {
         runWithButton(action, async function () {
           try {
-            const result = await post('/server/database/backup', {});
-            toast('Database backed up (' + bytes(result.size) + ')');
+            const input = $('#backup-destination');
+            const destination = input ? input.value.trim() : '';
+            const result = await post('/server/database/backup', destination ? { destination: destination } : {});
+            toast('Database backed up to ' + result.path + ' (' + bytes(result.size) + ')');
             router();
           } catch (error) { toast(errorText(error), 'error'); }
+        });
+        return;
+      }
+      if (name === 'restore-db') {
+        const pathInput = $('#restore-path');
+        const modeInput = $('#restore-mode');
+        const path = pathInput ? pathInput.value.trim() : '';
+        const mode = modeInput ? modeInput.value : 'all';
+        if (!path) { toast('Enter the absolute path to a backup file', 'error'); return; }
+        const modeLabel = mode === 'scans' ? 'scan data' : (mode === 'settings' ? 'settings' : 'everything');
+        confirmAction(
+          'Restore ' + modeLabel + ' from ' + path + '? The current data selected by this mode will be replaced. A safety backup is created first.',
+          'Restore database',
+          false
+        ).then(function (ok) {
+          if (!ok) return;
+          runWithButton(action, async function () {
+            try {
+              const result = await post('/server/database/restore', { path: path, mode: mode });
+              toast('Restore complete. Safety backup: ' + result.safety_backup);
+              if (result.restart_required) {
+                toast('Restart VulnScanner to apply restored listener settings', 'error');
+              }
+              router();
+            } catch (error) { toast(errorText(error), 'error'); }
+          });
         });
         return;
       }
@@ -2748,7 +2803,7 @@
 
     view.innerHTML =
       '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Settings</h1>' +
-        '<div class="page-sub">Local configuration and optional integrations. Bind address, authentication and paths are environment-level settings.</div></div>' +
+        '<div class="page-sub">Local configuration and optional integrations. Settings are stored in the database; listener changes need a restart.</div></div>' +
         '<div class="page-actions"><a class="btn" href="/api/docs" target="_blank" rel="noopener">API reference</a>' +
         '<a class="btn" href="/manual" target="_blank" rel="noopener">Full manual</a></div></div>' +
       '<div class="settings-grid">' +
@@ -2808,7 +2863,7 @@
           '<span class="muted small">Built-in fallbacks remain available when a tool is missing.</span></div><div class="panel-body">' + toolRows +
           '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px">' +
           '<button class="btn btn-primary" id="save-tool-paths">Save tool paths</button>' +
-          '<span class="muted small">Absolute paths are written to <span class="mono">.env</span> and applied immediately. Leave a field empty to search <span class="mono">PATH</span>.</span></div>' +
+          '<span class="muted small">Absolute paths are stored in the database and mirrored to <span class="mono">.env</span>, then applied immediately. Leave a field empty to search <span class="mono">PATH</span>.</span></div>' +
         '</div></section>' +
         wordlistPanel +
         '<section class="panel"><div class="panel-head"><h2>Local data</h2></div><div class="panel-body">' +
@@ -2822,20 +2877,24 @@
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>Security and access</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Active bind</span><span class="mono">' + esc(fmtHostPort(settings.active_bind_host, settings.active_bind_port)) + '</span></div>' +
-          (settings.bind_restart_required ? '<div class="info-banner info-banner-warn" style="margin:10px 0"><strong>Restart required.</strong> Saved address ' + esc(fmtHostPort(settings.bind_host, settings.bind_port)) + ' is not active yet.</div>' : '') +
+          '<div class="kv"><span>Active HTTPS</span><span>' + (settings.active_ssl_enabled ? 'enabled' : 'disabled') + '</span></div>' +
+          (settings.bind_restart_required ? '<div class="info-banner info-banner-warn" style="margin:10px 0"><strong>Restart required.</strong> Saved listener settings ' + esc(fmtHostPort(settings.bind_host, settings.bind_port)) + (settings.ssl_enabled ? ' with HTTPS' : ' without HTTPS') + ' are not active yet.</div>' : '') +
+          switchRow('set-ssl', 'Enable HTTPS listener',
+            'Use the built-in HTTPS listener and certificate. Disable for plain HTTP behind a TLS reverse proxy.', settings.ssl_enabled) +
           '<label class="field full" style="margin-top:8px"><span>Bind address</span>' +
           '<input class="input mono" id="bind-host-input" value="' + esc(settings.bind_host) + '" maxlength="64" spellcheck="false" autocomplete="off" placeholder="127.0.0.1"></label>' +
           '<label class="field full"><span>Port</span>' +
           '<input class="input mono" id="bind-port-input" type="number" min="1" max="65535" value="' + num(settings.bind_port) + '"></label>' +
           '<button class="btn btn-sm" id="save-bind" style="margin-top:6px">Save bind address</button>' +
-          '<p class="muted small" style="margin-top:6px">Saved to <span class="mono">.env</span> and applied after restarting VulnScanner with <span class="mono">./run.sh</span> or <span class="mono">run.bat</span>. ' +
+          '<p class="muted small" style="margin-top:6px">Stored in the database and mirrored to <span class="mono">.env</span>; applied after restarting VulnScanner with <span class="mono">./run.sh</span> or <span class="mono">run.bat</span>. ' +
           'Keep <span class="mono">127.0.0.1</span> for local-only access; bind to <span class="mono">0.0.0.0</span> or <span class="mono">::</span> only behind a trusted network or TLS reverse proxy.</p>' +
           '<div class="kv"><span>Dashboard auth</span><span>' + (settings.admin_auth_enabled ? 'HTTP Basic auth is enabled' : 'Not enabled') + '</span></div>' +
+          '<div class="kv"><span>Admin username</span><span class="mono">' + esc(settings.admin_user || 'admin') + '</span></div>' +
           '<label class="field full" style="margin-top:8px"><span>Admin password</span>' +
           '<input class="input" type="password" id="admin-password-input" placeholder="At least 12 characters; leave empty to disable" ' +
           'minlength="12" maxlength="128" autocomplete="new-password" spellcheck="false"></label>' +
           '<button class="btn btn-sm" id="save-admin-pass" style="margin-top:6px">Save admin password</button>' +
-          '<p class="muted small" style="margin-top:6px">Saved to <span class="mono">.env</span> and applied immediately. ' +
+          '<p class="muted small" style="margin-top:6px">Stored as a salted hash in the database and applied immediately. ' +
           'Use letters, digits, and <span class="mono">. _ ~ @ + = : , / -</span>.</p>' +
           '<div class="kv"><span>Agent tokens</span><span>SHA-256 hashed at rest</span></div>' +
           '<div class="kv"><span>Enrollment tokens</span><span>One-time use, 1–168 hour expiry</span></div>' +
@@ -2917,6 +2976,7 @@
         try {
           const host = $('#bind-host-input').value.trim();
           const port = Number($('#bind-port-input').value);
+          const sslEnabled = $('#set-ssl').checked;
           if (!host) throw new Error('Enter a bind address');
           if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535');
           const loopback = host === '::1' || host.indexOf('127.') === 0;
@@ -2926,8 +2986,8 @@
               ' Use authentication, a firewall or a TLS reverse proxy before exposing it.';
             if (!(await confirmAction(warning, 'Save bind address'))) return;
           }
-          const result = await post('/settings/network', { bind_host: host, bind_port: port });
-          toast(result.restart_required ? 'Bind address saved to .env. Restart VulnScanner to apply.' : 'Bind address unchanged');
+          const result = await post('/settings/network', { bind_host: host, bind_port: port, ssl_enabled: sslEnabled });
+          toast(result.restart_required ? 'Listener settings saved. Restart VulnScanner to apply.' : 'Listener settings unchanged');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });

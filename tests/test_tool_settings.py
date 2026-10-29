@@ -7,6 +7,8 @@ def test_settings_expose_and_update_new_integrations(api_client):
     settings = api_client.get("/api/settings").json()
     for key in ("testssl_enabled", "trivy_enabled", "subfinder_enabled"):
         assert key in settings
+    for key in ("ssl_enabled", "active_ssl_enabled", "admin_user"):
+        assert key in settings
     assert "tool_paths" in settings
     assert settings["wordlist_path"].endswith("wordlists/subdomains.txt")
     assert "SecLists" in settings["seclists_url"]

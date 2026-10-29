@@ -329,8 +329,11 @@ def test_openapi_document_lists_all_major_routes(client):
         "/api/ad/import",
         "/api/settings",
         "/api/settings/network",
+        "/api/settings/admin-password",
         "/api/server/status",
+        "/api/server/database/backups",
         "/api/server/database/backup",
+        "/api/server/database/restore",
         "/api/server/database/vacuum",
     ):
         assert path in paths
@@ -353,6 +356,8 @@ def test_server_status_backup_and_vacuum(api_client, customer, data_dir):
     }
     assert data["process"]["port"] > 0
     assert data["uptime_seconds"] >= 0
+    assert data["paths"]["backup_dir"].endswith("backups")
+    assert "last_restore_at" in data
     assert "tools" in data
     assert data["settings"]["allow_external_apis"] is True
     from app.config import SCAN_WORKERS

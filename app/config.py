@@ -6,6 +6,7 @@ scanners you enable (OSV, CISA KEV, GitHub, or optional CLI tools).
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -161,6 +162,53 @@ TOOL_ENV_VARS = {
 TOOL_PATHS = {
     name: os.getenv(env_name, "") for name, env_name in TOOL_ENV_VARS.items()
 }
+
+
+def _env_tool_paths() -> dict[str, str]:
+    return {name: os.getenv(env_name, "") for name, env_name in TOOL_ENV_VARS.items()}
+
+
+def reload_tool_paths() -> dict[str, str]:
+    """Load tool paths from SQLite, falling back to environment variables.
+
+    The Settings page stores paths in the database so they travel with a
+    database backup. The environment variables remain supported for
+    service-level overrides and for older installations.
+    """
+    paths = _env_tool_paths()
+    try:
+        from .database import get_setting_optional
+
+        raw = get_setting_optional("tool_paths")
+        if raw is not None:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                for name in TOOL_ENV_VARS:
+                    if name in parsed:
+                        paths[name] = str(parsed.get(name) or "")
+    except Exception:
+        pass
+    TOOL_PATHS.clear()
+    TOOL_PATHS.update(paths)
+    return dict(TOOL_PATHS)
+
+
+def migrate_env_tool_paths() -> None:
+    """Store non-empty environment tool paths in the database once.
+
+    This makes the first backup after an upgrade self-contained without
+    overwriting paths that an operator later changes through Settings.
+    """
+    try:
+        from .database import get_setting_optional, set_setting
+
+        if get_setting_optional("tool_paths") is not None:
+            return
+        env_paths = {name: value for name, value in _env_tool_paths().items() if value}
+        if env_paths:
+            set_setting("tool_paths", json.dumps(env_paths, separators=(",", ":")))
+    except Exception:
+        pass
 
 TOP_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 161, 389, 443, 445,

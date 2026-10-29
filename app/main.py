@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -14,11 +13,24 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api import router
-from .config import BASE_DIR, HOST, PORT, data_dir
+from .config import (
+    BASE_DIR,
+    HOST,
+    PORT,
+    data_dir,
+    migrate_env_tool_paths,
+    reload_tool_paths,
+)
 from .database import init_db
 from .jobs import shutdown
 from .scheduler import start_scheduler, stop_scheduler
 from .scans import recover_interrupted_scans
+from .security import (
+    admin_auth_enabled,
+    admin_user,
+    migrate_env_admin_password,
+    verify_admin,
+)
 
 logging.basicConfig(
     level=os.getenv("VS_LOG_LEVEL", "INFO").upper(),
@@ -34,15 +46,17 @@ AGENT_DIR.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    migrate_env_admin_password()
+    migrate_env_tool_paths()
+    reload_tool_paths()
     recover_interrupted_scans()
     start_scheduler()
     data_dir()
-    admin_password = os.getenv("VS_ADMIN_PASSWORD")
     scheme = "https" if os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"} else "http"
     logger.info("VulnScanner %s starting on %s://%s:%s", __version__, scheme, HOST, PORT)
     logger.info("Database: %s", data_dir() / "vulnscanner.db")
-    if admin_password:
-        logger.info("Dashboard Basic Authentication is enabled (user: %s)", os.getenv("VS_ADMIN_USER", "admin"))
+    if admin_auth_enabled():
+        logger.info("Dashboard Basic Authentication is enabled (user: %s)", admin_user())
     else:
         if HOST in {"127.0.0.1", "::1", "localhost"}:
             logger.warning(
@@ -78,19 +92,15 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.middleware("http")
 async def security_and_auth(request: Request, call_next):
     path = request.url.path
-    admin_password = os.getenv("VS_ADMIN_PASSWORD", "")
     public_prefixes = ("/api/health", "/api/agent/", "/agent/", "/static/", "/api/docs", "/api/openapi.json")
-    if admin_password and not any(path.startswith(prefix) for prefix in public_prefixes):
+    if not any(path.startswith(prefix) for prefix in public_prefixes) and admin_auth_enabled():
         header = request.headers.get("authorization", "")
         authorized = False
         if header.lower().startswith("basic "):
             try:
                 decoded = base64.b64decode(header.split(" ", 1)[1]).decode("utf-8")
                 username, password = decoded.split(":", 1)
-                expected_user = os.getenv("VS_ADMIN_USER", "admin")
-                authorized = secrets.compare_digest(username, expected_user) and secrets.compare_digest(
-                    password, admin_password
-                )
+                authorized = verify_admin(username, password)
             except (ValueError, UnicodeDecodeError):
                 authorized = False
         if not authorized:

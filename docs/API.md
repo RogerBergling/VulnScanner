@@ -11,7 +11,7 @@ at `/api/docs` and the schema at `/api/openapi.json`.
 
 ## 1. Authentication
 
-If `VS_ADMIN_PASSWORD` is set, all dashboard and API routes require HTTP Basic
+If a dashboard password is configured, all dashboard and API routes require HTTP Basic
 authentication, except these public prefixes:
 
 - `/api/health`
@@ -40,7 +40,7 @@ Authorization: Bearer vs_agent_...
 Enrolment uses a one-time token in the request body. Agent APIs are not protected
 by dashboard Basic auth, so an agent does not need the administrator password.
 
-If `VS_ADMIN_PASSWORD` is empty, dashboard/API authentication is disabled. Keep
+If no dashboard password is configured, dashboard/API authentication is disabled. Keep
 the service bound to `127.0.0.1` in that mode.
 
 ## 2. Conventions
@@ -1044,7 +1044,12 @@ be downloaded as a diagnostics snapshot.
     {"id": "database", "label": "Database", "status": "ok", "detail": "ok · wal journal"}
   ],
   "last_backup_at": "",
-  "last_backup_path": ""
+  "last_backup_path": "",
+  "last_restore_at": "",
+  "last_restore_source": "",
+  "last_restore_mode": "",
+  "last_restore_safety_backup": "",
+  "last_restore_error": ""
 }
 ```
 
@@ -1053,14 +1058,77 @@ be downloaded as a diagnostics snapshot.
 (`VS_SCAN_WORKERS`, default 4, range 1-32). Delegated network scans wait for an
 agent and do not consume a worker.
 
-### `POST /api/server/database/backup`
+### `GET /api/server/database/backups`
 
-Creates a consistent SQLite backup under `<reports>/backups/` using SQLite's
-online backup API, records the path in settings and returns `201`:
+Lists `.db`/`.sqlite`/`.sqlite3` backups in an absolute directory. Without
+`?directory=`, lists `<reports>/backups/`:
 
 ```json
-{"ok": true, "path": "/path/to/data/reports/backups/vulnscanner-20260102-030405.db", "size": 123456, "created_at": "…"}
+{
+  "directory": "/var/lib/vulnscanner/reports/backups",
+  "backups": [
+    {"name": "vulnscanner-20260102-030405.db", "path": "…", "size": 123456, "modified_at": "…"}
+  ]
+}
 ```
+
+### `POST /api/server/database/backup`
+
+Creates a consistent SQLite backup using SQLite's online backup API and returns
+`201`:
+
+```json
+{
+  "destination": "/secure/backups",
+  "overwrite": false
+}
+```
+
+`destination` is optional. It may be an absolute directory (a timestamped file
+is created inside it) or an absolute `.db`/`.sqlite`/`.sqlite3` file path. Leave
+it empty to use `<reports>/backups/`. Existing files return `409` unless
+`overwrite` is `true`. The backup contains all database-backed settings,
+including tool paths, listener/HTTPS choices and the admin password hash.
+
+```json
+{"ok": true, "path": "/secure/backups/vulnscanner-20260102-030405.db", "size": 123456, "created_at": "…"}
+```
+
+### `POST /api/server/database/restore`
+
+```json
+{"path": "/secure/backups/vulnscanner-20260102-030405.db", "mode": "all"}
+```
+
+`mode` is one of:
+
+- `all` - full database, including settings, agents and credentials.
+- `scans` - replace scan history; keep current settings, agents and
+  credentials. Customers, groups and assets are merged by name. Agent
+  associations and per-scan credential overrides are not restored in this
+  mode.
+- `settings` - restore the settings table only.
+
+The server creates a safety backup first, validates SQLite integrity, performs
+the restore in a transaction and checks foreign keys before committing. Active
+scans block `all` and `scans` restores with a `400` response.
+Returns the safety-backup path, restored counts and `restart_required` when
+listener settings changed:
+
+```json
+{
+  "ok": true,
+  "mode": "all",
+  "source": "/secure/backups/vulnscanner-20260102-030405.db",
+  "restored_at": "…",
+  "safety_backup": "/var/lib/vulnscanner/reports/backups/vulnscanner-pre-restore-….db",
+  "counts": {"customers": 3, "assets": 20, "scans": 40, "findings": 120, "settings": 40},
+  "restart_required": false
+}
+```
+
+Invalid, incomplete or newer-schema backups return `400`; the live database is
+not changed.
 
 ### `POST /api/server/database/vacuum`
 
@@ -1089,11 +1157,15 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "subfinder_enabled": true,
   "external_apis_available": true,
   "admin_auth_enabled": false,
+  "admin_user": "admin",
   "bind_host": "127.0.0.1",
   "bind_port": 8765,
   "active_bind_host": "127.0.0.1",
   "active_bind_port": 8765,
+  "ssl_enabled": true,
+  "active_ssl_enabled": true,
   "bind_restart_required": false,
+  "ssl_restart_required": false,
   "kev_last_sync": "",
   "kev_count": 0,
   "database_path": "/path/to/data/vulnscanner.db",
@@ -1123,13 +1195,13 @@ The database may be locked briefly; run it when scans are idle. Errors return
 ```
 
 `scan_workers` is read from `VS_SCAN_WORKERS` at process start; changing it
-requires a server restart. `admin_auth_enabled` reflects whether
-`VS_ADMIN_PASSWORD` is currently set. `bind_host` and `bind_port` are the
-configured listener values from `VS_HOST`/`VS_PORT`; `active_bind_host` and
-`active_bind_port` show the address the current process is bound to, and
-`bind_restart_required` is `true` when the configured values differ and a
-restart is needed. `smtp_password` is encrypted at rest and never returned by
-the API.
+requires a server restart. `admin_auth_enabled` reflects the stored admin
+password hash or the legacy `VS_ADMIN_PASSWORD` fallback. `bind_host`,
+`bind_port` and `ssl_enabled` are the configured listener values stored in
+SQLite; `active_bind_host`, `active_bind_port` and `active_ssl_enabled` show
+the current process, and `bind_restart_required`/`ssl_restart_required` are
+`true` when a restart is needed. `smtp_password` is encrypted at rest and never
+returned by the API.
 
 ### `PATCH /api/settings`
 
@@ -1171,16 +1243,16 @@ updated settings object.
 ### `POST /api/settings/network`
 
 ```json
-{"bind_host": "0.0.0.0", "bind_port": 8765}
+{"bind_host": "0.0.0.0", "bind_port": 8765, "ssl_enabled": false}
 ```
 
-Stores `VS_HOST` and `VS_PORT` in the project `.env` (mode `0600`). The
-listener is bound at process start, so the new address is applied after a
-restart via `run.sh` or `run.bat`. `bind_host` must be a literal IPv4 or IPv6
-address (hostnames are rejected) and `bind_port` must be `1`–`65535`; invalid
-values return `422`. Returns the saved values, the currently active address and
-`restart_required`. The GUI exposes this in **Settings → Security → Bind
-address**.
+Stores the listener settings in SQLite and mirrors `VS_HOST`, `VS_PORT` and
+`VS_SSL` to the project `.env` (mode `0600`) for `run.sh`/`run.bat`. The
+listener is bound at process start, so changes are applied after a restart.
+`bind_host` must be a literal IPv4 or IPv6 address (hostnames are rejected) and
+`bind_port` must be `1`–`65535`; invalid values return `422`. Returns the saved
+values, the currently active address/HTTPS state and restart flags. The GUI
+exposes this in **Settings → Security**.
 
 ### `POST /api/settings/tools`
 
@@ -1188,11 +1260,13 @@ address**.
 {"paths": {"nmap": "/usr/local/bin/nmap", "trivy": "", "testssl": "/opt/testssl/testssl.sh"}}
 ```
 
-Stores the matching `VS_*_PATH` values in `.env` (mode `0600`) and applies them
-to the running process immediately, so a restart is not required. Paths must be
-absolute, free of spaces and shell metacharacters, and must point to an existing
-file; send an empty string to clear an override and search `PATH`. Unknown tool
-names return `422`. Returns the saved overrides and refreshed availability.
+Stores the matching `VS_*_PATH` values in SQLite and mirrors them to `.env`
+(mode `0600`), then applies them to the running process immediately, so a
+restart is not required. Paths must be absolute, free of spaces and shell
+metacharacters, and must point to an existing file; send an empty string to
+clear an override and search `PATH`. Unknown tool names return `422`. Returns
+the saved overrides and refreshed availability. The paths are included in
+database backups.
 
 ### `GET /api/settings/wordlist`
 
@@ -1224,11 +1298,13 @@ on failure.
 {"password": "a-long-random-password"}
 ```
 
-Stores `VS_ADMIN_PASSWORD` in the project `.env` (mode `0600`) and applies it
-immediately. A non-empty password must be 12–128 characters using letters,
-digits, and `. _ ~ @ + = : , / -`; these characters are safe for both `run.sh`
-and `run.bat`. Send an empty password to disable dashboard authentication
-(`admin_auth_enabled` becomes `false`). Invalid passwords return `422`.
+Stores a salted PBKDF2 hash in SQLite and applies it immediately. The legacy
+plaintext `VS_ADMIN_PASSWORD` value is cleared from `.env` so the database is
+authoritative. A non-empty password must be 12–128 characters using letters,
+digits, and `. _ ~ @ + = : , / -`. Send an empty password to disable dashboard
+authentication (`admin_auth_enabled` becomes `false`). Invalid passwords return
+`422`. The hash is included in database backups, so restoring **Everything**
+restores the admin password too.
 
 ### `POST /api/settings/kev/sync`
 

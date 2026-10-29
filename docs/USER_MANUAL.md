@@ -60,13 +60,14 @@ the next start; restart the affected scans from the scan page.
 
 ### First login
 
-If `VS_ADMIN_PASSWORD` is empty, no login is required. This is convenient on a
-single-user workstation bound to `127.0.0.1`, but it is not safe on a shared
-network. Set a password from **Settings → Security** (saved to `.env` and
-applied immediately) or in `.env`, and preferably place the service behind a TLS
-reverse proxy before remote use. The default local listener uses HTTPS with a
-self-signed certificate, so browsers will warn; set `VS_SSL=false` to use HTTP
-on loopback instead.
+If no dashboard password is stored, no login is required. This is convenient on
+a single-user workstation bound to `127.0.0.1`, but it is not safe on a shared
+network. Set a password from **Settings → Security**; it is stored as a salted
+PBKDF2 hash in SQLite and applied immediately. `VS_ADMIN_PASSWORD` is a legacy
+fallback and is migrated to the database on startup. Preferably place the
+service behind a TLS reverse proxy before remote use. The default local listener
+uses HTTPS with a self-signed certificate, so browsers will warn; set
+`VS_SSL=false` to use HTTP on loopback instead.
 
 ## 2a. Installing optional external tools (Ubuntu and Fedora)
 
@@ -802,18 +803,44 @@ The **Server** page reports the health of the local instance:
 
 Maintenance actions:
 
-- **Back up database** creates a consistent SQLite copy under
-  `data/reports/backups/` and records the last backup time.
+- **Back up database** creates a consistent SQLite copy. Enter an absolute
+  directory or `.db` file path, or leave the field empty to use
+  `$VS_DATA_DIR/reports/backups/`. The backup contains scans, customers,
+  assets, agents, credentials, schedules and the Settings-page configuration,
+  including integration toggles, SMTP, notifications, guardrails, tool paths,
+  listener/HTTPS choices and the salted admin password hash. Keep the matching
+  `credential.key` or `VS_CREDENTIAL_KEY` with the backup; encrypted target
+  credentials and the SMTP password cannot be decrypted without it. The
+  editable subdomain wordlist and certificates are files under `VS_DATA_DIR`,
+  not database rows; back up the data directory if you need them too.
+- **Restore database** accepts a backup path and a mode:
+  - **Everything** restores the full database, including settings, agents and
+    credentials.
+  - **Scan data only** replaces the current scan history while keeping the
+    current settings, agents and credentials. Customers, groups and assets are
+    merged by name so scans can be restored into a database that already has
+    some of them. Agent associations and per-scan credential overrides are not
+    restored in this mode.
+  - **Settings only** restores the settings table without changing scans.
+
+  A safety backup is written first. Active scans must be cancelled or finished
+  before restoring scan data. The backup is checked for SQLite integrity and
+  foreign-key consistency; a failed restore rolls back and leaves the current
+  database unchanged. Backups created before database-backed settings were
+  introduced may not contain the admin password, tool paths or listener/HTTPS
+  choices; set those again after restoring such a backup.
 - **Compact database** runs `VACUUM` to reclaim free pages. This can briefly
   pause scans; run it when the queue is idle.
 - **Download diagnostics** saves a JSON snapshot of the status page for
   troubleshooting. It does not include findings, tokens or scan evidence.
 
-The bind address and port are environment-level settings edited under
-**Settings → Security**; bind changes require a restart via `./run.sh` or
-`run.bat`. Authentication is also managed there and applies immediately. Paths
-and `VS_SCAN_WORKERS` remain `.env`/environment settings. Use the Settings page
-for integration toggles.
+The bind address, port and HTTPS choice are edited under
+**Settings → Security**. They are stored in SQLite, mirrored to `.env` for the
+launcher, and require a restart via `./run.sh` or `run.bat`. The admin password
+is stored as a salted PBKDF2 hash in SQLite and applies immediately. Tool paths,
+integration toggles, SMTP, notifications and scan guardrails are also stored in
+the database. `VS_SCAN_WORKERS` and `VS_ENABLE_EXTERNAL_APIS` remain
+process-level environment settings.
 
 ## 10. Data lifecycle
 
@@ -829,12 +856,13 @@ for integration toggles.
   Per-scan credentials are deleted with the scan.
 - Temporary GitHub clones are removed after the scan.
 - Reports are generated in memory and streamed; no report file is retained by
-  the application. Database backups requested from the Server page are kept
-  under `data/reports/backups/`.
+  the application. Database backups requested from the Server page use the
+  chosen destination, or `data/reports/backups/` when no path is given.
 - Token rotation invalidates the previous agent token immediately. Revocation
   preserves historical findings.
 
-Back up the data directory before upgrades or bulk deletions.
+Back up the database before upgrades or bulk deletions. Use **Server → Restore
+database** to restore it; test the backup on a non-production copy first.
 
 ## 11. Troubleshooting
 
@@ -922,7 +950,7 @@ selection matches.
 
 ### Authentication loops
 
-If `VS_ADMIN_PASSWORD` is set, the browser prompts for Basic auth. Ensure the
+If a dashboard password is configured, the browser prompts for Basic auth. Ensure the
 username matches `VS_ADMIN_USER`. With a reverse proxy, forward the
 `Authorization` header and use HTTPS. Do not expose the plain HTTP port directly
 to an untrusted network.

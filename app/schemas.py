@@ -332,6 +332,7 @@ class BindAddressUpdate(BaseModel):
     # .env, which run.sh sources as shell code.
     bind_host: str = Field(min_length=1, max_length=64)
     bind_port: int = Field(ge=1, le=65_535)
+    ssl_enabled: bool | None = None
 
     @field_validator("bind_host")
     @classmethod
@@ -342,6 +343,21 @@ class BindAddressUpdate(BaseModel):
         except ValueError as exc:
             raise ValueError("Bind address must be a valid IPv4 or IPv6 address") from exc
         return value
+
+
+class DatabaseBackupRequest(BaseModel):
+    destination: str | None = Field(default=None, max_length=4096)
+    overwrite: bool = False
+
+
+class DatabaseRestoreRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    mode: Literal["all", "scans", "settings"] = "all"
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        return _non_blank(value, "Restore path")
 
 
 class AdminPasswordUpdate(BaseModel):

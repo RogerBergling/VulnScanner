@@ -79,7 +79,12 @@ sudo tar -C /var/lib -czf \
   vulnscanner
 ```
 
-For an online backup, use **Server → Back up database** or SQLite's backup API:
+For an online backup, use **Server → Back up database** or SQLite's backup API.
+The Server page accepts an absolute directory or `.db` file path, and can
+restore **Everything**, **Scan data only** or **Settings only**. Database
+settings (tool paths, listener/HTTPS choices, admin password hash, SMTP,
+notifications and guardrails) are stored in SQLite, so a full database restore
+brings them back. A safety backup is created before every restore.
 
 ```bash
 sqlite3 /var/lib/vulnscanner/vulnscanner.db \

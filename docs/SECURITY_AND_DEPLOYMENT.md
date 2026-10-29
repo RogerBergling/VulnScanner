@@ -54,17 +54,20 @@ anything.
 
 ### HTTP Basic authentication
 
-Set `VS_ADMIN_PASSWORD` to enable HTTP Basic authentication for the dashboard
-and `/api` routes:
+Set a dashboard password in **Settings → Security** to enable HTTP Basic
+authentication for the dashboard and `/api` routes. It is stored as a salted
+PBKDF2 hash in SQLite and included in database backups. For initial
+provisioning, `VS_ADMIN_PASSWORD` is also accepted and migrated to the database
+on startup:
 
 ```bash
 VS_ADMIN_USER=admin
 VS_ADMIN_PASSWORD='a-long-random-password'
 ```
 
-If the password is empty, authentication is disabled. The server logs a warning
-at startup. This is acceptable only for a single-user workstation bound to
-`127.0.0.1`.
+If no password is configured, authentication is disabled. The server logs a
+warning at startup. This is acceptable only for a single-user workstation bound
+to `127.0.0.1`.
 
 HTTP Basic authentication sends the password with every request. It is **not**
 encrypted by itself. Always use HTTPS when the service is reachable over a
@@ -259,6 +262,7 @@ VS_HOST=127.0.0.1
 VS_PORT=8765
 VS_SSL=false
 VS_ADMIN_USER=admin
+# Initial password; migrated to the database hash on first start.
 VS_ADMIN_PASSWORD=replace-with-a-long-random-password
 VS_DATA_DIR=/var/lib/vulnscanner
 VS_ENABLE_EXTERNAL_APIS=true
@@ -295,7 +299,8 @@ do so.
 - Scan options, events, findings, evidence and raw tool output.
 - Agent identity, hashed tokens and endpoint metadata.
 - Cached OSV responses and the KEV catalogue.
-- Settings and finding review status.
+- Settings, including tool paths, listener/HTTPS choices, SMTP, notifications,
+  scan guardrails, a salted admin password hash and finding review status.
 
 Temporary GitHub clones live under the data directory while a scan runs and are
 removed afterwards. Report exports are generated in memory and streamed; they
@@ -341,14 +346,32 @@ sqlite3 /var/lib/vulnscanner/vulnscanner.db \
 ```
 
 The **Server** page exposes the same online backup API. It writes a consistent
-copy under `<data>/reports/backups/` and records the last backup time. Move
-those copies to encrypted, access-controlled storage on a schedule; the
-application does not rotate or encrypt them.
+copy to the chosen absolute directory/file path, or to
+`<data>/reports/backups/` when no path is given, and records the last backup
+time. The database contains all application settings, including tool paths,
+listener/HTTPS choices and a salted admin password hash. Move backups to
+encrypted, access-controlled storage on a schedule; the application does not
+rotate or encrypt them.
 
 Encrypt backups at rest and restrict who can restore them. A backup contains
 secrets and AD findings.
 
 ### Restore
+
+Use **Server → Restore database** and select:
+
+- **Everything** for a full database restore, including settings, agents and
+  credentials.
+- **Scan data only** to replace scan history while keeping current settings,
+  agents and credentials. Customers, groups and assets are merged by name.
+- **Settings only** to restore settings without changing scans.
+
+A safety backup is written first, active scans block scan-data restores, and
+SQLite integrity/foreign-key checks run before commit. A failed restore rolls
+back. If listener settings changed, restart the service. If the admin password
+changed, sign in with the restored password.
+
+For an offline/manual restore:
 
 1. Stop the service.
 2. Keep a copy of the current database for investigation.
@@ -455,7 +478,7 @@ Before exposing the service beyond localhost:
       **Server** page after any change.
 - [ ] `VS_SSL=false` when the reverse proxy terminates TLS; leave the default
       `true` only for the local self-signed listener.
-- [ ] `VS_ADMIN_PASSWORD` set to a long, unique value.
+- [ ] Dashboard password configured with a long, unique value.
 - [ ] Reverse proxy requires HTTPS and restricts source networks.
 - [ ] Firewall allows only the proxy and required agent paths.
 - [ ] Dedicated unprivileged service account.

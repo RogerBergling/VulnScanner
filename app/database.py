@@ -8,6 +8,7 @@ the web UI responsive while scans write results from background workers.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -324,11 +325,38 @@ def init_db() -> None:
             conn.executescript(SCHEMA)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         # Always ensure settings exist
+        ssl_default = "true" if os.getenv("VS_SSL", "true").strip().lower() in {
+            "1", "true", "yes", "on"
+        } else "false"
         defaults = {
             "allow_external_apis": "true",
             "nuclei_enabled": "true",
             "nmap_enabled": "true",
+            "testssl_enabled": "true",
+            "trivy_enabled": "true",
+            "subfinder_enabled": "true",
+            "smtp_host": "",
+            "smtp_port": "587",
+            "smtp_user": "",
+            "smtp_password": "",
+            "smtp_from": "",
+            "notify_email_default": "",
+            "notify_webhook_default": "",
+            "max_web_hosts": "20",
+            "workers": "300",
+            "max_repo_bytes": str(512 * 1024 * 1024),
+            "max_source_file_bytes": str(1024 * 1024),
+            "max_scan_files": "20000",
+            "max_cidr_hosts": "256",
+            "agent_job_timeout": str(60 * 60),
+            "bind_host": os.getenv("VS_HOST", "127.0.0.1"),
+            "bind_port": os.getenv("VS_PORT", "8765"),
+            "ssl_enabled": ssl_default,
+            "admin_user": os.getenv("VS_ADMIN_USER", "admin"),
+            "admin_password_hash": "",
             "kev_last_sync": "",
+            "last_backup_at": "",
+            "last_backup_path": "",
             "product_name": "VulnScanner",
             "risk_acceptance_note": "",
         }
@@ -365,6 +393,13 @@ def get_setting(key: str, default: str = "") -> str:
     with get_db() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def get_setting_optional(key: str) -> str | None:
+    """Return a setting value, or ``None`` when the key has never been stored."""
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
 
 
 def set_setting(key: str, value: str) -> None:

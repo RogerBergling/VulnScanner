@@ -273,16 +273,16 @@ Environment variables can also be exported directly.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VS_HOST` | `127.0.0.1` | Bind address. Editable in Settings → Security. Keep loopback unless protected by a firewall/reverse proxy. |
-| `VS_PORT` | `8765` | HTTP/HTTPS port. Editable in Settings → Security. |
-| `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `$VS_DATA_DIR/certs/`. Set to `false` for plain HTTP behind a TLS reverse proxy. |
+| `VS_HOST` | `127.0.0.1` | Bind address. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. Keep loopback unless protected by a firewall/reverse proxy. |
+| `VS_PORT` | `8765` | HTTP/HTTPS port. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. |
+| `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `$VS_DATA_DIR/certs/`. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. |
 | `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. |
-| `VS_ADMIN_PASSWORD` | empty | Enables HTTP Basic auth for the dashboard and API when set. Can also be set from Settings → Security. |
+| `VS_ADMIN_PASSWORD` | empty | Legacy/initial HTTP Basic auth fallback. The Settings page stores a salted password hash in SQLite; an environment password is migrated on startup. |
 | `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. For production use an absolute path **outside the Git checkout**, such as `/var/lib/vulnscanner`. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Allow OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. |
-| `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings. |
+| `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
 | `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings when inside the data directory. |
 | `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list** in Settings. |
 | `VS_MAX_REPO_BYTES` | `536870912` | Maximum cloned repository size. |
@@ -301,8 +301,8 @@ Everything is local by default:
 - Credential key: `$VS_DATA_DIR/credential.key` (or `VS_CREDENTIAL_KEY`). A
   restored database needs the same key to decrypt saved credentials.
 - Certificates: `$VS_DATA_DIR/certs/`.
-- Reports are generated on demand; backups are written under
-  `$VS_DATA_DIR/reports/backups/`.
+- Reports are generated on demand; backups are written to the chosen path or,
+  by default, under `$VS_DATA_DIR/reports/backups/`.
 - GitHub clones are temporary and removed after the scan.
 
 ### Does `git pull` delete scans?
@@ -333,8 +333,27 @@ data directory — not just the `.db` file — before every update. The database
 `-wal`, `-shm`, `credential.key` and `certs/` belong together; back up `.env`
 separately.
 
-Use **Server → Back up database** in the UI for a consistent online copy, or
-stop the service and copy the data directory. See
+Use **Server → Back up database** in the UI for a consistent online copy. The
+destination can be an absolute directory or a `.db` file path; leave it empty
+to use `$VS_DATA_DIR/reports/backups/`. The database contains the scan history,
+customers/assets, agents, credentials, schedules and the Settings-page
+configuration, including integration toggles, SMTP, notifications, guardrails,
+tool paths, listener/HTTPS choices and a salted admin password hash.
+Keep the matching `credential.key`/`VS_CREDENTIAL_KEY` with the backup; it is
+still required to decrypt stored target credentials and the SMTP password. The
+editable subdomain wordlist and certificates are files under `$VS_DATA_DIR`, not
+database rows; back up the data directory if you need them too.
+
+**Server → Restore database** accepts a backup path and offers three modes:
+
+- **Everything** - full database, including settings, agents and credentials.
+- **Scan data only** - replaces scan history while keeping the current settings,
+  agents and credentials. Customers, groups and assets are merged by name.
+- **Settings only** - restores settings without changing scans.
+
+A safety backup is written before every restore. Active scans must be cancelled
+or finished first. Restores are validated with SQLite's integrity and
+foreign-key checks and roll back on failure. See
 [docs/UPGRADING.md](docs/UPGRADING.md) for the safe update and rollback
 procedure, and [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)
 for deployment hardening.
@@ -345,7 +364,9 @@ for deployment hardening.
 ## Security
 
 - The default bind address is `127.0.0.1`.
-- Set `VS_ADMIN_PASSWORD` before exposing the service beyond localhost.
+- Set a dashboard password in **Settings → Security** (stored as a salted
+  PBKDF2 hash in SQLite) or with `VS_ADMIN_PASSWORD` before exposing the
+  service beyond localhost.
 - Agent tokens are stored as SHA-256 hashes. Enrolment tokens are one-time and
   expire.
 - Saved target credentials are encrypted with Fernet and never returned by the

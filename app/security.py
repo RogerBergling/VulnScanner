@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import calendar
 import hashlib
 import hmac
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from .database import get_db, transaction, utcnow
+from .database import get_db, get_setting, transaction, utcnow
 
 
 def hash_token(token: str) -> str:
@@ -29,6 +31,88 @@ def token_hint(token: str) -> str:
 
 def constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+PASSWORD_SCHEME = "pbkdf2_sha256"
+PASSWORD_ITERATIONS = 260_000
+
+
+def hash_password(password: str) -> str:
+    """Return a salted PBKDF2 hash suitable for storage in SQLite."""
+    if not password:
+        return ""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS
+    )
+    return "{}${}${}${}".format(
+        PASSWORD_SCHEME,
+        PASSWORD_ITERATIONS,
+        base64.urlsafe_b64encode(salt).decode("ascii"),
+        base64.urlsafe_b64encode(digest).decode("ascii"),
+    )
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    if not password or not encoded:
+        return False
+    try:
+        scheme, iterations, salt_text, digest_text = encoded.split("$", 3)
+        if scheme != PASSWORD_SCHEME:
+            return False
+        salt = base64.urlsafe_b64decode(salt_text.encode("ascii"))
+        expected = base64.urlsafe_b64decode(digest_text.encode("ascii"))
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), salt, int(iterations)
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
+def admin_user() -> str:
+    return os.getenv("VS_ADMIN_USER") or get_setting("admin_user", "admin")
+
+
+def admin_password_hash() -> str:
+    return get_setting("admin_password_hash", "")
+
+
+def admin_auth_enabled() -> bool:
+    return bool(admin_password_hash() or os.getenv("VS_ADMIN_PASSWORD", ""))
+
+
+def verify_admin(username: str, password: str) -> bool:
+    """Validate dashboard Basic-auth credentials.
+
+    The database hash is authoritative when present. The environment variable is
+    kept as a fallback for installations that have not yet saved a password
+    through the Settings page.
+    """
+    expected_user = admin_user()
+    if not constant_time_equal(username, expected_user):
+        return False
+    stored_hash = admin_password_hash()
+    if stored_hash:
+        return verify_password(password, stored_hash)
+    expected_password = os.getenv("VS_ADMIN_PASSWORD", "")
+    return bool(expected_password) and constant_time_equal(password, expected_password)
+
+
+def migrate_env_admin_password() -> None:
+    """Move a legacy VS_ADMIN_PASSWORD value into the database as a hash."""
+    from .database import set_setting
+
+    try:
+        if admin_password_hash():
+            return
+        legacy = os.getenv("VS_ADMIN_PASSWORD", "")
+        if legacy:
+            set_setting("admin_password_hash", hash_password(legacy))
+    except Exception:
+        # A read-only or temporarily locked database must not prevent startup;
+        # the environment fallback still works.
+        return
 
 
 def _add_months(moment: datetime, months: int) -> datetime:
