@@ -112,9 +112,10 @@ sudo cp -a /etc/vulnscanner/vulnscanner.env \
 cd /opt/vulnscanner
 sudo -u vulnscanner git pull --ff-only
 
-# 4. Install dependencies if requirements changed
+# 4. Install dependencies if the hashed lock changed
 #    run.sh does this on start; run.bat now checks every start.
-sudo -u vulnscanner .venv/bin/python -m pip install -r requirements.txt
+sudo -u vulnscanner .venv/bin/python -m pip install \
+  --require-hashes -r requirements.txt
 
 # 5. Start and verify
 sudo systemctl start vulnscanner

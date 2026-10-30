@@ -64,6 +64,10 @@ VulnScanner is deliberately small and local-first:
 
 ## 3. Runtime components
 
+Runtime dependencies are declared in `pyproject.toml`, locked universally in
+`uv.lock`, and exported to hashed `requirements.txt`/`requirements-dev.txt`
+files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
+
 | Component | Responsibility |
 | --- | --- |
 | `app/main.py` | Creates the FastAPI application, initialises the database, recovers interrupted scans, applies security headers and optional Basic authentication, and serves the SPA/manual/downloads. |

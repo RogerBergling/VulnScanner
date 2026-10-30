@@ -16,9 +16,16 @@ if [ ! -x .venv/bin/python ]; then
   "$PYTHON" -m venv .venv
 fi
 
+# uv-created environments may not include pip; the launcher uses pip for the
+# hashed lock install.
+if ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
+  echo "[vulnscanner] Bootstrapping pip"
+  .venv/bin/python -m ensurepip --upgrade
+fi
+
 if [ ! -f .venv/.deps-ok ] || [ requirements.txt -nt .venv/.deps-ok ]; then
-  echo "[vulnscanner] Installing Python dependencies"
-  .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+  echo "[vulnscanner] Installing locked Python dependencies"
+  .venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r requirements.txt
   touch .venv/.deps-ok
 fi
 

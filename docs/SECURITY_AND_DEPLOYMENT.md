@@ -47,6 +47,8 @@ anything.
   never executed by the scanner.
 - Optional command-line tools run as the VulnScanner service account and
   therefore inherit its access. Install only tools you trust.
+- Python dependencies are installed from a hashed lock; see
+  [DEPENDENCIES.md](DEPENDENCIES.md) for the update and audit process.
 - The host operating system is the final security boundary. VulnScanner does not
   provide a sandbox.
 

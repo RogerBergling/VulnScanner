@@ -60,9 +60,14 @@ cd "$REPO_DIR"
 echo "[update] Pulling code with --ff-only"
 git pull --ff-only
 
+if [ -x .venv/bin/python ] && ! .venv/bin/python -m pip --version >/dev/null 2>&1; then
+  echo "[update] Bootstrapping pip"
+  .venv/bin/python -m ensurepip --upgrade
+fi
+
 if [ -x .venv/bin/python ] && { [ ! -f .venv/.deps-ok ] || [ requirements.txt -nt .venv/.deps-ok ]; }; then
-  echo "[update] Installing updated Python dependencies"
-  .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+  echo "[update] Installing updated locked Python dependencies"
+  .venv/bin/python -m pip install --disable-pip-version-check --require-hashes -r requirements.txt
   touch .venv/.deps-ok
 fi
 

@@ -31,10 +31,11 @@ inbound firewall rules on scanned endpoints.
 
 ## Quick start
 
-Requirements: Python 3.11 or newer (3.14 is used by the project virtual
-environment), and optionally Git, Nmap, Nuclei, testssl.sh, Trivy, Subfinder,
+Requirements: Python 3.11 or newer (the universal lock is tested on 3.11 and
+3.14), and optionally Git, Nmap, Nuclei, testssl.sh, Trivy, Subfinder,
 Gitleaks, Semgrep and osv-scanner. Authenticated host scans use `paramiko`
-(SSH) and `pywinrm` (WinRM), which are installed from `requirements.txt`.
+(SSH) and `pywinrm` (WinRM), which are installed from the hashed
+`requirements.txt` lock.
 
 Linux/macOS:
 
@@ -75,7 +76,7 @@ Manual installation:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --require-hashes -r requirements.txt
 .venv/bin/python -m app.main
 ```
 
@@ -387,15 +388,46 @@ scanning a production network.
 - [Agent guide](docs/AGENT_GUIDE.md)
 - [API reference](docs/API.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Dependency and supply-chain policy](docs/DEPENDENCIES.md)
 - [Upgrading safely](docs/UPGRADING.md)
 - [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md)
 - [Authorised use](docs/AUTHORIZED_USE.md)
 - [Integrations](docs/INTEGRATIONS.md)
 
+## Dependency locking and supply chain
+
+Dependency versions are locked for reproducible installs:
+
+- `pyproject.toml` is the human-edited source of truth.
+- `uv.lock` is the universal lock for Linux, Windows and Python 3.11+.
+- `requirements.txt` is the generated runtime lock with SHA-256 hashes.
+- `requirements-dev.txt` is the generated runtime + test lock.
+
+The launchers install with `pip install --require-hashes -r requirements.txt`,
+so a modified or unexpected package artifact is rejected. Do not edit the
+generated requirements files directly.
+
+Install `uv` 0.13 or newer for dependency maintenance. Then:
+
+```bash
+# Developer environment
+uv sync --frozen --no-install-project --group dev
+
+# Regenerate after changing pyproject.toml
+./scripts/lock-dependencies.sh
+
+# CI check: lock and generated files must be current
+./scripts/check-dependencies.sh
+```
+
+Run a vulnerability audit (`pip-audit` or OSV) against the lock on every change
+and on a scheduled basis. See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for
+the update, hash-pinning, mirror and air-gap procedures.
+
 ## Development and tests
 
 ```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
+uv sync --frozen --no-install-project --group dev
 .venv/bin/python -m pytest -q
 ```
 

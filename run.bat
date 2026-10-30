@@ -15,11 +15,19 @@ if not exist .venv\Scripts\python.exe (
   if errorlevel 1 goto :error
 )
 
-rem Always verify dependencies. pip is idempotent when the requirements are
-rem already satisfied, and this avoids stale packages when requirements.txt
-rem changes after the first run.
-echo [vulnscanner] Checking Python dependencies
-.venv\Scripts\python.exe -m pip install --disable-pip-version-check -r requirements.txt
+rem uv-created environments may not include pip; the launcher uses pip for the
+rem hashed lock install.
+.venv\Scripts\python.exe -m pip --version >nul 2>&1
+if errorlevel 1 (
+  echo [vulnscanner] Bootstrapping pip
+  .venv\Scripts\python.exe -m ensurepip --upgrade
+  if errorlevel 1 goto :error
+)
+
+rem Install the hashed lock file. pip is idempotent when the packages are
+rem already satisfied, and hash verification rejects modified artifacts.
+echo [vulnscanner] Checking locked Python dependencies
+.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes -r requirements.txt
 if errorlevel 1 goto :error
 
 if not defined VS_HOST set "VS_HOST=127.0.0.1"

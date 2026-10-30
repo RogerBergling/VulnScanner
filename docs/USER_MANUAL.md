@@ -29,9 +29,9 @@ cp .env.example .env
 ./run.sh
 ```
 
-`run.sh` creates `.venv`, installs `requirements.txt` when needed, loads `.env`
-and starts Uvicorn on `VS_HOST:VS_PORT` using HTTPS by default with a
-self-signed certificate. Set `VS_SSL=false` in `.env` for plain HTTP, for
+`run.sh` creates `.venv`, installs the hashed `requirements.txt` lock when
+needed, loads `.env` and starts Uvicorn on `VS_HOST:VS_PORT` using HTTPS by
+default with a self-signed certificate. Set `VS_SSL=false` in `.env` for plain HTTP, for
 example when a TLS-terminating reverse proxy is in front of the app.
 
 ### Windows
