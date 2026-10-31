@@ -449,6 +449,7 @@ scanning a production network.
 - [Dependency and supply-chain policy](docs/DEPENDENCIES.md)
 - [Upgrading safely](docs/UPGRADING.md)
 - [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md)
+- [Enterprise readiness review](docs/ENTERPRISE_READINESS.md)
 - [Authorised use](docs/AUTHORIZED_USE.md)
 - [Integrations](docs/INTEGRATIONS.md)
 
