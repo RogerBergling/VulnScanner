@@ -7,11 +7,26 @@
 set -euo pipefail
 
 REPO_DIR="${VS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-if [ -f "$REPO_DIR/.env" ]; then
+ENV_FILE="${VS_ENV_FILE:-$REPO_DIR/.env}"
+if [ -f "$ENV_FILE" ]; then
+  ENV_KEYS=()
+  ENV_VALUES=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [ "${!key+x}" ]; then
+      ENV_KEYS+=("$key")
+      ENV_VALUES+=("${!key}")
+    fi
+  done < "$ENV_FILE"
   set -a
   # shellcheck disable=SC1091
-  . "$REPO_DIR/.env"
+  . "$ENV_FILE"
   set +a
+  for i in "${!ENV_KEYS[@]}"; do
+    export "${ENV_KEYS[$i]}=${ENV_VALUES[$i]}"
+  done
 fi
 DATA_DIR="${VS_DATA_DIR:-$REPO_DIR/data}"
 BACKUP_DIR="${VS_BACKUP_DIR:-/var/backups/vulnscanner}"

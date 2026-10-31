@@ -1168,15 +1168,25 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "ssl_restart_required": false,
   "kev_last_sync": "",
   "kev_count": 0,
+  "data_dir": "/path/to/data",
+  "env_file_path": "/opt/vulnscanner/.env",
   "database_path": "/path/to/data/vulnscanner.db",
   "database_size": 123456,
   "reports_path": "/path/to/data/reports",
+  "credential_key_configured": true,
+  "credential_key_path": "/path/to/data/credential.key",
+  "scan_workers": 4,
+  "scan_workers_saved": 4,
+  "external_api_master": true,
+  "external_api_master_saved": true,
+  "ssh_known_hosts": "",
   "tools": {
     "nmap": {"available": false, "path": "", "version": ""}
   },
   "tool_paths": {"nmap": "", "testssl": "", "trivy": "", "subfinder": ""},
   "wordlist_path": "/path/to/data/wordlists/subdomains.txt",
   "seclists_url": "https://github.com/danielmiessler/SecLists",
+  "seclists_download_url": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt",
   "limits": {
     "top_ports": 58,
     "agent_job_timeout_seconds": 3600,
@@ -1194,14 +1204,18 @@ The database may be locked briefly; run it when scans are idle. Errors return
 }
 ```
 
-`scan_workers` is read from `VS_SCAN_WORKERS` at process start; changing it
-requires a server restart. `admin_auth_enabled` reflects the stored admin
-password hash or the legacy `VS_ADMIN_PASSWORD` fallback. `bind_host`,
-`bind_port` and `ssl_enabled` are the configured listener values stored in
-SQLite; `active_bind_host`, `active_bind_port` and `active_ssl_enabled` show
-the current process, and `bind_restart_required`/`ssl_restart_required` are
-`true` when a restart is needed. `smtp_password` is encrypted at rest and never
-returned by the API.
+`scan_workers` is the active process value read from `VS_SCAN_WORKERS` at
+startup; `scan_workers_saved` is the value currently stored in `.env`. The same
+distinction applies to `external_api_master` and `external_api_master_saved`.
+Changing either requires a server restart. `admin_auth_enabled` reflects the
+stored admin password hash or the legacy `VS_ADMIN_PASSWORD` fallback.
+`bind_host`, `bind_port` and `ssl_enabled` are the configured listener values
+stored in SQLite; `active_bind_host`, `active_bind_port` and
+`active_ssl_enabled` show the current process, and
+`bind_restart_required`/`ssl_restart_required` are `true` when a restart is
+needed. `smtp_password` is encrypted at rest and never returned by the API.
+`data_dir`, `database_path` and `credential_key_path` are informational;
+storage locations and the credential key are not changed through this API.
 
 ### `PATCH /api/settings`
 
@@ -1235,7 +1249,7 @@ settings are `allow_external_apis`, `nuclei_enabled`, `nmap_enabled`,
 `testssl_enabled`, `trivy_enabled` and `subfinder_enabled`.
 `smtp_port` must be `1`–`65535`, and `notify_webhook_default` must start with
 `http://` or `https://`. Numeric guardrails are bounded: `max_web_hosts`
-1–10000, `workers` 1–32, `max_repo_bytes` 1 MiB–10 GiB,
+1–10000, `workers` 1–600, `max_repo_bytes` 1 MiB–10 GiB,
 `max_source_file_bytes` 1 KiB–100 MiB, `max_scan_files` 1–1000000,
 `max_cidr_hosts` 1–65536, and `agent_job_timeout` 60–86400 seconds. Returns the
 updated settings object.
@@ -1247,7 +1261,8 @@ updated settings object.
 ```
 
 Stores the listener settings in SQLite and mirrors `VS_HOST`, `VS_PORT` and
-`VS_SSL` to the project `.env` (mode `0600`) for `run.sh`/`run.bat`. The
+`VS_SSL` to `VS_ENV_FILE` (default project `.env`, mode `0600`) for
+`run.sh`/`run.bat` and service managers. The
 listener is bound at process start, so changes are applied after a restart.
 `bind_host` must be a literal IPv4 or IPv6 address (hostnames are rejected) and
 `bind_port` must be `1`–`65535`; invalid values return `422`. Returns the saved
@@ -1260,9 +1275,9 @@ exposes this in **Settings → Security**.
 {"paths": {"nmap": "/usr/local/bin/nmap", "trivy": "", "testssl": "/opt/testssl/testssl.sh"}}
 ```
 
-Stores the matching `VS_*_PATH` values in SQLite and mirrors them to `.env`
-(mode `0600`), then applies them to the running process immediately, so a
-restart is not required. Paths must be absolute, free of spaces and shell
+Stores the matching `VS_*_PATH` values in SQLite and mirrors them to
+`VS_ENV_FILE` (default `.env`, mode `0600`), then applies them to the running
+process immediately, so a restart is not required. Paths must be absolute, free of spaces and shell
 metacharacters, and must point to an existing file; send an empty string to
 clear an override and search `PATH`. Unknown tool names return `422`. Returns
 the saved overrides and refreshed availability. The paths are included in
@@ -1299,12 +1314,44 @@ on failure.
 ```
 
 Stores a salted PBKDF2 hash in SQLite and applies it immediately. The legacy
-plaintext `VS_ADMIN_PASSWORD` value is cleared from `.env` so the database is
-authoritative. A non-empty password must be 12–128 characters using letters,
+plaintext `VS_ADMIN_PASSWORD` value is cleared from `VS_ENV_FILE` (default
+`.env`) so the database is authoritative. A non-empty password must be 12–128 characters using letters,
 digits, and `. _ ~ @ + = : , / -`. Send an empty password to disable dashboard
 authentication (`admin_auth_enabled` becomes `false`). Invalid passwords return
 `422`. The hash is included in database backups, so restoring **Everything**
 restores the admin password too.
+
+### `POST /api/settings/admin-user`
+
+```json
+{"username": "auditor"}
+```
+
+Stores the dashboard Basic-auth username in SQLite and mirrors `VS_ADMIN_USER`
+to `VS_ENV_FILE` (default `.env`). Letters, digits and `. _ - @` are accepted. The change applies to
+subsequent requests immediately; existing browser credentials must be updated.
+
+### `POST /api/settings/runtime`
+
+```json
+{
+  "scan_workers": 6,
+  "external_api_master": false,
+  "ssh_known_hosts": "/var/lib/vulnscanner/known_hosts",
+  "wordlist_path": "/var/lib/vulnscanner/wordlists/subdomains.txt",
+  "seclists_subdomain_url": "https://example.com/subdomains.txt"
+}
+```
+
+Stores deployment-level values in `VS_ENV_FILE` (default `.env`) and applies
+them to the process where possible. `scan_workers` (1–32) and
+`external_api_master` are read at startup, so changing them returns
+`restart_required: true`. The known_hosts path must be
+an existing absolute file; a new wordlist path must be inside `VS_DATA_DIR`;
+the SecLists URL must use HTTP or HTTPS. Values must be safe to place in
+`.env`; shell metacharacters such as `&`, `;`, `$`, quotes and spaces on
+non-Windows hosts are rejected. Empty values clear the optional known_hosts,
+wordlist override or SecLists URL. Returns the refreshed settings object.
 
 ### `POST /api/settings/kev/sync`
 

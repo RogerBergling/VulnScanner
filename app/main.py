@@ -21,7 +21,7 @@ from .config import (
     migrate_env_tool_paths,
     reload_tool_paths,
 )
-from .database import init_db
+from .database import database_path, init_db
 from .jobs import shutdown
 from .scheduler import start_scheduler, stop_scheduler
 from .scans import recover_interrupted_scans
@@ -54,7 +54,7 @@ async def lifespan(_app: FastAPI):
     data_dir()
     scheme = "https" if os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"} else "http"
     logger.info("VulnScanner %s starting on %s://%s:%s", __version__, scheme, HOST, PORT)
-    logger.info("Database: %s", data_dir() / "vulnscanner.db")
+    logger.info("Database: %s", database_path())
     if admin_auth_enabled():
         logger.info("Dashboard Basic Authentication is enabled (user: %s)", admin_user())
     else:

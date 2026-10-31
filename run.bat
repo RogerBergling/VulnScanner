@@ -2,11 +2,21 @@
 setlocal
 cd /d "%~dp0"
 
-rem Load simple KEY=VALUE pairs from .env (comments and blank lines ignored).
-if exist .env (
-  for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
-    echo %%A | findstr /b /c:"#" >nul || set "%%A=%%B"
+set "ENV_FILE=.env"
+if defined VS_ENV_FILE set "ENV_FILE=%VS_ENV_FILE%"
+if "%ENV_FILE%"==".env" if not exist .env if exist .env.example (
+  echo [vulnscanner] Creating .env from .env.example
+  copy /Y .env.example .env >nul
+)
+
+rem Load simple KEY=VALUE pairs from the environment file (comments and blank lines ignored).
+if exist "%ENV_FILE%" (
+  for /f "usebackq tokens=1,* delims==" %%A in ("%ENV_FILE%") do (
+    echo %%A | findstr /b /c:"#" >nul
+    if errorlevel 1 if not defined %%A set "%%A=%%B"
   )
+) else (
+  echo [vulnscanner] WARNING: environment file not found: %ENV_FILE%
 )
 
 if not exist .venv\Scripts\python.exe (

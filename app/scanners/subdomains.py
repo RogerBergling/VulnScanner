@@ -22,8 +22,8 @@ import requests
 from ..config import (
     ENABLE_EXTERNAL_APIS,
     SECLISTS_REPOSITORY_URL,
-    SECLISTS_SUBDOMAIN_URL,
     data_dir,
+    seclists_subdomain_url,
     subfinder_wordlist_path,
 )
 from ..database import get_setting
@@ -119,7 +119,7 @@ def wordlist_info() -> dict[str, Any]:
         "line_count": len(_wordlist_lines(content)),
         "size": path.stat().st_size if exists else 0,
         "source": SECLISTS_REPOSITORY_URL,
-        "source_url": SECLISTS_SUBDOMAIN_URL,
+        "source_url": seclists_subdomain_url(),
     }
 
 
@@ -158,7 +158,7 @@ def save_wordlist(content: str, path: Path | None = None) -> dict[str, Any]:
 
 def download_seclists_wordlist() -> dict[str, Any]:
     """Download the standard SecLists DNS wordlist to the editable path."""
-    response = requests.get(SECLISTS_SUBDOMAIN_URL, timeout=30, stream=True)
+    response = requests.get(seclists_subdomain_url(), timeout=30, stream=True)
     try:
         response.raise_for_status()
         chunks: list[bytes] = []

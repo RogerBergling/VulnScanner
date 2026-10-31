@@ -237,14 +237,15 @@ User=vulnscanner
 Group=vulnscanner
 WorkingDirectory=/opt/vulnscanner
 EnvironmentFile=/etc/vulnscanner/vulnscanner.env
-ExecStart=/opt/vulnscanner/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
+Environment=VS_ENV_FILE=/etc/vulnscanner/vulnscanner.env
+ExecStart=/opt/vulnscanner/.venv/bin/python -m app.main
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/vulnscanner
+ReadWritePaths=/var/lib/vulnscanner /etc/vulnscanner
 UMask=0077
 
 [Install]
@@ -258,7 +259,7 @@ location, grant it explicitly rather than disabling hardening globally.
 Environment file:
 
 ```bash
-sudo install -d -m 0750 /etc/vulnscanner
+sudo install -d -o vulnscanner -g vulnscanner -m 0750 /etc/vulnscanner
 sudo sh -c 'umask 077; cat > /etc/vulnscanner/vulnscanner.env <<EOF
 VS_HOST=127.0.0.1
 VS_PORT=8765
@@ -269,11 +270,15 @@ VS_ADMIN_PASSWORD=replace-with-a-long-random-password
 VS_DATA_DIR=/var/lib/vulnscanner
 VS_ENABLE_EXTERNAL_APIS=true
 EOF'
-sudo chown root:vulnscanner /etc/vulnscanner/vulnscanner.env
-sudo chmod 640 /etc/vulnscanner/vulnscanner.env
+sudo chown vulnscanner:vulnscanner /etc/vulnscanner/vulnscanner.env
+sudo chmod 600 /etc/vulnscanner/vulnscanner.env
 ```
 
-Do not commit the environment file to source control.
+The service account must be able to rewrite this file because the GUI writes
+listener, tool-path and advanced runtime changes to `VS_ENV_FILE`. Restart the
+service after changing those values. Keep the directory and file access
+restricted to the service account and administrators. Do not commit the
+environment file to source control.
 
 ### Network exposure
 

@@ -32,7 +32,8 @@ inbound firewall rules on scanned endpoints.
 ## Quick start
 
 Requirements: Python 3.11 or newer (the universal lock is tested on 3.11 and
-3.14), and optionally Git, Nmap, Nuclei, testssl.sh, Trivy, Subfinder,
+3.14; Ubuntu/Debian also need `python3-venv`), and optionally Git, Nmap, Nuclei,
+testssl.sh, Trivy, Subfinder,
 Gitleaks, Semgrep and osv-scanner. Authenticated host scans use `paramiko`
 (SSH) and `pywinrm` (WinRM), which are installed from the hashed
 `requirements.txt` lock.
@@ -40,20 +41,19 @@ Gitleaks, Semgrep and osv-scanner. Authenticated host scans use `paramiko`
 Linux/macOS:
 
 ```bash
-cp .env.example .env
 ./run.sh
 ```
 
 Windows:
 
 ```bat
-copy .env.example .env
 run.bat
 ```
 
-The launcher creates `.venv`, installs the runtime dependencies, and starts
-Uvicorn. Open <https://127.0.0.1:8765> and accept the self-signed certificate
-warning on first use.
+The launcher creates `.env` from `.env.example` if it does not exist, creates
+`.venv`, installs the hashed runtime dependencies, and starts Uvicorn. Open
+<https://127.0.0.1:8765> and accept the self-signed certificate warning on first
+use.
 
 The default listener is HTTPS on loopback with a self-signed certificate, which
 is suitable for a single-user workstation. The certificate and key are created
@@ -63,10 +63,17 @@ for example when a TLS-terminating reverse proxy is in front of the app. For
 anything reachable from another machine, use a reverse proxy for production TLS
 (see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
 
-You can set or change the dashboard password from **Settings → Security**; it is
-saved to `.env` and applied immediately. The same panel lets you edit the bind
-address and port; those values are saved to `.env` and take effect the next time
-you start the server with `./run.sh` or `run.bat`.
+All application configuration is available from the GUI. **Settings** covers
+integration toggles, SMTP and notifications, scan guardrails, tool paths,
+credentials, certificates, the subdomain wordlist, advanced runtime options and
+security. Listener, HTTPS and scan-worker changes are stored and mirrored to
+`.env`; restart with `./run.sh` or `run.bat` to apply them. The dashboard
+password is stored as a salted hash in SQLite and applies immediately.
+
+Storage paths and the credential encryption key are intentionally read-only in
+the GUI: moving live data or rotating the key needs a planned migration. See
+[docs/UPGRADING.md](docs/UPGRADING.md) and
+[docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md).
 
 If the browser reports `SSL_ERROR_RX_RECORD_TOO_LONG`, you are using `https://`
 against a server that is running plain HTTP. Start the server with `./run.sh`
@@ -77,8 +84,12 @@ Manual installation:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements.txt
+cp .env.example .env
 .venv/bin/python -m app.main
 ```
+
+The `run.sh`/`run.bat` launchers perform the `.env` and dependency steps
+automatically; the manual commands are for custom service managers.
 
 `python -m app.main` honors `VS_SSL`; use `VS_SSL=false .venv/bin/python -m app.main`
 for plain HTTP. The API reference is available at
@@ -269,30 +280,34 @@ See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
 
 ## Configuration
 
-Copy `.env.example` to `.env`. `run.sh` and `run.bat` load it automatically.
-Environment variables can also be exported directly.
+`run.sh` and `run.bat` create `.env` from `.env.example` if it is missing and
+load it automatically. Explicit process environment variables take precedence
+over `.env`. The Settings page is the normal way to change application
+configuration; the table below documents the underlying variables and the few
+deployment-level values that remain outside the GUI.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `VS_ENV_FILE` | `./.env` | Environment file written by the Settings GUI. Service deployments can point this at the systemd `EnvironmentFile` so GUI changes survive restarts. |
 | `VS_HOST` | `127.0.0.1` | Bind address. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. Keep loopback unless protected by a firewall/reverse proxy. |
 | `VS_PORT` | `8765` | HTTP/HTTPS port. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. |
 | `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `$VS_DATA_DIR/certs/`. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. |
-| `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. |
+| `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. Editable in Settings → Security. |
 | `VS_ADMIN_PASSWORD` | empty | Legacy/initial HTTP Basic auth fallback. The Settings page stores a salted password hash in SQLite; an environment password is migrated on startup. |
-| `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. For production use an absolute path **outside the Git checkout**, such as `/var/lib/vulnscanner`. |
-| `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. |
-| `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials. Back it up with the database. |
-| `VS_ENABLE_EXTERNAL_APIS` | `true` | Allow OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. |
+| `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. Read-only in the GUI; use an absolute path **outside the Git checkout** for production. |
+| `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Read-only in the GUI; moving it requires a planned migration. |
+| `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
+| `VS_ENABLE_EXTERNAL_APIS` | `true` | Process-level master switch for OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. Editable in Settings → Advanced runtime; restart required. |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
-| `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings when inside the data directory. |
-| `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list** in Settings. |
-| `VS_MAX_REPO_BYTES` | `536870912` | Maximum cloned repository size. |
-| `VS_MAX_SOURCE_FILE_BYTES` | `1048576` | Maximum file size read by source scanners. |
-| `VS_MAX_SCAN_FILES` | `20000` | Maximum files visited per scan. |
-| `VS_MAX_CIDR_HOSTS` | `256` | Maximum addresses expanded from one CIDR target. |
-| `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before a running agent job is marked failed and its scan is closed. |
-| `VS_SCAN_WORKERS` | `4` | Parallel server-side scan workers (1-32). Requires a restart. |
-| `VS_SSH_KNOWN_HOSTS` | empty | Optional known_hosts file. When set, authenticated SSH scans verify the remote host key before sending credentials. |
+| `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings → Advanced runtime; files outside the data directory are read-only in the editor. |
+| `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list**. Editable in Settings → Advanced runtime. |
+| `VS_MAX_REPO_BYTES` | `536870912` | Maximum cloned repository size. Editable in Settings → Scan guardrails. |
+| `VS_MAX_SOURCE_FILE_BYTES` | `1048576` | Maximum file size read by source scanners. Editable in Settings → Scan guardrails. |
+| `VS_MAX_SCAN_FILES` | `20000` | Maximum files visited per scan. Editable in Settings → Scan guardrails. |
+| `VS_MAX_CIDR_HOSTS` | `256` | Maximum addresses expanded from one CIDR target. Editable in Settings → Scan guardrails. |
+| `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before a running agent job is marked failed and its scan is closed. Editable in Settings → Scan guardrails. |
+| `VS_SCAN_WORKERS` | `4` | Parallel server-side scan workers (1-32). Editable in Settings → Advanced runtime; restart required. |
+| `VS_SSH_KNOWN_HOSTS` | empty | Optional known_hosts file. When set, authenticated SSH scans verify the remote host key before sending credentials. Editable in Settings → Advanced runtime. |
 
 ## Data, backup and upgrades
 

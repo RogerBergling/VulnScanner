@@ -21,7 +21,7 @@ import socket
 from datetime import datetime, timezone
 from typing import Any
 
-from ..config import DANGEROUS_PORTS, ENABLE_EXTERNAL_APIS, SSH_KNOWN_HOSTS
+from ..config import DANGEROUS_PORTS, ENABLE_EXTERNAL_APIS, ssh_known_hosts_path
 from ..credentials import CredentialError, resolve_for_scan
 from ..database import get_setting
 from ..utils import truncate
@@ -498,7 +498,7 @@ def _verify_ssh_host_key(transport, host: str, port: int, ctx: ScanContext | Non
     paramiko = _paramiko()
     remote = transport.get_remote_server_key()
     fingerprint = ":".join(f"{byte:02x}" for byte in remote.get_fingerprint())
-    known_hosts = (SSH_KNOWN_HOSTS or "").strip()
+    known_hosts = ssh_known_hosts_path()
     if not known_hosts:
         if ctx:
             ctx.log(

@@ -25,21 +25,22 @@ collection is read-only.
 ### Linux and macOS
 
 ```bash
-cp .env.example .env
 ./run.sh
 ```
 
-`run.sh` creates `.venv`, installs the hashed `requirements.txt` lock when
-needed, loads `.env` and starts Uvicorn on `VS_HOST:VS_PORT` using HTTPS by
-default with a self-signed certificate. Set `VS_SSL=false` in `.env` for plain HTTP, for
-example when a TLS-terminating reverse proxy is in front of the app.
+`run.sh` creates `.env` from `.env.example` if it is missing, creates `.venv`,
+installs the hashed `requirements.txt` lock when needed, loads `.env` and starts
+Uvicorn on `VS_HOST:VS_PORT` using HTTPS by default with a self-signed
+certificate. Set `VS_SSL=false` in `.env` for plain HTTP, for example when a
+TLS-terminating reverse proxy is in front of the app.
 
 ### Windows
 
 ```bat
-copy .env.example .env
 run.bat
 ```
+
+`run.bat` performs the same first-run setup and dependency check.
 
 ### Manual start
 
@@ -753,16 +754,22 @@ The Settings page shows:
 
 - Product version and external API availability.
 - Toggles for external APIs, Nuclei, Nmap, testssl.sh, Trivy and Subfinder.
+- **Email and notifications** for SMTP host/port/user/password/from and default
+  notification email/webhook.
+- **Scan guardrails** for web-host, worker, repository-size, source-file,
+  file-count, CIDR-host and agent-job-timeout limits.
 - Optional tool installation status, versions and editable absolute paths.
 - **Subdomain wordlist** editor with a **Load SecLists list** action.
 - KEV catalogue count and last sync time.
 - **Target credentials** for authenticated network scans, with encrypted
   passwords/SSH keys, customer/global scope and default flags.
-- **Security and access** for the bind address/port and the dashboard admin
-  password.
+- **Advanced runtime** for scan workers, the deployment external-API master
+  switch, SSH known_hosts, the subdomain wordlist path and the SecLists download
+  URL.
+- **Security and access** for the bind address/port, HTTPS, admin username and
+  dashboard admin password.
 - Database path, size and reports path.
-- Scan limits, including the configured parallel worker count
-  (`VS_SCAN_WORKERS`).
+- The active and saved parallel worker count (`VS_SCAN_WORKERS`).
 
 Disabling **Allow external APIs** prevents outbound OSV/KEV/GitHub activity
 and the Nuclei, Semgrep, osv-scanner and Subfinder integrations and the SecLists
@@ -770,16 +777,27 @@ download, and is appropriate for air-gapped installations. Built-in checks still
 run. Disabling an individual integration prevents that tool from being invoked
 even when installed. Trivy still runs offline with `--skip-db-update` if a local
 database is already cached.
-The integration toggles are stored in SQLite and survive restarts. The bind
-address, port and admin password are written to `.env`. Tool paths are also
-written to `.env` and applied immediately; the subdomain wordlist is stored under
-the data directory.
+Integration toggles, SMTP, notifications, guardrails, tool paths, listener
+settings and the salted admin password hash are stored in SQLite and included in
+database backups. Listener and tool settings are mirrored to `.env` for the
+launcher. Tool paths, known_hosts, the wordlist path and the SecLists URL apply
+immediately. Listener, HTTPS, scan-worker and external-API-master changes need a
+restart.
 
 The bind address and port are edited under **Settings → Security**. The running
 listener keeps its current address; the new value is applied after restarting
 with `./run.sh` or `run.bat`. The panel shows the active address and warns when
 a restart is pending. Use `127.0.0.1` for local-only access and bind to
 `0.0.0.0` or `::` only on a trusted network or behind a TLS reverse proxy.
+
+Storage locations (`VS_DATA_DIR`, `VS_DATABASE`) and the credential encryption
+key are intentionally read-only in the GUI. Moving a live database or rotating
+the key requires a planned migration and a matching backup; follow
+[UPGRADING.md](UPGRADING.md) and [SECURITY_AND_DEPLOYMENT.md](SECURITY_AND_DEPLOYMENT.md).
+
+For a systemd service, set `VS_ENV_FILE` to the service's `EnvironmentFile`
+(for example `/etc/vulnscanner/vulnscanner.env`) so GUI changes to listener,
+tool-path and advanced runtime settings survive a restart.
 
 The CISA KEV catalogue can be synchronised from Settings. Synchronisation is
 optional; known-exploited enrichment is skipped if the catalogue is empty or
@@ -836,11 +854,11 @@ Maintenance actions:
 
 The bind address, port and HTTPS choice are edited under
 **Settings → Security**. They are stored in SQLite, mirrored to `.env` for the
-launcher, and require a restart via `./run.sh` or `run.bat`. The admin password
-is stored as a salted PBKDF2 hash in SQLite and applies immediately. Tool paths,
-integration toggles, SMTP, notifications and scan guardrails are also stored in
-the database. `VS_SCAN_WORKERS` and `VS_ENABLE_EXTERNAL_APIS` remain
-process-level environment settings.
+launcher, and require a restart via `./run.sh` or `run.bat`. The admin username
+and salted PBKDF2 password hash are stored in SQLite and apply immediately.
+Tool paths, integration toggles, SMTP, notifications and scan guardrails are
+also stored in the database. Scan workers and the external-API master switch are
+edited under **Settings → Advanced runtime** and require a restart.
 
 ## 10. Data lifecycle
 
@@ -905,9 +923,9 @@ per-scan credential, then start a new scan.
 
 ### OSV lookups are skipped
 
-Confirm `VS_ENABLE_EXTERNAL_APIS=true`, the Settings toggle is on, and the
-server can reach `https://api.osv.dev`. Check the scan events for the logged
-error.
+Confirm the **Advanced runtime → Deployment external API master switch** is on,
+the **Allow external APIs** toggle is on, and the server can reach
+`https://api.osv.dev`. Check the scan events for the logged error.
 
 ### Nmap/Nuclei/testssl.sh/Trivy/Subfinder is not used
 

@@ -47,9 +47,13 @@ from .config import (
     TOOL_ENV_VARS,
     TOOL_PATHS,
     clear_limit_cache,
+    data_dir,
     database_path,
+    env_file_path,
     get_limit,
     reports_dir,
+    seclists_subdomain_url,
+    ssh_known_hosts_path,
     subfinder_wordlist_path,
 )
 from .credentials import (
@@ -82,6 +86,7 @@ from .reporting import build_csv, build_html, build_json
 from .schemas import (
     ADImportRequest,
     AdminPasswordUpdate,
+    AdminUserUpdate,
     AgentEnrollRequest,
     AgentHeartbeatRequest,
     AgentJobResult,
@@ -102,6 +107,7 @@ from .schemas import (
     ScanCreate,
     DatabaseBackupRequest,
     DatabaseRestoreRequest,
+    RuntimeSettingsUpdate,
     ScheduleCreate,
     ScheduleUpdate,
     SettingsUpdate,
@@ -2051,6 +2057,15 @@ def get_settings() -> dict[str, Any]:
         configured_bind_port = PORT
     ssl_setting = get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false")
     ssl_enabled = ssl_setting.strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        scan_workers_saved = int(os.getenv("VS_SCAN_WORKERS", str(SCAN_WORKERS)))
+    except ValueError:
+        scan_workers_saved = SCAN_WORKERS
+    external_api_master_saved = os.getenv(
+        "VS_ENABLE_EXTERNAL_APIS", "true" if ENABLE_EXTERNAL_APIS else "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    data_root = data_dir()
+    credential_key_path = data_root / "credential.key"
     return {
         "product": "VulnScanner",
         "version": __version__,
@@ -2077,13 +2092,25 @@ def get_settings() -> dict[str, Any]:
         "ssl_restart_required": ssl_enabled != _ACTIVE_SSL,
         "kev_last_sync": get_setting("kev_last_sync", ""),
         "kev_count": kev_count,
+        "data_dir": str(data_root),
+        "env_file_path": str(env_file_path(BASE_DIR)),
         "database_path": str(database_path()),
         "database_size": db_size,
         "reports_path": str(reports_dir()),
+        "credential_key_configured": bool(
+            os.getenv("VS_CREDENTIAL_KEY") or credential_key_path.is_file()
+        ),
+        "credential_key_path": str(credential_key_path),
+        "scan_workers": SCAN_WORKERS,
+        "scan_workers_saved": scan_workers_saved,
+        "external_api_master": ENABLE_EXTERNAL_APIS,
+        "external_api_master_saved": external_api_master_saved,
+        "ssh_known_hosts": ssh_known_hosts_path(),
         "tools": tool_status(),
         "tool_paths": dict(TOOL_PATHS),
         "wordlist_path": str(subfinder_wordlist_path()),
         "seclists_url": SECLISTS_REPOSITORY_URL,
+        "seclists_download_url": seclists_subdomain_url(),
         "limits": {
             "top_ports": len(TOP_PORTS),
             "agent_job_timeout_seconds": get_limit(
@@ -2575,7 +2602,7 @@ def _sync_env_from_settings() -> None:
         for name, env_name in TOOL_ENV_VARS.items():
             entries[env_name] = TOOL_PATHS.get(name, "")
 
-    _upsert_env_entries(BASE_DIR / ".env", entries)
+    _upsert_env_entries(env_file_path(BASE_DIR), entries)
     os.environ["VS_HOST"] = bind_host
     os.environ["VS_PORT"] = str(bind_port)
     os.environ["VS_SSL"] = ssl_text
@@ -2619,10 +2646,119 @@ def set_admin_password(payload: AdminPasswordUpdate) -> dict[str, Any]:
     )
     # The database is authoritative. Clear the legacy plaintext environment
     # value so disabling authentication cannot fall back to an old password.
-    _upsert_env_entries(BASE_DIR / ".env", {"VS_ADMIN_PASSWORD": ""})
+    _upsert_env_entries(env_file_path(BASE_DIR), {"VS_ADMIN_PASSWORD": ""})
     os.environ.pop("VS_ADMIN_PASSWORD", None)
 
     return {"ok": True, "set": bool(payload.password), "restart_required": False}
+
+
+@router.post("/settings/admin-user")
+def set_admin_user(payload: AdminUserUpdate) -> dict[str, Any]:
+    """Change the dashboard Basic-auth username."""
+    set_setting("admin_user", payload.username)
+    _upsert_env_entries(env_file_path(BASE_DIR), {"VS_ADMIN_USER": payload.username})
+    os.environ["VS_ADMIN_USER"] = payload.username
+    return {"ok": True, "admin_user": payload.username}
+
+
+@router.post("/settings/runtime")
+def update_runtime_settings(payload: RuntimeSettingsUpdate) -> dict[str, Any]:
+    """Update deployment-level settings that are stored in .env.
+
+    Scan workers and the external-API master switch are read at process start,
+    so they require a restart. The known-hosts, wordlist and SecLists settings
+    are read dynamically and apply immediately.
+    """
+    updates = payload.model_dump(exclude_unset=True)
+    entries: dict[str, str] = {}
+    restart_required = False
+
+    if updates.get("scan_workers") is not None:
+        workers = int(updates["scan_workers"])
+        entries["VS_SCAN_WORKERS"] = str(workers)
+        restart_required = restart_required or workers != SCAN_WORKERS
+
+    if updates.get("external_api_master") is not None:
+        enabled = bool(updates["external_api_master"])
+        entries["VS_ENABLE_EXTERNAL_APIS"] = "true" if enabled else "false"
+        restart_required = restart_required or enabled != ENABLE_EXTERNAL_APIS
+
+    def env_safe(value: str, label: str) -> str:
+        unsafe = set("\r\n\x00;$\"`'|<>{}[]*!~#")
+        if os.name != "nt":
+            unsafe |= {" ", "\t", "\\", "&", "(", ")"}
+        else:
+            unsafe |= {"%", "^"}
+        if any(char in value for char in unsafe):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} contains characters that are unsafe in .env",
+            )
+        return value
+
+    if "ssh_known_hosts" in updates:
+        value = str(updates.get("ssh_known_hosts") or "").strip()
+        if value:
+            value = env_safe(value, "SSH known_hosts path")
+            path = Path(value).expanduser()
+            if not path.is_absolute() or not path.is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail="SSH known_hosts path must be an existing absolute file",
+                )
+            value = str(path.resolve())
+        entries["VS_SSH_KNOWN_HOSTS"] = value
+
+    if "wordlist_path" in updates:
+        value = str(updates.get("wordlist_path") or "").strip()
+        if value:
+            value = env_safe(value, "Wordlist path")
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Wordlist path must be absolute",
+                )
+            if path.exists() and not path.is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Wordlist path must point to a file",
+                )
+            if not path.exists():
+                try:
+                    path.resolve().relative_to(data_dir().resolve())
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "A new wordlist path must be inside the data directory"
+                        ),
+                    ) from exc
+            value = str(path)
+        entries["VS_SUBFINDER_WORDLIST"] = value
+
+    if "seclists_subdomain_url" in updates:
+        value = str(updates.get("seclists_subdomain_url") or "").strip()
+        if value:
+            value = env_safe(value, "SecLists URL")
+        entries["VS_SECLISTS_SUBDOMAIN_URL"] = value
+
+    if entries:
+        try:
+            _upsert_env_entries(env_file_path(BASE_DIR), entries)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Could not write .env: {exc}",
+            ) from exc
+        for key, value in entries.items():
+            os.environ[key] = value
+
+    return {
+        "ok": True,
+        "restart_required": restart_required,
+        "settings": get_settings(),
+    }
 
 
 @router.post("/settings/network")
@@ -2644,7 +2780,7 @@ def set_bind_address(payload: BindAddressUpdate) -> dict[str, Any]:
         else "false"
     )
     _upsert_env_entries(
-        BASE_DIR / ".env",
+        env_file_path(BASE_DIR),
         {
             "VS_HOST": payload.bind_host,
             "VS_PORT": str(payload.bind_port),
@@ -2706,7 +2842,7 @@ def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
         env_name: paths.get(name, "")
         for name, env_name in TOOL_ENV_VARS.items()
     }
-    _upsert_env_entries(BASE_DIR / ".env", entries)
+    _upsert_env_entries(env_file_path(BASE_DIR), entries)
     for name, env_name in TOOL_ENV_VARS.items():
         os.environ[env_name] = paths.get(name, "")
 

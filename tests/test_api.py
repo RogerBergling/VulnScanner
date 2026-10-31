@@ -330,6 +330,8 @@ def test_openapi_document_lists_all_major_routes(client):
         "/api/settings",
         "/api/settings/network",
         "/api/settings/admin-password",
+        "/api/settings/admin-user",
+        "/api/settings/runtime",
         "/api/server/status",
         "/api/server/database/backups",
         "/api/server/database/backup",

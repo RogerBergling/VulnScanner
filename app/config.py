@@ -15,6 +15,32 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 _LIMIT_CACHE: dict[tuple[str, int, str, int], tuple[float, int]] = {}
 
 
+def _load_env_file() -> None:
+    """Load the launcher/GUI environment file for direct app starts.
+
+    ``run.sh`` and ``run.bat`` already source the file before Python starts.
+    Loading it here as well makes ``python -m app.main`` and service managers
+    that start Uvicorn directly behave consistently. Explicit process
+    environment variables keep precedence.
+    """
+    if os.getenv("VS_SKIP_DOTENV") == "1":
+        return
+    configured = os.getenv("VS_ENV_FILE", "").strip()
+    path = Path(configured).expanduser() if configured else BASE_DIR / ".env"
+    if not path.is_file():
+        return
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(path, override=False)
+    except Exception:
+        # The launchers still work if python-dotenv is unavailable.
+        return
+
+
+_load_env_file()
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -22,10 +48,42 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    low: int | None = None,
+    high: int | None = None,
+) -> int:
+    """Read an integer environment setting without crashing on bad input."""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if low is not None:
+        value = max(low, value)
+    if high is not None:
+        value = min(high, value)
+    return value
+
+
 def data_dir() -> Path:
     path = Path(os.getenv("VS_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def env_file_path(base: Path | None = None) -> Path:
+    """Return the environment file written by the Settings GUI.
+
+    Service deployments can point ``VS_ENV_FILE`` at their systemd
+    EnvironmentFile so GUI changes survive a restart. Development and the
+    launchers use ``.env`` next to the checkout by default.
+    """
+    configured = os.getenv("VS_ENV_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return (base or BASE_DIR) / ".env"
 
 
 def _database_file() -> Path:
@@ -119,31 +177,39 @@ def subfinder_wordlist_path() -> Path:
 # SecLists is the standard source for the editable subdomain wordlist. The
 # download action is deliberately explicit so scans never fetch wordlists on
 # their own.
-SECLISTS_SUBDOMAIN_URL = os.getenv(
-    "VS_SECLISTS_SUBDOMAIN_URL",
-    "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt",
+DEFAULT_SECLISTS_SUBDOMAIN_URL = (
+    "https://raw.githubusercontent.com/danielmiessler/SecLists/master/"
+    "Discovery/DNS/subdomains-top1million-5000.txt"
 )
 SECLISTS_REPOSITORY_URL = "https://github.com/danielmiessler/SecLists"
 
 
+def seclists_subdomain_url() -> str:
+    """Return the configured SecLists download URL, with a safe default."""
+    return (
+        os.getenv("VS_SECLISTS_SUBDOMAIN_URL", DEFAULT_SECLISTS_SUBDOMAIN_URL).strip()
+        or DEFAULT_SECLISTS_SUBDOMAIN_URL
+    )
+
+
+def ssh_known_hosts_path() -> str:
+    """Return the optional known_hosts path used by authenticated SSH scans."""
+    return os.getenv("VS_SSH_KNOWN_HOSTS", "").strip()
+
+
 HOST = os.getenv("VS_HOST", "127.0.0.1")
-PORT = int(os.getenv("VS_PORT", "8765"))
+PORT = _env_int("VS_PORT", 8765, low=1, high=65_535)
 
 # Guardrails for scans.
-MAX_REPO_BYTES = int(os.getenv("VS_MAX_REPO_BYTES", str(512 * 1024 * 1024)))
-MAX_SOURCE_FILE_BYTES = int(os.getenv("VS_MAX_SOURCE_FILE_BYTES", str(1024 * 1024)))
-MAX_SCAN_FILES = int(os.getenv("VS_MAX_SCAN_FILES", "20000"))
-MAX_CIDR_HOSTS = int(os.getenv("VS_MAX_CIDR_HOSTS", "256"))
-AGENT_JOB_TIMEOUT_SECONDS = int(os.getenv("VS_AGENT_JOB_TIMEOUT", str(60 * 60)))
-# Optional known-hosts file for authenticated SSH scans. When set, the server
-# verifies the remote host key before sending credentials. When unset, the
-# fingerprint is logged but the connection is allowed (compatible with existing
-# lab deployments). Production deployments should set this.
-SSH_KNOWN_HOSTS = os.getenv("VS_SSH_KNOWN_HOSTS", "").strip()
+MAX_REPO_BYTES = _env_int("VS_MAX_REPO_BYTES", 512 * 1024 * 1024, low=1_048_576)
+MAX_SOURCE_FILE_BYTES = _env_int("VS_MAX_SOURCE_FILE_BYTES", 1024 * 1024, low=1024)
+MAX_SCAN_FILES = _env_int("VS_MAX_SCAN_FILES", 20_000, low=1)
+MAX_CIDR_HOSTS = _env_int("VS_MAX_CIDR_HOSTS", 256, low=1)
+AGENT_JOB_TIMEOUT_SECONDS = _env_int("VS_AGENT_JOB_TIMEOUT", 60 * 60, low=60)
 # Background scans are independent jobs. Raise this on a larger host to run more
 # server-side scans at the same time. Delegated agent scans wait on the agent
 # and do not consume a worker slot.
-SCAN_WORKERS = max(1, min(32, int(os.getenv("VS_SCAN_WORKERS", "4"))))
+SCAN_WORKERS = _env_int("VS_SCAN_WORKERS", 4, low=1, high=32)
 ENABLE_EXTERNAL_APIS = _env_bool("VS_ENABLE_EXTERNAL_APIS", True)
 
 # Optional CLI integrations. Empty means "look in PATH". The GUI writes these

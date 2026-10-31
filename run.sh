@@ -3,17 +3,45 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [ -f .env ]; then
+ENV_FILE="${VS_ENV_FILE:-.env}"
+if [ "$ENV_FILE" = ".env" ] && [ ! -f .env ] && [ -f .env.example ]; then
+  echo "[vulnscanner] Creating .env from .env.example"
+  cp .env.example .env
+  chmod 600 .env
+fi
+
+if [ -f "$ENV_FILE" ]; then
+  # Explicit process environment variables take precedence over .env.
+  ENV_KEYS=()
+  ENV_VALUES=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    if [ "${!key+x}" ]; then
+      ENV_KEYS+=("$key")
+      ENV_VALUES+=("${!key}")
+    fi
+  done < "$ENV_FILE"
   set -a
   # shellcheck disable=SC1091
-  . ./.env
+  . "$ENV_FILE"
   set +a
+  for i in "${!ENV_KEYS[@]}"; do
+    export "${ENV_KEYS[$i]}=${ENV_VALUES[$i]}"
+  done
+else
+  echo "[vulnscanner] WARNING: environment file not found: $ENV_FILE" >&2
 fi
 
 PYTHON="${PYTHON:-python3}"
 if [ ! -x .venv/bin/python ]; then
   echo "[vulnscanner] Creating .venv"
-  "$PYTHON" -m venv .venv
+  if ! "$PYTHON" -m venv .venv; then
+    rm -rf .venv
+    echo "[vulnscanner] Could not create .venv. Install python3-venv (Ubuntu/Debian) or python3 (Fedora) and retry." >&2
+    exit 1
+  fi
 fi
 
 # uv-created environments may not include pip; the launcher uses pip for the

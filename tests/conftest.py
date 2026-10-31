@@ -11,6 +11,7 @@ import os
 
 os.environ["VS_ENABLE_EXTERNAL_APIS"] = "false"
 os.environ["VS_LOG_LEVEL"] = "CRITICAL"
+os.environ["VS_SKIP_DOTENV"] = "1"
 os.environ.pop("VS_ADMIN_PASSWORD", None)
 
 import pytest

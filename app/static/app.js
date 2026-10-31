@@ -2801,9 +2801,62 @@
       ) : '<p class="muted small" style="margin:0">Could not load the wordlist configuration.</p>') +
       '</div></section>';
 
+    const smtp = settings.smtp || {};
+    const notify = settings.notify_default || {};
+    const limits = settings.limits || {};
+    const notificationsPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Email and notifications</h2></div><div class="panel-body">' +
+      '<p class="muted small" style="margin-top:0">SMTP credentials and default notification targets. Schedule-specific addresses override these defaults. The SMTP password is encrypted at rest and is never returned by the API.</p>' +
+      '<div class="form-grid">' +
+        '<label class="field"><span>SMTP host</span><input class="input mono" id="set-smtp-host" value="' + esc(smtp.host || '') + '" placeholder="smtp.example.com" autocomplete="off"></label>' +
+        '<label class="field"><span>SMTP port</span><input class="input mono" id="set-smtp-port" type="number" min="1" max="65535" value="' + esc(smtp.port || '587') + '"></label>' +
+        '<label class="field"><span>SMTP username</span><input class="input" id="set-smtp-user" value="' + esc(smtp.user || '') + '" placeholder="scanner@example.com" autocomplete="off"></label>' +
+        '<label class="field"><span>SMTP password</span><input class="input" id="set-smtp-password" type="password" placeholder="Leave blank to keep current" autocomplete="new-password"></label>' +
+        '<label class="field"><span>From address</span><input class="input" id="set-smtp-from" value="' + esc(smtp.from || '') + '" placeholder="scanner@example.com" autocomplete="off"></label>' +
+        '<label class="field"><span>Default notification email</span><input class="input" id="set-notify-email" value="' + esc(notify.email || '') + '" placeholder="soc@example.com" autocomplete="off"></label>' +
+        '<label class="field full"><span>Default webhook URL</span><input class="input mono" id="set-notify-webhook" value="' + esc(notify.webhook || '') + '" placeholder="https://hooks.example.com/vulnscanner" autocomplete="off"></label>' +
+      '</div>' +
+      '<label class="check" style="margin-top:8px"><input type="checkbox" id="clear-smtp-password"><span>Clear the stored SMTP password</span></label>' +
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-notifications">Save notification settings</button>' +
+      '<span class="muted small">Notification failures are logged and do not fail a scan.</span></div>' +
+    '</div></section>';
+
+    const guardrailsPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Scan guardrails</h2></div><div class="panel-body">' +
+      '<p class="muted small" style="margin-top:0">Limits applied to new scans. Values are stored in SQLite and included in database backups.</p>' +
+      '<div class="form-grid">' +
+        '<label class="field"><span>Max web hosts per scan</span><input class="input" id="guard-max-web" type="number" min="1" max="10000" value="' + num(limits.max_web_hosts) + '"></label>' +
+        '<label class="field"><span>Network probe workers</span><input class="input" id="guard-workers" type="number" min="1" max="600" value="' + num(limits.workers) + '"></label>' +
+        '<label class="field"><span>Max repository size (MiB)</span><input class="input" id="guard-repo-mib" type="number" min="1" max="10240" value="' + Math.max(1, Math.round(num(settings.max_repo_bytes) / 1048576)) + '"></label>' +
+        '<label class="field"><span>Max source file size (KiB)</span><input class="input" id="guard-source-kib" type="number" min="1" max="102400" value="' + Math.max(1, Math.round(num(settings.max_source_file_bytes) / 1024)) + '"></label>' +
+        '<label class="field"><span>Max files per scan</span><input class="input" id="guard-max-files" type="number" min="1" max="1000000" value="' + num(settings.max_scan_files) + '"></label>' +
+        '<label class="field"><span>Max CIDR hosts</span><input class="input" id="guard-max-cidr" type="number" min="1" max="65536" value="' + num(settings.max_cidr_hosts) + '"></label>' +
+        '<label class="field"><span>Agent job timeout (seconds)</span><input class="input" id="guard-agent-timeout" type="number" min="60" max="86400" value="' + num(settings.agent_job_timeout) + '"></label>' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-guardrails">Save guardrails</button>' +
+      '<span class="muted small">Changes apply to subsequent scans without a restart.</span></div>' +
+    '</div></section>';
+
+    const advancedPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Advanced runtime</h2></div><div class="panel-body">' +
+      '<p class="muted small" style="margin-top:0">Deployment-level values are stored in <span class="mono">.env</span> for the launcher. Scan workers and the external-API master switch require a restart. Storage locations and the credential key are intentionally read-only here; changing them needs a planned data migration.</p>' +
+      '<div class="kv"><span>Data directory</span><span class="mono">' + esc(settings.data_dir || '') + '</span></div>' +
+      '<div class="kv"><span>Environment file</span><span class="mono">' + esc(settings.env_file_path || '') + '</span></div>' +
+      '<div class="kv"><span>Database file</span><span class="mono">' + esc(settings.database_path || '') + '</span></div>' +
+      '<div class="kv"><span>Credential key</span><span>' + (settings.credential_key_configured ? 'configured' : 'not found') + ' · <span class="mono">' + esc(settings.credential_key_path || '') + '</span></span></div>' +
+      '<div class="form-grid" style="margin-top:12px">' +
+        '<label class="field"><span>Scan workers</span><input class="input" id="adv-scan-workers" type="number" min="1" max="32" value="' + num(settings.scan_workers_saved) + '"><span class="hint">Active: ' + num(settings.scan_workers) + ' · saved: ' + num(settings.scan_workers_saved) + '</span></label>' +
+        '<label class="field"><span>Subdomain wordlist path</span><input class="input mono" id="adv-wordlist-path" value="' + esc(settings.wordlist_path || '') + '" placeholder="Default under the data directory"></label>' +
+        '<label class="field"><span>SSH known_hosts file</span><input class="input mono" id="adv-known-hosts" value="' + esc(settings.ssh_known_hosts || '') + '" placeholder="Empty disables host-key verification"></label>' +
+        '<label class="field full"><span>SecLists download URL</span><input class="input mono" id="adv-seclists-url" value="' + esc(settings.seclists_download_url || '') + '"></label>' +
+      '</div>' +
+      switchRow('adv-external-master', 'Deployment external API master switch',
+        'Process-level switch for all outbound integrations. The per-scan Allow external APIs setting still applies. Restart required.', settings.external_api_master_saved) +
+      '<div class="muted small" style="margin-top:4px">Active process: ' + (settings.external_api_master ? 'enabled' : 'disabled') + '</div>' +
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-advanced">Save advanced settings</button>' +
+      '<span class="muted small">Wordlist, known_hosts and SecLists URL apply immediately; worker and master-switch changes need a restart.</span></div>' +
+    '</div></section>';
+
     view.innerHTML =
       '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Settings</h1>' +
-        '<div class="page-sub">Local configuration and optional integrations. Settings are stored in the database; listener changes need a restart.</div></div>' +
+        '<div class="page-sub">Local configuration and optional integrations. Settings are stored in SQLite; deployment values are mirrored to the environment file. Listener changes need a restart.</div></div>' +
         '<div class="page-actions"><a class="btn" href="/api/docs" target="_blank" rel="noopener">API reference</a>' +
         '<a class="btn" href="/manual" target="_blank" rel="noopener">Full manual</a></div></div>' +
       '<div class="settings-grid">' +
@@ -2823,6 +2876,8 @@
           '<div style="display:flex;align-items:center;gap:10px;margin-top:16px"><button class="btn btn-primary" id="save-settings">Save settings</button>' +
           '<span class="muted small">Environment-level external API access: ' + (settings.external_apis_available ? 'enabled' : 'disabled') + '</span></div>' +
         '</div></section>' +
+        notificationsPanel +
+        guardrailsPanel +
         '<section class="panel settings-wide"><div class="panel-head"><h2>Target credentials</h2><span class="spacer"></span>' +
           '<button class="btn btn-sm btn-primary" data-action="add-credential">Add credential</button></div><div class="panel-body">' +
           '<p class="muted small" style="margin-top:0">Accounts used by authenticated network scans (SSH for Linux, WinRM for Windows). ' +
@@ -2866,6 +2921,7 @@
           '<span class="muted small">Absolute paths are stored in the database and mirrored to <span class="mono">.env</span>, then applied immediately. Leave a field empty to search <span class="mono">PATH</span>.</span></div>' +
         '</div></section>' +
         wordlistPanel +
+        advancedPanel +
         '<section class="panel"><div class="panel-head"><h2>Local data</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Database</span><span class="mono">' + esc(settings.database_path) + '</span></div>' +
           '<div class="kv"><span>Database size</span><span>' + bytes(settings.database_size) + '</span></div>' +
@@ -2889,7 +2945,9 @@
           '<p class="muted small" style="margin-top:6px">Stored in the database and mirrored to <span class="mono">.env</span>; applied after restarting VulnScanner with <span class="mono">./run.sh</span> or <span class="mono">run.bat</span>. ' +
           'Keep <span class="mono">127.0.0.1</span> for local-only access; bind to <span class="mono">0.0.0.0</span> or <span class="mono">::</span> only behind a trusted network or TLS reverse proxy.</p>' +
           '<div class="kv"><span>Dashboard auth</span><span>' + (settings.admin_auth_enabled ? 'HTTP Basic auth is enabled' : 'Not enabled') + '</span></div>' +
-          '<div class="kv"><span>Admin username</span><span class="mono">' + esc(settings.admin_user || 'admin') + '</span></div>' +
+          '<label class="field full" style="margin-top:8px"><span>Admin username</span>' +
+          '<input class="input mono" id="admin-user-input" value="' + esc(settings.admin_user || 'admin') + '" maxlength="64" autocomplete="off" spellcheck="false"></label>' +
+          '<button class="btn btn-sm" id="save-admin-user" style="margin-top:6px">Save admin username</button>' +
           '<label class="field full" style="margin-top:8px"><span>Admin password</span>' +
           '<input class="input" type="password" id="admin-password-input" placeholder="At least 12 characters; leave empty to disable" ' +
           'minlength="12" maxlength="128" autocomplete="new-password" spellcheck="false"></label>' +
@@ -2915,6 +2973,73 @@
             subfinder_enabled: $('#set-subfinder').checked
           });
           toast('Settings saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-notifications').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const payload = {
+            smtp_host: $('#set-smtp-host').value.trim(),
+            smtp_port: $('#set-smtp-port').value.trim(),
+            smtp_user: $('#set-smtp-user').value.trim(),
+            smtp_from: $('#set-smtp-from').value.trim(),
+            notify_email_default: $('#set-notify-email').value.trim(),
+            notify_webhook_default: $('#set-notify-webhook').value.trim()
+          };
+          const password = $('#set-smtp-password').value;
+          if ($('#clear-smtp-password').checked) payload.smtp_password = '';
+          else if (password) payload.smtp_password = password;
+          await patch('/settings', payload);
+          toast('Notification settings saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-guardrails').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const repoMib = Number($('#guard-repo-mib').value);
+          const sourceKib = Number($('#guard-source-kib').value);
+          if (!Number.isFinite(repoMib) || repoMib < 1) throw new Error('Repository size must be at least 1 MiB');
+          if (!Number.isFinite(sourceKib) || sourceKib < 1) throw new Error('Source file size must be at least 1 KiB');
+          await patch('/settings', {
+            max_web_hosts: Number($('#guard-max-web').value),
+            workers: Number($('#guard-workers').value),
+            max_repo_bytes: Math.round(repoMib * 1048576),
+            max_source_file_bytes: Math.round(sourceKib * 1024),
+            max_scan_files: Number($('#guard-max-files').value),
+            max_cidr_hosts: Number($('#guard-max-cidr').value),
+            agent_job_timeout: Number($('#guard-agent-timeout').value)
+          });
+          toast('Scan guardrails saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-admin-user').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const username = $('#admin-user-input').value.trim();
+          if (!username) throw new Error('Enter an admin username');
+          await post('/settings/admin-user', { username: username });
+          toast('Admin username updated. Re-authenticate with the new username.');
+          setTimeout(function () { window.location.reload(); }, 1200);
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-advanced').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const result = await post('/settings/runtime', {
+            scan_workers: Number($('#adv-scan-workers').value),
+            external_api_master: $('#adv-external-master').checked,
+            ssh_known_hosts: $('#adv-known-hosts').value.trim(),
+            wordlist_path: $('#adv-wordlist-path').value.trim(),
+            seclists_subdomain_url: $('#adv-seclists-url').value.trim()
+          });
+          toast(result.restart_required ? 'Advanced settings saved. Restart VulnScanner to apply worker/master-switch changes.' : 'Advanced settings saved');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });

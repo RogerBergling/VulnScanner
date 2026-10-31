@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -12,6 +13,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # inside this set lets the settings endpoint write it to ``.env`` safely.
 _ADMIN_PASSWORD_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~@+=:,/-"
+)
+_ADMIN_USER_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@"
 )
 
 
@@ -257,7 +261,7 @@ class SettingsUpdate(BaseModel):
 
     # Scan guardrails.
     max_web_hosts: int | None = Field(default=None, ge=1, le=10_000)
-    workers: int | None = Field(default=None, ge=1, le=32)
+    workers: int | None = Field(default=None, ge=1, le=600)
     max_repo_bytes: int | None = Field(default=None, ge=1_048_576, le=10_737_418_240)
     max_source_file_bytes: int | None = Field(default=None, ge=1024, le=104_857_600)
     max_scan_files: int | None = Field(default=None, ge=1, le=1_000_000)
@@ -280,6 +284,45 @@ class SettingsUpdate(BaseModel):
             return value
         if not value.lower().startswith(("http://", "https://")):
             raise ValueError("Webhook URL must start with http:// or https://")
+        return value
+
+
+class AdminUserUpdate(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Admin username is required")
+        invalid = sorted(set(value) - _ADMIN_USER_CHARS)
+        if invalid:
+            raise ValueError(
+                "Admin username contains unsupported characters. Use letters, "
+                "digits, and . _ - @"
+            )
+        return value
+
+
+class RuntimeSettingsUpdate(BaseModel):
+    scan_workers: int | None = Field(default=None, ge=1, le=32)
+    external_api_master: bool | None = None
+    ssh_known_hosts: str | None = Field(default=None, max_length=4096)
+    wordlist_path: str | None = Field(default=None, max_length=4096)
+    seclists_subdomain_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("ssh_known_hosts", "wordlist_path")
+    @classmethod
+    def strip_path(cls, value: str | None) -> str | None:
+        return None if value is None else value.strip()
+
+    @field_validator("seclists_subdomain_url")
+    @classmethod
+    def validate_seclists_url(cls, value: str | None) -> str | None:
+        value = None if value is None else value.strip()
+        if value and not value.lower().startswith(("http://", "https://")):
+            raise ValueError("SecLists URL must start with http:// or https://")
         return value
 
 
@@ -307,10 +350,14 @@ class ToolSettingsUpdate(BaseModel):
             path = (raw or "").strip()
             if len(path) > 1000:
                 raise ValueError(f"{name} path must be shorter than 1000 characters")
-            unsafe = set("\r\n\x00 \t;$\"`'|&<>(){}[]*?!~#\\")
+            unsafe = set("\r\n\x00;$\"`'|<>{}[]*?!~#")
+            if os.name != "nt":
+                unsafe |= {" ", "\t", "\\", "&", "(", ")"}
+            else:
+                unsafe |= {"%", "^"}
             if any(char in path for char in unsafe):
                 raise ValueError(
-                    f"{name} path contains spaces or characters that are unsafe in .env"
+                    f"{name} path contains characters that are unsafe in .env"
                 )
             clean[name] = path
         return clean
