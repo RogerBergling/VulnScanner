@@ -27,7 +27,7 @@ anything.
 
 | Threat | Examples | Primary controls |
 | --- | --- | --- |
-| Unauthorised network access | Someone reaches port 8765 on a shared network | Loopback bind by default, HTTP Basic auth, firewall, TLS reverse proxy |
+| Unauthorised network access | Someone reaches port 8765 on a shared network | Loopback bind by default, session auth, MFA, CSRF tokens, login rate limiting, firewall, TLS reverse proxy |
 | Credential guessing | Repeated Basic auth attempts | Strong password, network allow-list, reverse-proxy rate limiting (not built in) |
 | Stolen agent token | Token copied from an endpoint | Hashed storage, TLS, file permissions, revocation, re-enrolment |
 | Malicious scanned content | A web page, repository file or AD report crafted to attack the scanner | Bounded parsing, size limits, no shell interpolation, read-only collection |
@@ -54,47 +54,79 @@ anything.
 
 ## 2. Authentication and transport
 
-### HTTP Basic authentication
+### Session authentication, MFA and CSRF
 
-Set a dashboard password in **Settings → Security** to enable HTTP Basic
-authentication for the dashboard and `/api` routes. It is stored as a salted
-PBKDF2 hash in SQLite and included in database backups. For initial
-provisioning, `VS_ADMIN_PASSWORD` is also accepted and migrated to the database
-on startup:
+Set a dashboard password in **Settings → Security** to enable authentication.
+It is stored as a salted PBKDF2 hash in SQLite and included in database backups.
+For initial provisioning, `VS_ADMIN_PASSWORD` is also accepted and migrated to
+the database on startup; the plaintext line is then removed from the environment
+file:
 
 ```bash
 VS_ADMIN_USER=admin
 VS_ADMIN_PASSWORD='a-long-random-password'
 ```
 
-If no password is configured, authentication is disabled. The server logs a
-warning at startup. This is acceptable only for a single-user workstation bound
-to `127.0.0.1`.
+Browsers sign in at `/login` and receive an HttpOnly, SameSite=Strict session
+cookie. Session tokens are stored as SHA-256 hashes with an absolute lifetime
+(`VS_SESSION_TTL_HOURS`, default 12) and an idle timeout
+(`VS_SESSION_IDLE_MINUTES`, default 30). Set `VS_TRUST_PROXY=true` only when the
+app is reachable exclusively through a TLS-terminating reverse proxy that sets
+`X-Forwarded-Proto` and `X-Forwarded-For`.
 
-HTTP Basic authentication sends the password with every request. It is **not**
-encrypted by itself. Always use HTTPS when the service is reachable over a
-network.
+**Authenticator MFA** (TOTP) is available under **Settings → Security**. Enrolment
+returns a manual key, an `otpauth://` URI and ten one-time recovery codes. MFA is
+required for browser sessions and for Basic-auth API clients, which must send
+`X-VS-MFA` or `X-VS-Recovery-Code`. TOTP replay is prevented by storing the last
+accepted timestep. Enabling or disabling MFA revokes other sessions.
 
-The following paths remain public even when Basic auth is enabled:
+Cookie-authenticated state-changing requests require `X-CSRF-Token`; the token
+is delivered in a non-HttpOnly `vs_csrf` cookie and in the login response.
+Login attempts are rate-limited per source IP and per username (five failures per
+five minutes per username; twenty per IP). A `429` response includes
+`Retry-After`. Basic-auth API clients are stateless and exempt from CSRF.
+
+Every mutating API request is recorded in the audit trail together with
+authentication, MFA, settings, backup, restore and storage-relocation actions.
+The Audit page supports filtering and CSV export.
+
+The following paths remain public even when authentication is enabled:
 
 - `/api/health`
+- `/api/auth/login` and `/api/auth/status`
 - `/api/agent/*` (these require an agent token where appropriate)
 - `/agent/*` (agent scripts and installers)
 - `/static/*`
+- `/login`
 - `/api/docs` and `/api/openapi.json`
 - `/` and `/manual` are protected because they are not in the public list
 
 Protect `/api/docs` at the reverse proxy if you do not want the schema exposed.
 
+If no password is configured, authentication is disabled. The server logs a
+warning at startup. This is acceptable only for a single-user workstation bound
+to `127.0.0.1`.
+
 ### What authentication does not provide
 
 VulnScanner has:
 
-- One administrator identity, not user accounts or groups.
-- No role-based access control (RBAC).
-- No per-user audit trail.
-- No login lockout or built-in rate limiting.
-- No application-level CSRF tokens.
+- One administrator identity, not multiple user accounts or groups.
+- No role-based access control (RBAC) or SSO.
+- No per-user audit trail (the audit trail records the single admin actor).
+- No hardware-key (WebAuthn) support; MFA is TOTP and recovery codes.
+- In-memory rate limiting, which resets on restart and is per process. Move the
+  limiter to shared storage before running multiple Uvicorn workers.
+
+### SSRF protection
+
+Webhook URLs and the SecLists download URL are validated before every request.
+The default policy rejects loopback, RFC1918, link-local, multicast and reserved
+addresses, embedded credentials, non-HTTP(S) schemes and redirects to unsafe
+destinations. Enable **Allow private-network outbound URLs** only for an
+internal webhook or mirror. DNS rebinding remains a residual risk because the
+hostname is resolved before the request; restrict egress at the network layer
+for high-assurance deployments.
 
 VulnScanner includes a built-in HTTPS listener that is **enabled by default**
 (`VS_SSL=true`) and uses a self-signed certificate. It is intended for local
@@ -307,7 +339,10 @@ do so.
 - Agent identity, hashed tokens and endpoint metadata.
 - Cached OSV responses and the KEV catalogue.
 - Settings, including tool paths, listener/HTTPS choices, SMTP, notifications,
-  scan guardrails, a salted admin password hash and finding review status.
+  scan guardrails, a salted admin password hash, encrypted TOTP secret, recovery
+  code hashes and finding review status.
+- The security audit trail and notification delivery history.
+- Discovered inventory and per-asset finding history.
 
 Temporary GitHub clones live under the data directory while a scan runs and are
 removed afterwards. Report exports are generated in memory and streamed; they
@@ -356,12 +391,25 @@ The **Server** page exposes the same online backup API. It writes a consistent
 copy to the chosen absolute directory/file path, or to
 `<data>/reports/backups/` when no path is given, and records the last backup
 time. The database contains all application settings, including tool paths,
-listener/HTTPS choices and a salted admin password hash. Move backups to
-encrypted, access-controlled storage on a schedule; the application does not
-rotate or encrypt them.
+listener/HTTPS choices, a salted admin password hash, the encrypted TOTP secret
+and recovery code hashes. Move backups to encrypted, access-controlled storage
+on a schedule; the application does not rotate or encrypt them.
 
 Encrypt backups at rest and restrict who can restore them. A backup contains
-secrets and AD findings.
+secrets, MFA material, audit history and AD findings. The credential key is a
+separate file; a restored database without it cannot decrypt saved credentials
+or the SMTP password.
+
+### Storage relocation
+
+**Settings → Advanced runtime → Storage location** validates absolute paths and
+performs a guarded relocation: safety backup, online SQLite copy, integrity
+check, credential-key and supporting-directory copy, environment-file update and
+live process switch. The old location is retained. Active scans block relocation
+unless forced, and an existing target database requires overwrite confirmation.
+Restart afterwards so the launcher and certificate paths are consistent. The
+same operation can be performed manually while the service is stopped by moving
+the data directory and updating `VS_DATA_DIR`/`VS_DATABASE`.
 
 ### Restore
 
@@ -462,10 +510,13 @@ The built-in scanners remain available if a tool is missing or disabled.
   the service journal.
 - Each scan has a timestamped event log in the database. Finding status changes
   are also recorded there.
-- Settings changes, logins and agent heartbeats do not have a separate
-  tamper-evident audit trail.
+- Authentication, MFA, settings, backup, restore, storage relocation and every
+  mutating API request are recorded in the audit trail. The trail is not
+  cryptographically tamper-evident; ship it to an append-only log platform if
+  your policy requires that property.
 - Protected resources and evidence are not encrypted at rest by the
-  application.
+  application. The TOTP secret, SMTP password and saved target credentials are
+  encrypted with the credential key.
 
 For a team deployment:
 
@@ -486,14 +537,20 @@ Before exposing the service beyond localhost:
 - [ ] `VS_SSL=false` when the reverse proxy terminates TLS; leave the default
       `true` only for the local self-signed listener.
 - [ ] Dashboard password configured with a long, unique value.
+- [ ] Authenticator MFA enrolled and recovery codes stored offline.
 - [ ] Reverse proxy requires HTTPS and restricts source networks.
+- [ ] `VS_TRUST_PROXY` set only when the app is reachable exclusively through a
+      trusted proxy that sets `X-Forwarded-Proto`/`X-Forwarded-For`.
+- [ ] Login rate limits and audit alerts monitored.
 - [ ] Firewall allows only the proxy and required agent paths.
 - [ ] Dedicated unprivileged service account.
 - [ ] Data directory mode `0700`, database and environment file mode `0600`
       or stricter.
 - [ ] Backups configured, encrypted and restore-tested.
 - [ ] `VS_ENABLE_EXTERNAL_APIS` set according to policy.
-- [ ] Optional tools installed from trusted sources and pinned by path.
+- [ ] Optional tools installed from trusted sources, pinned by path and covered
+      by the tool version policy.
+- [ ] Private-network outbound URLs left disabled unless required.
 - [ ] Agent installers reviewed; SYSTEM/root use approved or avoided.
 - [ ] KEV sync policy agreed; the catalogue is refreshed before relying on KEV
       annotations.
@@ -503,14 +560,16 @@ Before exposing the service beyond localhost:
 
 ## 10. Known limitations and residual risk
 
-- Basic auth is the only built-in authentication mechanism.
-- There is no RBAC, no per-user attribution and no approval workflow.
+- There is one administrator identity. Session auth, TOTP MFA, recovery codes,
+  CSRF tokens, login rate limiting and an audit trail are built in, but there is
+  no RBAC, SSO/WebAuthn, per-user attribution or approval workflow.
 - The built-in TLS listener uses a self-signed certificate and is enabled by
   default for local use; disable it with `VS_SSL=false` behind a TLS reverse
-  proxy. There is no WAF, rate limiter or account lockout. Use a reverse proxy
-  for production TLS and edge controls.
-- There are no application-level CSRF tokens. The JSON API, same-origin design
-  and CSP reduce exposure, but a proxy with strict origin policy is recommended.
+  proxy. Use a reverse proxy for production TLS and edge controls. Login rate
+  limiting is in-memory and per process.
+- SSRF validation covers webhook and SecLists URLs, but DNS rebinding is a
+  residual risk; restrict egress at the network layer for high-assurance
+  deployments.
 - Scan workers are in-process and are lost on restart.
 - SQLite supports one writer at a time; very large concurrent workloads are not
   the target use case.

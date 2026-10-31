@@ -146,14 +146,30 @@ Restore the environment file if it changed.
 
 ## Database schema and migrations
 
-`app/database.py` currently uses `PRAGMA user_version` and `CREATE TABLE IF NOT
-EXISTS`. New tables are created on startup, but existing tables are not altered
-automatically. Until a formal migration framework is added:
+`app/migrations.py` maintains an ordered migration ledger in the
+`schema_migrations` table and records the applied version in
+`PRAGMA user_version`. On startup:
+
+1. A fresh database gets the baseline schema and every ordered migration.
+2. A pre-ledger database is adopted using its `user_version`; the historical
+   baseline is marked applied, then newer migrations run.
+3. Each migration runs in a transaction and is recorded only after it commits.
+
+Backups created by older releases are upgraded in a temporary copy before
+restore. Missing optional tables are created empty; missing core tables reject
+the restore. A backup from a newer schema is rejected rather than downgraded.
+Use **Server → Inspect backup** or `GET /api/server/database/inspect` to review
+a backup before restoring it.
+
+Even with migrations:
 
 - take a backup before every upgrade;
 - read the release notes for schema changes;
 - do not run newer code against an older database without a tested migration;
 - do not downgrade code against a database created by a newer schema.
+
+The migration ledger itself is not copied from a backup; the live schema stays
+authoritative.
 
 ## Automated helper
 

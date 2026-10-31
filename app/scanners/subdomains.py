@@ -17,8 +17,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import requests
-
 from ..config import (
     ENABLE_EXTERNAL_APIS,
     SECLISTS_REPOSITORY_URL,
@@ -27,6 +25,7 @@ from ..config import (
     subfinder_wordlist_path,
 )
 from ..database import get_setting
+from ..net_guard import safe_get
 from ..utils import truncate
 from .base import Finding, ScanCancelled, ScanContext, ScanResult
 from .tools import run_tool, tool_path
@@ -158,21 +157,13 @@ def save_wordlist(content: str, path: Path | None = None) -> dict[str, Any]:
 
 def download_seclists_wordlist() -> dict[str, Any]:
     """Download the standard SecLists DNS wordlist to the editable path."""
-    response = requests.get(seclists_subdomain_url(), timeout=30, stream=True)
-    try:
-        response.raise_for_status()
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > MAX_WORDLIST_BYTES:
-                raise ValueError("SecLists wordlist is larger than the configured limit")
-            chunks.append(chunk)
-        content = b"".join(chunks).decode("utf-8", errors="replace")
-    finally:
-        response.close()
+    result = safe_get(
+        seclists_subdomain_url(),
+        allow_private=get_setting("allow_private_outbound", "false") == "true",
+        timeout=30.0,
+        max_bytes=MAX_WORDLIST_BYTES,
+    )
+    content = result.content.decode("utf-8", errors="replace")
     if not _wordlist_lines(content):
         raise ValueError("Downloaded SecLists wordlist did not contain usable entries")
     info = save_wordlist(content)

@@ -604,3 +604,51 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .risk-card { flex-direction: column; align-items: stretch; }
   .risk-ring { margin: 0 auto; }
 }
+
+/* ---------- Login ---------- */
+.login-body {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(37, 99, 235, .14), transparent 38%),
+    radial-gradient(circle at 85% 85%, rgba(22, 40, 60, .12), transparent 42%),
+    var(--bg);
+  padding: 28px 16px;
+}
+.login-shell { width: 100%; max-width: 420px; }
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: center;
+  margin-bottom: 18px;
+  color: var(--nav);
+}
+.login-brand .brand-mark {
+  background: var(--nav);
+  color: #fff;
+}
+.login-card { border-radius: 14px; }
+.login-title { font-size: 20px; margin-bottom: 2px; }
+.login-submit { width: 100%; justify-content: center; margin-top: 14px; }
+.login-foot { margin: 16px 0 0; text-align: center; }
+.login-card .field { margin-top: 10px; }
+.login-card .form-error { margin-top: 10px; }
+
+/* ---------- Audit ---------- */
+.audit-detail {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}

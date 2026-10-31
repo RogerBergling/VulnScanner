@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Sign in · VulnScanner</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <div class="login-brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M12 3l7 3v5.3c0 4.4-2.9 8.3-7 9.7-4.1-1.4-7-5.3-7-9.7V6l7-3z"/>
+          <path d="M9.2 12.2l2 2 3.8-4.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span class="brand-name">Vuln<span>Scanner</span></span>
+    </div>
+    <section class="panel login-card">
+      <div class="panel-body">
+        <h1 class="login-title">Sign in</h1>
+        <p class="muted small" id="login-subtitle">Use your dashboard administrator account.</p>
+        <form id="login-form" autocomplete="on">
+          <label class="field full"><span>Username</span>
+            <input class="input" id="login-username" name="username" autocomplete="username" required maxlength="200" spellcheck="false">
+          </label>
+          <label class="field full"><span>Password</span>
+            <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          </label>
+          <div id="mfa-fields" class="hidden">
+            <label class="field full" id="totp-field"><span>Authenticator code</span>
+              <input class="input mono" id="login-code" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="one-time-code" placeholder="123456">
+            </label>
+            <label class="field full hidden" id="recovery-field"><span>Recovery code</span>
+              <input class="input mono" id="login-recovery" name="recovery_code" maxlength="64" autocomplete="off" placeholder="ABCDE-12345">
+            </label>
+            <button type="button" class="btn btn-subtle btn-sm" id="use-recovery">Use a recovery code instead</button>
+          </div>
+          <div class="form-error" id="login-error" role="alert"></div>
+          <button class="btn btn-primary login-submit" id="login-submit" type="submit">Sign in</button>
+        </form>
+        <p class="login-foot muted small">Authorized use only. All sign-in attempts are audited.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/static/login.js" defer></script>
+</body>
+</html>

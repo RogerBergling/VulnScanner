@@ -14,6 +14,7 @@ from .database import (
     update_scan,
     utcnow,
 )
+from .discovery import record_scan_inventory, track_historical_findings
 from .scanners.ad import process_ad_report, scan_ad_report
 from .scanners.agent import process_agent_payload
 from .scanners.base import ScanCancelled, ScanContext, ScanResult
@@ -115,6 +116,29 @@ def persist_result(scan_id: int, result: ScanResult) -> dict[str, Any]:
     summary["risk_label"] = risk_label(score)
     summary["metadata"] = result.metadata
     _save_findings(scan, findings)
+    # Inventory and trend tracking are valuable but must never turn a
+    # successful scan into a failed one.
+    try:
+        host_assets = record_scan_inventory(scan, findings, result.metadata)
+    except Exception:
+        host_assets = {}
+    summary["inventory_entries"] = len(host_assets)
+    try:
+        scan_asset_id = scan.get("asset_id")
+        if scan_asset_id:
+            track_historical_findings(scan_id, int(scan_asset_id), findings)
+        else:
+            for host, asset_id in host_assets.items():
+                subset = [
+                    finding
+                    for finding in findings
+                    if host in str(finding.get("location") or "")
+                    or host in str(finding.get("resource") or "")
+                ]
+                if subset:
+                    track_historical_findings(scan_id, asset_id, subset)
+    except Exception:
+        pass
     return summary
 
 
@@ -164,6 +188,11 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
     update_scan(scan_id, status="running", progress=1, stage="Starting", started_at=started)
     log_event(scan_id, f"Starting {scan['scan_type']} scan against {scan['target']}")
     try:
+        from .tool_policy import enforce_scan_policy
+
+        for warning in enforce_scan_policy(scan["scan_type"], options):
+            log_event(scan_id, f"Tool version policy: {warning}", "warning")
+            ctx.log(f"Tool version policy: {warning}", "warning")
         result = _dispatch(scan, ctx, runtime_options)
         if ctx.cancelled() or scan_cancelled(scan_id):
             summary = persist_result(scan_id, result)

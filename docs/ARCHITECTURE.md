@@ -27,19 +27,26 @@ VulnScanner is deliberately small and local-first:
 
 ```text
 ┌──────────────────────────── Browser ────────────────────────────┐
-│  SPA: index.html + app.js + styles.css                          │
-│  hash routes: dashboard, customers, scans, agents, AD, server, settings │
+│  SPA: index.html + app.js + login.js + styles.css                │
+│  hash routes: dashboard, customers, scans, agents, inventory,    │
+│  AD, server, settings, audit, help                               │
 └───────────────────────────────┬─────────────────────────────────┘
-                                │ HTTP(S), JSON, Basic auth optional
+                                │ HTTP(S), JSON, session cookie or Basic auth
 ┌───────────────────────────────▼─────────────────────────────────┐
 │                         FastAPI process                          │
 │                                                                  │
-│  app/main.py       security headers, Basic auth, static files    │
-│  app/api.py        REST endpoints, validation, imports           │
-│  app/scans.py      lifecycle, persistence, status carry-over     │
+│  app/main.py       security headers, session/CSRF/auth, static   │
+│  app/api.py        core REST endpoints, validation, imports      │
+│  app/routes/       auth, audit, inventory, maintenance, storage   │
+│  app/scans.py      lifecycle, persistence, inventory/history     │
 │  app/jobs.py       configurable background executor              │
 │  app/agents.py     enrolment, heartbeat, jobs, agent scans       │
-│  app/security.py   token generation, hashing, agent auth         │
+│  app/security.py   hashing, agent auth, TOTP MFA, legacy cleanup │
+│  app/sessions.py   session tokens, idle/absolute expiry, CSRF    │
+│  app/audit.py      audit trail and CSV export                    │
+│  app/migrations.py ordered schema migrations and backup upgrade  │
+│  app/runtime_settings.py mirrors DB settings to the env file      │
+│  app/net_guard.py  SSRF validation and safe downloads            │
 │  app/reporting.py  JSON, CSV and standalone HTML reports         │
 │                                                                  │
 │  app/scanners/     web, network, repository, dependencies,       │
@@ -70,9 +77,17 @@ files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
 
 | Component | Responsibility |
 | --- | --- |
-| `app/main.py` | Creates the FastAPI application, initialises the database, recovers interrupted scans, applies security headers and optional Basic authentication, and serves the SPA/manual/downloads. |
-| `app/api.py` | Defines `/api` routes, request schemas, target validation, option filtering, imports, reports, agent management, server diagnostics, backups and settings. |
-| `app/scans.py` | Turns a queued scan into a running scan, dispatches the correct engine, decorates findings with KEV data, persists results, applies finding-status carry-over and handles cancellation/failure. |
+| `app/main.py` | Creates the FastAPI application, initialises the database, recovers interrupted scans, applies security headers, session/CSRF authentication and audit middleware, and serves the SPA/login/manual/downloads. |
+| `app/api.py` | Defines the core `/api` routes, request schemas, target validation, option filtering, imports, reports, agent management, server diagnostics, backups and settings. |
+| `app/routes/` | Feature routers: session login/MFA, audit queries/export, inventory/history, database maintenance and guarded storage relocation. |
+| `app/scans.py` | Turns a queued scan into a running scan, dispatches the correct engine, enforces the optional tool version policy, decorates findings with KEV data, persists results, records inventory/finding history, applies status carry-over and handles cancellation/failure. |
+| `app/security.py` | Password hashing, agent tokens, TOTP MFA, recovery codes and legacy plaintext cleanup. |
+| `app/sessions.py` | Hashed session tokens, absolute/idle expiry, session cookies, CSRF tokens and Basic/MFA request resolution. |
+| `app/audit.py` | Append-only security audit trail, filtering and CSV export. |
+| `app/migrations.py` | Ordered schema migration ledger and in-place upgrade of older backups. |
+| `app/runtime_settings.py` | Mirrors database-backed listener/tool/admin values into `VS_ENV_FILE` for launchers and service managers. |
+| `app/net_guard.py` | SSRF-resistant URL validation and redirect-aware downloads. |
+| `app/tool_policy.py` | Optional CLI tool minimum-version policy and scan enforcement. |
 | `app/jobs.py` | Small `ThreadPoolExecutor` that runs scan, AD import and agent-result tasks off the request thread. The pool size is `VS_SCAN_WORKERS` (default 4, range 1-32). |
 | `app/agents.py` | Creates agents and their assets, processes heartbeats and jobs, creates agent scans, renames/moves agents, rotates tokens and handles revocation. |
 | `app/security.py` | Generates enrolment/agent tokens, stores only SHA-256 hashes and authenticates agent requests. |
@@ -82,7 +97,7 @@ files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
 | `app/backup.py` | Online SQLite backups, selective restores, safety backups and validation. |
 | `app/scheduler.py` | Cron-based scheduled scans, notification delivery and stale agent-job expiry. |
 | `app/database.py` | SQLite schema, connections, transactions, settings helpers and event logging. |
-| `app/static/` | Dependency-free single-page interface. |
+| `app/static/` | Dependency-free single-page interface: `app.js` shell/core pages, `pages.js` inventory/audit pages, `login.js` session login, shared `styles.css`. |
 | `agent/` | Python and PowerShell agents, installers and read-only AD collector. |
 
 ## 4. Request and scan lifecycle

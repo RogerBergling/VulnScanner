@@ -15,8 +15,9 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
 from .config import database_path
+from .migrations import LATEST_VERSION, apply_migrations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = LATEST_VERSION
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (
@@ -318,12 +319,7 @@ def transaction() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with get_db() as conn:
-        current_version = conn.execute("PRAGMA user_version").fetchone()[0]
-
-        if current_version < SCHEMA_VERSION:
-            # Split SCHEMA into separate migrations for controlled upgrade
-            conn.executescript(SCHEMA)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        apply_migrations(conn, SCHEMA)
         # Always ensure settings exist
         ssl_default = "true" if os.getenv("VS_SSL", "true").strip().lower() in {
             "1", "true", "yes", "on"
@@ -354,6 +350,16 @@ def init_db() -> None:
             "ssl_enabled": ssl_default,
             "admin_user": os.getenv("VS_ADMIN_USER", "admin"),
             "admin_password_hash": "",
+            "mfa_enabled": "false",
+            "mfa_secret": "",
+            "mfa_pending_secret": "",
+            "mfa_recovery_hashes": "[]",
+            "mfa_last_step": "0",
+            "legacy_password_migrated_at": "",
+            "allow_private_outbound": "false",
+            "tool_version_policy_enabled": "false",
+            "tool_version_policy_warn_only": "true",
+            "tool_min_versions": "{}",
             "kev_last_sync": "",
             "last_backup_at": "",
             "last_backup_path": "",

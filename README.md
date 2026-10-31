@@ -70,10 +70,11 @@ security. Listener, HTTPS and scan-worker changes are stored and mirrored to
 `.env`; restart with `./run.sh` or `run.bat` to apply them. The dashboard
 password is stored as a salted hash in SQLite and applies immediately.
 
-Storage paths and the credential encryption key are intentionally read-only in
-the GUI: moving live data or rotating the key needs a planned migration. See
-[docs/UPGRADING.md](docs/UPGRADING.md) and
-[docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md).
+Storage paths are editable under **Settings → Advanced runtime → Storage
+location** with a guarded relocation workflow. The credential encryption key is
+copied automatically when the data directory changes; rotating the key itself
+still requires a planned migration. See [docs/UPGRADING.md](docs/UPGRADING.md)
+and [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md).
 
 If the browser reports `SSL_ERROR_RX_RECORD_TOO_LONG`, you are using `https://`
 against a server that is running plain HTTP. Start the server with `./run.sh`
@@ -292,10 +293,13 @@ deployment-level values that remain outside the GUI.
 | `VS_HOST` | `127.0.0.1` | Bind address. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. Keep loopback unless protected by a firewall/reverse proxy. |
 | `VS_PORT` | `8765` | HTTP/HTTPS port. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. |
 | `VS_SSL` | `true` | Enable the built-in HTTPS listener with a self-signed certificate under `$VS_DATA_DIR/certs/`. Editable in Settings → Security; stored in SQLite and mirrored to `.env`. |
-| `VS_ADMIN_USER` | `admin` | HTTP Basic auth username. Editable in Settings → Security. |
-| `VS_ADMIN_PASSWORD` | empty | Legacy/initial HTTP Basic auth fallback. The Settings page stores a salted password hash in SQLite; an environment password is migrated on startup. |
-| `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. Read-only in the GUI; use an absolute path **outside the Git checkout** for production. |
-| `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Read-only in the GUI; moving it requires a planned migration. |
+| `VS_ADMIN_USER` | `admin` | Dashboard administrator username. Editable in Settings → Security. |
+| `VS_ADMIN_PASSWORD` | empty | Legacy/initial password fallback. The Settings page stores a salted password hash in SQLite; an environment password is migrated on startup and the plaintext line is removed from the environment file. |
+| `VS_SESSION_TTL_HOURS` | `12` | Absolute browser session lifetime (1–168 hours). |
+| `VS_SESSION_IDLE_MINUTES` | `30` | Browser session idle timeout (5–1440 minutes). |
+| `VS_TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Forwarded-Proto` from a reverse proxy. Enable only when the app is unreachable except through that proxy. |
+| `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. Editable in Settings → Advanced runtime → Storage location. Use an absolute path **outside the Git checkout** for production. |
+| `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Editable in Settings → Advanced runtime → Storage location. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Process-level master switch for OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. Editable in Settings → Advanced runtime; restart required. |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
@@ -369,13 +373,37 @@ database rows; back up the data directory if you need them too.
 
 A safety backup is written before every restore. Active scans must be cancelled
 or finished first. Restores are validated with SQLite's integrity and
-foreign-key checks and roll back on failure. See
-[docs/UPGRADING.md](docs/UPGRADING.md) for the safe update and rollback
-procedure, and [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)
-for deployment hardening.
+foreign-key checks and roll back on failure. Older backups are upgraded in a
+temporary copy before restore, and a backup that predates newer optional tables
+is accepted; those tables are restored empty. A backup from a newer schema is
+rejected rather than silently downgraded. The GUI can inspect a backup before
+restoring it. See [docs/UPGRADING.md](docs/UPGRADING.md) for the safe update and
+rollback procedure, and
+[docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md) for
+deployment hardening.
 
 `scripts/update.sh` performs a backup and a `git pull --ff-only`; it never runs
 `git clean` or deletes the data directory.
+
+### Database and data-directory relocation
+
+**Settings → Advanced runtime → Storage location** can validate and relocate the
+live SQLite database and data directory without editing files. The workflow:
+
+1. Validates that the target paths are absolute, writable and safe.
+2. Writes a safety backup of the current database.
+3. Copies the database with SQLite's online backup API and verifies its
+   integrity.
+4. Copies `credential.key`, certificates, wordlists, reports and backups when
+   requested.
+5. Updates `VS_DATA_DIR` and `VS_DATABASE` in `VS_ENV_FILE` and switches the
+   running process to the new database.
+6. Leaves the old location untouched.
+
+Restart VulnScanner afterwards so certificate paths and the launcher are fully
+consistent. Relocation is refused while scans are active unless explicitly
+forced, and an existing target database is only replaced when overwrite is
+confirmed.
 
 ## Security
 
@@ -383,11 +411,26 @@ for deployment hardening.
 - Set a dashboard password in **Settings → Security** (stored as a salted
   PBKDF2 hash in SQLite) or with `VS_ADMIN_PASSWORD` before exposing the
   service beyond localhost.
+- Browsers use a session cookie with `HttpOnly`, `SameSite=Strict` and a secure
+  flag on HTTPS. Session tokens are stored as SHA-256 hashes; the absolute
+  lifetime and idle timeout are configurable.
+- **Authenticator MFA** (TOTP, RFC 6238) is available under **Settings →
+  Security**. Enrolment displays a manual setup key and `otpauth://` URI, then
+  ten one-time recovery codes. MFA is enforced for browser sessions and for
+  Basic-auth API clients, which must send `X-VS-MFA` (TOTP) or
+  `X-VS-Recovery-Code`.
+- State-changing cookie-authenticated requests require an `X-CSRF-Token`
+  header. Login attempts are rate-limited per source IP and per username.
+- **Audit trail** records authentication, configuration, maintenance and every
+  mutating API request. The Audit page supports filtering and CSV export.
 - Agent tokens are stored as SHA-256 hashes. Enrolment tokens are one-time and
   expire.
 - Saved target credentials are encrypted with Fernet and never returned by the
   API. Each host receives at most one authentication attempt per scan to reduce
   account-lockout risk.
+- Webhook and SecLists URLs are SSRF-validated. Loopback, RFC1918, link-local,
+  multicast and reserved destinations are rejected unless the administrator
+  explicitly enables private-network outbound URLs.
 - Findings retain acknowledgement, false-positive and accepted status across
   rescans of the same asset.
 - Active Directory collection is read-only and never modifies directory
@@ -439,6 +482,18 @@ Run a vulnerability audit (`pip-audit` or OSV) against the lock on every change
 and on a scheduled basis. See [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for
 the update, hash-pinning, mirror and air-gap procedures.
 
+The GitHub Actions workflow in `.github/workflows/ci.yml` runs the test suite on
+Python 3.11 and 3.14, verifies the generated dependency locks, runs Ruff and
+Bandit, and checks that the application compiles.
+
+## Inventory and finding history
+
+Network scans populate the **Inventory** page with discovered hosts, open ports,
+device-type/OS hints and first/last-seen timestamps. Per-asset finding history is
+recorded for every scan that has an asset, and network scans without an asset
+link discovered hosts to automatically created inventory assets. Open an
+inventory row to review that asset's history and finding trend.
+
 ## Development and tests
 
 ```bash
@@ -447,4 +502,11 @@ uv sync --frozen --no-install-project --group dev
 ```
 
 Tests run offline (`VS_ENABLE_EXTERNAL_APIS=false`), use a temporary database,
-and do not start background scan workers.
+and do not start background scan workers. The CI workflow is the authoritative
+validation gate; run the same commands locally before pushing:
+
+```bash
+uv run pytest -q
+uv run ruff check app tests agent
+uv run bandit -q -r app agent/vulnscanner_agent.py
+```

@@ -258,6 +258,7 @@ class SettingsUpdate(BaseModel):
     smtp_from: str | None = Field(default=None, max_length=320)
     notify_email_default: str | None = Field(default=None, max_length=320)
     notify_webhook_default: str | None = Field(default=None, max_length=2048)
+    allow_private_outbound: bool | None = None
 
     # Scan guardrails.
     max_web_hosts: int | None = Field(default=None, ge=1, le=10_000)
@@ -311,6 +312,9 @@ class RuntimeSettingsUpdate(BaseModel):
     ssh_known_hosts: str | None = Field(default=None, max_length=4096)
     wordlist_path: str | None = Field(default=None, max_length=4096)
     seclists_subdomain_url: str | None = Field(default=None, max_length=2048)
+    session_ttl_hours: int | None = Field(default=None, ge=1, le=168)
+    session_idle_minutes: int | None = Field(default=None, ge=5, le=1440)
+    trust_proxy: bool | None = None
 
     @field_validator("ssh_known_hosts", "wordlist_path")
     @classmethod
@@ -412,6 +416,7 @@ class AdminPasswordUpdate(BaseModel):
     # must be long enough and avoid characters that would need shell quoting in
     # .env (newlines, spaces, $, %, quotes, etc.).
     password: str = Field(default="", max_length=128)
+    current_password: str | None = Field(default=None, max_length=128)
 
     @field_validator("password")
     @classmethod
@@ -427,6 +432,62 @@ class AdminPasswordUpdate(BaseModel):
                 "and . _ ~ @ + = : , / -"
             )
         return value
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=256)
+    code: str = Field(default="", max_length=32)
+    recovery_code: str = Field(default="", max_length=64)
+
+
+class MfaEnableRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
+
+
+class MfaDisableRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    code: str = Field(default="", max_length=64)
+    recovery_code: str = Field(default="", max_length=64)
+
+
+class RecoveryCodesRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    code: str = Field(default="", max_length=64)
+    recovery_code: str = Field(default="", max_length=64)
+
+
+class NotificationTestRequest(BaseModel):
+    channel: Literal["email", "webhook"]
+    email: str | None = Field(default=None, max_length=320)
+    webhook: str | None = Field(default=None, max_length=2048)
+
+
+class ToolPolicyUpdate(BaseModel):
+    enabled: bool | None = None
+    warn_only: bool | None = None
+    minimums: dict[str, str] | None = None
+
+
+class StorageRelocateRequest(BaseModel):
+    data_dir: str = Field(min_length=1, max_length=4096)
+    database_path: str | None = Field(default=None, max_length=4096)
+    copy_supporting_files: bool = True
+    overwrite: bool = False
+    force: bool = False
+    confirmation: str = Field(default="", max_length=32)
+
+    @field_validator("confirmation")
+    @classmethod
+    def validate_confirmation(cls, value: str) -> str:
+        if value.strip().upper() != "RELOCATE":
+            raise ValueError("Type RELOCATE to confirm the storage relocation")
+        return value
+
+
+class StorageValidateRequest(BaseModel):
+    data_dir: str = Field(min_length=1, max_length=4096)
+    database_path: str | None = Field(default=None, max_length=4096)
 
 
 class ScheduleCreate(BaseModel):

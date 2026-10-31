@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import os
 import secrets
+import shutil
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from .database import (
     set_setting,
     utcnow,
 )
+from .migrations import upgrade_database_file
 
 BACKUP_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 RESTORE_MODES = {"all", "scans", "settings"}
@@ -48,7 +51,18 @@ ALL_TABLES = [
     "scan_schedules",
     "asset_inventory",
     "finding_history",
+    "notification_log",
+    "audit_log",
 ]
+
+# Tables without which a restore would be meaningless. Optional tables that
+# were introduced later are created empty by the migration upgrade step.
+CORE_TABLES = {
+    "customers",
+    "asset_groups",
+    "assets",
+    "scans",
+}
 
 SCAN_TABLES = {
     "customers",
@@ -229,19 +243,66 @@ def _inspect_source(source: Path, mode: str) -> dict[str, Any]:
         conn.close()
 
     if mode == "all":
-        # A full restore must not silently drop a table that was absent from an
-        # incomplete backup.
-        required = set(ALL_TABLES)
+        required = set(CORE_TABLES)
     elif mode == "settings":
         required = {"settings"}
     else:
-        required = set(SCAN_TABLES)
+        required = {"scans"}
     missing = sorted(required - tables)
     if missing:
         raise ValueError(
             "Backup is missing required table(s): " + ", ".join(missing)
         )
-    return {"version": version, "tables": tables}
+    missing_optional = sorted(set(ALL_TABLES) - tables)
+    return {
+        "version": version,
+        "tables": tables,
+        "missing_optional": missing_optional,
+        "compatible": True,
+        "upgrade_required": version < SCHEMA_VERSION or bool(missing_optional),
+    }
+
+
+def _upgraded_source(source: Path, info: dict[str, Any]) -> tuple[Path, dict[str, Any], bool]:
+    """Return a writable, migrated copy of *source* for a restore.
+
+    Older backups are upgraded in a temporary copy so the original file is
+    never modified.  This also adds tables introduced after the backup was
+    taken; they are restored empty instead of rejecting the backup outright.
+    """
+    if not info.get("upgrade_required"):
+        return source, info, False
+    fd, temp_name = tempfile.mkstemp(prefix="vulnscanner-restore-", suffix=".db")
+    os.close(fd)
+    temporary = Path(temp_name)
+    try:
+        shutil.copy2(source, temporary)
+        upgrade_database_file(str(temporary))
+        upgraded_info = _inspect_source(temporary, "all")
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary, upgraded_info, True
+
+
+def inspect_backup(path: str, mode: str = "all") -> dict[str, Any]:
+    """Inspect a backup without changing the live database."""
+    mode = (mode or "").strip().lower()
+    if mode not in RESTORE_MODES:
+        raise ValueError("mode must be all, scans or settings")
+    source = _source_path(path)
+    info = _inspect_source(source, mode)
+    return {
+        "ok": True,
+        "path": str(source),
+        "mode": mode,
+        "source_version": info["version"],
+        "current_version": SCHEMA_VERSION,
+        "upgrade_required": info["upgrade_required"],
+        "compatible": True,
+        "tables": sorted(info["tables"]),
+        "missing_optional": info["missing_optional"],
+    }
 
 
 def _table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
@@ -638,7 +699,8 @@ def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
         raise ValueError("mode must be all, scans or settings")
 
     source = _source_path(path)
-    info = _inspect_source(source, mode)
+    original_info = _inspect_source(source, mode)
+    info = original_info
     if mode in {"all", "scans"}:
         with get_db() as conn:
             active = conn.execute(
@@ -653,17 +715,30 @@ def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
         prefix="vulnscanner-pre-restore",
         record=False,
     )
+    restore_source = source
+    upgraded = False
+    temporary: Path | None = None
+    if mode in {"all", "scans"}:
+        restore_source, info, upgraded = _upgraded_source(source, info)
+        if restore_source != source:
+            temporary = restore_source
     try:
         with get_db() as conn:
             if mode == "all":
-                _restore_all(conn, source, info)
+                _restore_all(conn, restore_source, info)
             elif mode == "settings":
-                _restore_settings(conn, source)
+                _restore_settings(conn, restore_source)
             else:
-                _restore_scans(conn, source, info)
+                _restore_scans(conn, restore_source, info)
         # Re-add defaults introduced by this server version and make restored
         # settings visible to scanners immediately.
         init_db()
+        if mode in {"all", "settings"}:
+            # A restored admin password/MFA state invalidates existing browser
+            # sessions. Basic-auth clients have no session to revoke.
+            with get_db() as conn:
+                conn.execute("DELETE FROM auth_sessions")
+                conn.commit()
         reload_tool_paths()
         clear_limit_cache()
     except Exception as exc:
@@ -671,6 +746,9 @@ def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
         raise ValueError(
             f"Restore failed: {exc}. The pre-restore safety backup is {safety['path']}"
         ) from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
     restored_at = utcnow()
     set_setting("last_restore_at", restored_at)
@@ -682,6 +760,10 @@ def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
         "ok": True,
         "mode": mode,
         "source": str(source),
+        "source_version": original_info["version"],
+        "current_version": SCHEMA_VERSION,
+        "upgraded": upgraded,
+        "missing_optional": original_info.get("missing_optional", []),
         "restored_at": restored_at,
         "safety_backup": str(safety["path"]),
         "counts": _counts(),

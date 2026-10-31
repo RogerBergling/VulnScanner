@@ -65,10 +65,29 @@ If no dashboard password is stored, no login is required. This is convenient on
 a single-user workstation bound to `127.0.0.1`, but it is not safe on a shared
 network. Set a password from **Settings → Security**; it is stored as a salted
 PBKDF2 hash in SQLite and applied immediately. `VS_ADMIN_PASSWORD` is a legacy
-fallback and is migrated to the database on startup. Preferably place the
-service behind a TLS reverse proxy before remote use. The default local listener
-uses HTTPS with a self-signed certificate, so browsers will warn; set
-`VS_SSL=false` to use HTTP on loopback instead.
+fallback and is migrated to the database on startup; the plaintext line is then
+removed from the environment file.
+
+The browser uses a session cookie, not HTTP Basic. Sign in at `/login` with the
+admin username and password. Sessions expire after 12 hours by default and after
+30 minutes of inactivity (`VS_SESSION_TTL_HOURS` and
+`VS_SESSION_IDLE_MINUTES`). Use **Sign out** in the top bar to end a session.
+
+### Authenticator MFA
+
+Open **Settings → Security → Authenticator MFA** and choose **Set up
+authenticator**. Add the displayed manual key or `otpauth://` URI to a standard
+TOTP app, then enter the current six-digit code. VulnScanner shows ten one-time
+recovery codes; store them offline. Recovery codes are single-use and can be
+regenerated with the current password and authenticator code.
+
+When MFA is enabled, browser logins ask for the authenticator code after the
+password. API clients using Basic auth must send `X-VS-MFA: 123456` (or
+`X-VS-Recovery-Code: ABCDE-12345`). Enabling or disabling MFA signs out other
+sessions. If you lose both the authenticator and recovery codes, use the server
+console to clear the `mfa_enabled`, `mfa_secret`, `mfa_pending_secret`,
+`mfa_recovery_hashes` and `mfa_last_step` rows from the `settings` table, then
+restart and re-enrol. Restrict console access accordingly.
 
 ## 2a. Installing optional external tools (Ubuntu and Fedora)
 
@@ -755,19 +774,23 @@ The Settings page shows:
 - Product version and external API availability.
 - Toggles for external APIs, Nuclei, Nmap, testssl.sh, Trivy and Subfinder.
 - **Email and notifications** for SMTP host/port/user/password/from and default
-  notification email/webhook.
+  notification email/webhook, with **Send test email** and **Send test
+  webhook** buttons.
 - **Scan guardrails** for web-host, worker, repository-size, source-file,
   file-count, CIDR-host and agent-job-timeout limits.
 - Optional tool installation status, versions and editable absolute paths.
+- **Tool version policy** with warn-only or strict enforcement and per-tool
+  minimum versions.
 - **Subdomain wordlist** editor with a **Load SecLists list** action.
 - KEV catalogue count and last sync time.
 - **Target credentials** for authenticated network scans, with encrypted
   passwords/SSH keys, customer/global scope and default flags.
 - **Advanced runtime** for scan workers, the deployment external-API master
-  switch, SSH known_hosts, the subdomain wordlist path and the SecLists download
-  URL.
-- **Security and access** for the bind address/port, HTTPS, admin username and
-  dashboard admin password.
+  switch, SSH known_hosts, the subdomain wordlist path, the SecLists download
+  URL, session lifetime/idle timeout, reverse-proxy trust, the private-network
+  outbound override and **Storage location**.
+- **Security and access** for the bind address/port, HTTPS, admin username,
+  dashboard password and authenticator MFA.
 - Database path, size and reports path.
 - The active and saved parallel worker count (`VS_SCAN_WORKERS`).
 
@@ -789,15 +812,29 @@ listener keeps its current address; the new value is applied after restarting
 with `./run.sh` or `run.bat`. The panel shows the active address and warns when
 a restart is pending. Use `127.0.0.1` for local-only access and bind to
 `0.0.0.0` or `::` only on a trusted network or behind a TLS reverse proxy.
+Changing the admin password from a browser session requires the current
+password; a Basic-auth request already proves it. Other browser sessions are
+revoked after a password or username change.
 
-Storage locations (`VS_DATA_DIR`, `VS_DATABASE`) and the credential encryption
-key are intentionally read-only in the GUI. Moving a live database or rotating
-the key requires a planned migration and a matching backup; follow
-[UPGRADING.md](UPGRADING.md) and [SECURITY_AND_DEPLOYMENT.md](SECURITY_AND_DEPLOYMENT.md).
+Storage locations are edited under **Settings → Advanced runtime → Storage
+location**. Enter absolute paths and use **Validate paths** first. **Relocate
+storage** creates a safety backup, copies the database with SQLite's online
+backup API, verifies integrity, copies the credential key and supporting
+directories, updates the environment file and switches the running process. The
+old location is never deleted. Restart VulnScanner afterwards. Relocation is
+refused while scans are active unless explicitly forced, and an existing target
+database needs overwrite confirmation. Rotating `VS_CREDENTIAL_KEY` still
+requires a planned migration; changing the data directory copies the key
+automatically.
 
 For a systemd service, set `VS_ENV_FILE` to the service's `EnvironmentFile`
 (for example `/etc/vulnscanner/vulnscanner.env`) so GUI changes to listener,
 tool-path and advanced runtime settings survive a restart.
+
+Webhook and SecLists destinations are SSRF-validated. Loopback, RFC1918,
+link-local, multicast and reserved addresses are rejected. Enable **Allow
+private-network outbound URLs** only when an internal webhook or mirror is
+required; this weakens SSRF protection.
 
 The CISA KEV catalogue can be synchronised from Settings. Synchronisation is
 optional; known-exploited enrichment is skipped if the catalogue is empty or
@@ -844,9 +881,10 @@ Maintenance actions:
   A safety backup is written first. Active scans must be cancelled or finished
   before restoring scan data. The backup is checked for SQLite integrity and
   foreign-key consistency; a failed restore rolls back and leaves the current
-  database unchanged. Backups created before database-backed settings were
-  introduced may not contain the admin password, tool paths or listener/HTTPS
-  choices; set those again after restoring such a backup.
+  database unchanged. Older backups are upgraded in a temporary copy before
+  restore; missing optional tables are created empty. Backups from a newer
+  schema are rejected. Use **Inspect backup** in the Server page to review the
+  source schema version and missing optional tables before restoring.
 - **Compact database** runs `VACUUM` to reclaim free pages. This can briefly
   pause scans; run it when the queue is idle.
 - **Download diagnostics** saves a JSON snapshot of the status page for
@@ -859,6 +897,25 @@ and salted PBKDF2 password hash are stored in SQLite and apply immediately.
 Tool paths, integration toggles, SMTP, notifications and scan guardrails are
 also stored in the database. Scan workers and the external-API master switch are
 edited under **Settings → Advanced runtime** and require a restart.
+
+## 9a. Audit trail
+
+The **Audit** page records authentication, configuration, maintenance and every
+mutating API request. Filter by category, outcome or free-text search, open an
+event for actor/IP/user-agent/detail, and export the filtered result as CSV.
+Events are stored in SQLite and included in full database backups. Audit
+recording is best-effort and never blocks the operation being audited. The
+trail is append-only through the UI; there is no delete endpoint. Apply database
+retention or external log shipping if your policy requires a longer history.
+
+## 9b. Inventory and finding history
+
+Network scans populate the **Inventory** page with discovered hosts, open ports,
+device-type/OS hints and first/last-seen timestamps. Inventory assets are created
+in the scan's customer/group when possible. Open an inventory row to review that
+asset's inventory records and per-fingerprint finding history. Finding history
+records first/last seen, severity and status transitions and occurrence count
+across scans; it is used by the asset trend endpoints.
 
 ## 10. Data lifecycle
 
@@ -966,12 +1023,18 @@ Validate the report is the output of the bundled collector or matches the
 schema in [AGENT_GUIDE.md](AGENT_GUIDE.md). Confirm the customer/group/asset
 selection matches.
 
-### Authentication loops
+### Authentication loops or repeated sign-in prompts
 
-If a dashboard password is configured, the browser prompts for Basic auth. Ensure the
-username matches `VS_ADMIN_USER`. With a reverse proxy, forward the
-`Authorization` header and use HTTPS. Do not expose the plain HTTP port directly
-to an untrusted network.
+Browsers use the `/login` session page, not HTTP Basic. Ensure cookies are
+allowed for the site and that a TLS-terminating reverse proxy forwards
+`X-Forwarded-Proto: https` (set `VS_TRUST_PROXY=true` only when the app is
+reachable exclusively through that proxy). The secure session cookie is not sent
+over plain HTTP. If MFA is enabled, confirm the server clock is correct; TOTP
+allows one 30-second step of drift. Use a recovery code if the authenticator is
+unavailable. Repeated failed logins return `429` for five minutes. If a reverse
+proxy is used, forward the `X-CSRF-Token` request header for state-changing
+requests; do not strip it. Do not expose the plain HTTP port directly to an
+untrusted network.
 
 ## 12. Responsible operation
 

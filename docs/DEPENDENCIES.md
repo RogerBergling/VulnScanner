@@ -28,6 +28,8 @@ Developer environment:
 ```bash
 uv sync --frozen --no-install-project --group dev
 .venv/bin/python -m pytest -q
+.venv/bin/ruff check app tests agent
+.venv/bin/bandit -q -lll -r app agent/vulnscanner_agent.py
 ```
 
 `uv` 0.13 or newer is required. The lock is universal: platform-specific
@@ -64,6 +66,8 @@ For a full refresh, use `uv lock --upgrade` and review every changed package.
 ./scripts/check-dependencies.sh
 uv sync --frozen --no-install-project --group dev
 .venv/bin/python -m pytest -q
+.venv/bin/ruff check app tests agent
+.venv/bin/bandit -q -lll -r app agent/vulnscanner_agent.py
 ```
 
 `check-dependencies.sh` verifies that `uv.lock` is current and that both

@@ -509,6 +509,78 @@ def _smtp_password() -> str:
         return value
 
 
+def _allow_private_outbound() -> bool:
+    return get_setting("allow_private_outbound", "false") == "true"
+
+
+def _log_delivery(
+    channel: str,
+    target: str,
+    status: str,
+    detail: str,
+    *,
+    scan_id: int | None = None,
+    schedule_id: int | None = None,
+) -> None:
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO notification_log("
+                "created_at, channel, target, status, detail, scan_id, schedule_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (utcnow(), channel, target[:500], status, detail[:1000], scan_id, schedule_id),
+            )
+            conn.commit()
+    except Exception:
+        return
+
+
+def _send_email(to_address: str, subject: str, body: str) -> None:
+    smtp_host = get_setting("smtp_host", "")
+    smtp_port = int(get_setting("smtp_port", "587"))
+    smtp_user = get_setting("smtp_user", "")
+    smtp_pass = _smtp_password()
+    from_addr = get_setting("smtp_from", smtp_user or "vulnscanner@localhost")
+    if not smtp_host or not smtp_user or not smtp_pass:
+        raise ValueError(
+            "SMTP host, username and password must be configured before sending mail"
+        )
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = to_address
+    if smtp_port == 465:
+        client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+    else:
+        client = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
+    with client as smtp:
+        if smtp_port != 465:
+            smtp.starttls()
+        smtp.login(smtp_user, smtp_pass)
+        smtp.sendmail(from_addr, [to_address], msg.as_string())
+
+
+def _send_webhook(url: str, payload: dict[str, Any]) -> int:
+    from .net_guard import validate_outbound_url
+
+    safe_url = validate_outbound_url(
+        url,
+        allow_private=_allow_private_outbound(),
+        resolve=True,
+        purpose="Notification webhook",
+    )
+    response = httpx.post(
+        safe_url,
+        json=payload,
+        timeout=10.0,
+        follow_redirects=False,
+    )
+    if 300 <= response.status_code < 400:
+        raise ValueError("Webhook returned a redirect; redirects are not followed")
+    response.raise_for_status()
+    return response.status_code
+
+
 def send_notification(
     schedule: ScanSchedule,
     scan_id: int,
@@ -531,36 +603,22 @@ def send_notification(
     )
     if email:
         try:
-            smtp_host = get_setting("smtp_host", "")
-            smtp_port = int(get_setting("smtp_port", "587"))
-            smtp_user = get_setting("smtp_user", "")
-            smtp_pass = _smtp_password()
-            from_addr = get_setting("smtp_from", smtp_user or "vulnscanner@localhost")
-
-            if smtp_host and smtp_user and smtp_pass:
-                msg = MIMEText(body, "plain", "utf-8")
-                msg["Subject"] = (
-                    f"VulnScanner: Scan {schedule.scan_type} {schedule.target} - {status}"
-                )
-                msg["From"] = from_addr
-                msg["To"] = email
-                if smtp_port == 465:
-                    client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
-                else:
-                    client = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
-                with client as smtp:
-                    if smtp_port != 465:
-                        smtp.starttls()
-                    smtp.login(smtp_user, smtp_pass)
-                    smtp.sendmail(from_addr, [email], msg.as_string())
+            _send_email(
+                email,
+                f"VulnScanner: Scan {schedule.scan_type} {schedule.target} - {status}",
+                body,
+            )
+            _log_delivery("email", email, "success", "delivered", scan_id=scan_id, schedule_id=schedule.id)
         except Exception as exc:
             logger.error("Email notification failed: %s", exc)
+            _log_delivery("email", email, "failed", str(exc), scan_id=scan_id, schedule_id=schedule.id)
 
     if webhook:
         try:
-            httpx.post(
+            code = _send_webhook(
                 webhook,
-                json={
+                {
+                    "event": "scan.completed",
                     "schedule_id": schedule.id,
                     "scan_id": scan_id,
                     "status": status,
@@ -568,10 +626,54 @@ def send_notification(
                     "scan_type": schedule.scan_type,
                     "message": message,
                 },
-                timeout=10.0,
             )
+            _log_delivery("webhook", webhook, "success", f"HTTP {code}", scan_id=scan_id, schedule_id=schedule.id)
         except Exception as exc:
             logger.error("Webhook notification failed: %s", exc)
+            _log_delivery("webhook", webhook, "failed", str(exc), scan_id=scan_id, schedule_id=schedule.id)
+
+
+def send_test_notification(
+    *,
+    channel: str,
+    email: str | None = None,
+    webhook: str | None = None,
+) -> dict[str, Any]:
+    """Send a test message using the stored SMTP/webhook configuration."""
+    channel = (channel or "").strip().lower()
+    if channel == "email":
+        target = (email or get_setting("notify_email_default", "")).strip()
+        if not target:
+            raise ValueError("Enter a test email address or configure a default recipient")
+        _send_email(
+            target,
+            "VulnScanner notification test",
+            "This is a test notification from VulnScanner. SMTP delivery is working.",
+        )
+        _log_delivery("email", target, "success", "test message delivered")
+        return {"channel": "email", "target": target, "detail": "Test email delivered"}
+
+    if channel == "webhook":
+        target = (webhook or get_setting("notify_webhook_default", "")).strip()
+        if not target:
+            raise ValueError("Enter a test webhook URL or configure a default webhook")
+        code = _send_webhook(
+            target,
+            {
+                "event": "notification.test",
+                "message": "This is a test notification from VulnScanner.",
+                "product": "VulnScanner",
+            },
+        )
+        _log_delivery("webhook", target, "success", f"test HTTP {code}")
+        return {
+            "channel": "webhook",
+            "target": target,
+            "status_code": code,
+            "detail": f"Webhook accepted the test message (HTTP {code})",
+        }
+
+    raise ValueError("channel must be 'email' or 'webhook'")
 
 
 def notify_scheduled_scan(scan_id: int, schedule_id: int, status: str, message: str) -> None:

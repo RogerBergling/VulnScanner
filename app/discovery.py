@@ -193,6 +193,8 @@ def create_inventory_entry(
     host: str,
     port: int,
     service: dict[str, Any],
+    *,
+    group_id: int | None = None,
 ) -> dict[str, Any]:
     """Insert or update an asset inventory entry from a discovered host."""
     host = (host or "").strip()
@@ -239,14 +241,14 @@ def create_inventory_entry(
             if existing:
                 new_asset_id = int(existing["id"])
             else:
-                group_id = _default_group(conn, customer_id)
+                target_group = group_id or _default_group(conn, customer_id)
                 new_asset_id = int(
                     conn.execute(
                         "INSERT INTO assets("
                         "customer_id, group_id, name, kind, identifier, description, "
                         "metadata, created_at"
                         ") VALUES (?, ?, ?, 'network', ?, '', '{}', ?)",
-                        (customer_id, group_id, host, host, now_str),
+                        (customer_id, target_group, host, host, now_str),
                     ).lastrowid
                 )
 
@@ -299,12 +301,91 @@ def _guess_mac_from_service(service: dict[str, Any]) -> str:
 
 def _build_result(row: dict[str, Any], port: int) -> dict[str, Any]:
     return {
+        "asset_id": row.get("asset_id"),
         "ip": row.get("ip_address", ""),
         "hostname": row.get("hostname", ""),
         "device_type": row.get("device_type", "Unknown"),
         "os_guess": row.get("os_guess", ""),
         "port": port,
     }
+
+
+def record_scan_inventory(
+    scan: dict[str, Any],
+    findings: list[dict[str, Any]],
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    """Persist hosts and open ports discovered by a network scan.
+
+    Returns a mapping of host -> asset_id so findings without an explicit scan
+    asset can still be linked to the inventory asset for trend tracking.
+    """
+    if str(scan.get("scan_type") or "") != "network":
+        return {}
+    customer_id = scan.get("customer_id")
+    if customer_id is None:
+        return {}
+    metadata = metadata or {}
+    by_host: dict[str, list[dict[str, Any]]] = {}
+    for item in metadata.get("open_ports") or []:
+        if not isinstance(item, dict):
+            continue
+        host = str(item.get("host") or "").strip()
+        if not host:
+            continue
+        by_host.setdefault(host, []).append(item)
+    if not by_host:
+        # Fall back to finding locations when an agent or older report did not
+        # include a structured host list.
+        for finding in findings:
+            for value in (finding.get("location"), finding.get("resource")):
+                host = _host_from_value(str(value or ""))
+                if host:
+                    by_host.setdefault(host, [])
+
+    mapping: dict[str, int] = {}
+    for host, ports in by_host.items():
+        for item in ports or [{}]:
+            try:
+                port = int(item.get("port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            service = {
+                "os": "",
+                "banner": str(item.get("service") or ""),
+            }
+            try:
+                entry = create_inventory_entry(
+                    int(scan["id"]),
+                    int(customer_id),
+                    scan.get("asset_id"),
+                    host,
+                    max(0, port),
+                    service,
+                    group_id=scan.get("group_id"),
+                )
+            except (ValueError, TypeError):
+                continue
+            asset_id = entry.get("asset_id")
+            if asset_id:
+                mapping[host] = int(asset_id)
+    return mapping
+
+
+def _host_from_value(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    if "://" in text:
+        from urllib.parse import urlparse
+
+        text = urlparse(text).hostname or ""
+    text = text.split("/", 1)[0].split(":", 1)[0].strip("[]")
+    try:
+        ipaddress.ip_address(text)
+        return text
+    except ValueError:
+        return text if re.fullmatch(r"[A-Za-z0-9_.-]{1,253}", text) else ""
 
 
 def track_historical_findings(

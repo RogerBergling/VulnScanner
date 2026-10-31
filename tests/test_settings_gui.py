@@ -28,6 +28,14 @@ def test_settings_expose_gui_configuration(api_client):
         "max_scan_files",
         "max_cidr_hosts",
         "agent_job_timeout",
+        "mfa_enabled",
+        "mfa",
+        "session_ttl_hours",
+        "session_idle_minutes",
+        "trust_proxy",
+        "allow_private_outbound",
+        "tool_policy",
+        "legacy_password_present",
     ):
         assert key in settings
     assert {"host", "port", "user", "from"} <= set(settings["smtp"])
@@ -106,6 +114,9 @@ def test_runtime_settings_write_env_and_apply(api_client, data_dir, monkeypatch,
             "VS_SSH_KNOWN_HOSTS",
             "VS_SUBFINDER_WORDLIST",
             "VS_SECLISTS_SUBDOMAIN_URL",
+            "VS_SESSION_TTL_HOURS",
+            "VS_SESSION_IDLE_MINUTES",
+            "VS_TRUST_PROXY",
         )
     }
     try:
@@ -117,6 +128,9 @@ def test_runtime_settings_write_env_and_apply(api_client, data_dir, monkeypatch,
                 "ssh_known_hosts": str(known_hosts),
                 "wordlist_path": str(wordlist),
                 "seclists_subdomain_url": "https://example.test/subdomains.txt",
+                "session_ttl_hours": 24,
+                "session_idle_minutes": 45,
+                "trust_proxy": True,
             },
         )
         assert response.status_code == 200, response.text
@@ -136,6 +150,9 @@ def test_runtime_settings_write_env_and_apply(api_client, data_dir, monkeypatch,
         assert f"VS_SSH_KNOWN_HOSTS={known_hosts}" in env_text
         assert f"VS_SUBFINDER_WORDLIST={wordlist}" in env_text
         assert "VS_SECLISTS_SUBDOMAIN_URL=https://example.test/subdomains.txt" in env_text
+        assert "VS_SESSION_TTL_HOURS=24" in env_text
+        assert "VS_SESSION_IDLE_MINUTES=45" in env_text
+        assert "VS_TRUST_PROXY=true" in env_text
     finally:
         for key, value in original.items():
             if value is None:

@@ -23,6 +23,12 @@ def test_dashboard_requires_basic_auth_when_configured(client, monkeypatch):
 
     assert client.get("/", auth=("admin", "s3cret")).status_code == 200
     assert client.get("/").status_code == 401
+    assert client.get("/login").status_code == 200
+    redirect = client.get(
+        "/", headers={"Accept": "text/html"}, follow_redirects=False
+    )
+    assert redirect.status_code == 303
+    assert redirect.headers["location"].startswith("/login")
 
 
 def test_public_endpoints_bypass_dashboard_auth(client, monkeypatch):

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.x"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --no-install-project --group dev --python ${{ matrix.python-version }}
+
+      - name: Verify generated dependency locks
+        run: ./scripts/check-dependencies.sh
+
+      - name: Compile Python sources
+        run: uv run --python ${{ matrix.python-version }} python -m compileall -q app agent tests
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest -q
+
+      - name: Ruff
+        run: uv run --python ${{ matrix.python-version }} ruff check app tests agent
+
+      - name: Bandit (high severity)
+        run: uv run --python ${{ matrix.python-version }} bandit -q -lll -r app agent/vulnscanner_agent.py
+
+      - name: JavaScript syntax
+        run: |
+          node --check app/static/app.js
+          node --check app/static/pages.js
+          node --check app/static/login.js

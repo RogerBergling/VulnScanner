@@ -1,7 +1,7 @@
 [project]
 name = "vulnscanner"
 # Keep in sync with app/__init__.py.
-version = "1.0.0"
+version = "1.1.0"
 description = "Local-first vulnerability scanner and management platform"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,9 +21,20 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "bandit>=1.7,<2.0",
   "pytest>=9.1,<10.0",
+  "ruff>=0.6,<1.0",
 ]
 
 [tool.uv]
 # Keep the lock format stable across developer machines and CI.
 required-version = ">=0.13"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Keep CI focused on real defects. The broader style rules can be adopted
+# incrementally without blocking security fixes.
+select = ["E4", "E7", "E9", "F"]

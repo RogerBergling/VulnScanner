@@ -150,6 +150,14 @@
   // ---------------------------------------------------------------------------
   // API client
   // ---------------------------------------------------------------------------
+  function csrfToken() {
+    const prefix = 'vs_csrf=';
+    const part = document.cookie.split('; ').find(function (item) {
+      return item.indexOf(prefix) === 0;
+    });
+    return part ? decodeURIComponent(part.slice(prefix.length)) : '';
+  }
+
   async function api(path, options) {
     const opts = Object.assign({}, options || {});
     const headers = Object.assign({ Accept: 'application/json' }, opts.headers || {});
@@ -157,12 +165,22 @@
       opts.body = JSON.stringify(opts.body);
       headers['Content-Type'] = 'application/json';
     }
+    const method = String(opts.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const token = csrfToken();
+      if (token) headers['X-CSRF-Token'] = token;
+    }
     opts.headers = headers;
     let response;
     try {
       response = await fetch('/api' + path, opts);
     } catch (networkError) {
       throw new Error('Cannot reach the VulnScanner server. Is it still running?');
+    }
+    if (response.status === 401 && location.pathname !== '/login') {
+      const target = location.pathname + location.hash;
+      location.assign('/login?next=' + encodeURIComponent(target));
+      throw new Error('Your session has expired. Sign in again.');
     }
     const type = response.headers.get('content-type') || '';
     let body = null;
@@ -353,6 +371,8 @@
       else if (page === 'ad') await renderAd(view);
       else if (page === 'server') await renderServer(view);
       else if (page === 'settings') await renderSettings(view);
+      else if (page === 'inventory') await renderInventory(view);
+      else if (page === 'audit') await renderAudit(view);
       else if (page === 'help') await renderHelp(view);
       else {
         view.innerHTML = emptyHtml('Page not found', 'The requested page does not exist.', '<a class="btn" href="#/dashboard">Back to dashboard</a>');
@@ -380,6 +400,13 @@
 
   async function init() {
     $('#top-new-scan').addEventListener('click', function () { openNewScan({}); });
+    const logoutButton = $('#logout-btn');
+    if (logoutButton) {
+      logoutButton.addEventListener('click', async function () {
+        try { await post('/auth/logout', {}); } catch (ignore) { /* clear locally anyway */ }
+        location.assign('/login');
+      });
+    }
     window.addEventListener('hashchange', router);
     try {
       const health = await get('/health');
@@ -2417,10 +2444,11 @@
     const healthy = data.status === 'ok';
     const toolRows = ['nmap', 'nuclei', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].map(function (name) {
       const tool = tools[name] || { available: false, path: '', version: '' };
+      const policy = tool.policy_status === 'outdated' ? ' <span class="badge sev-high" title="Minimum ' + esc(tool.minimum_version) + '">outdated</span>' : '';
       return '<div class="tool-row"><span class="tool-name">' + esc(name) + '</span>' +
         '<span class="badge ' + (tool.available ? 'sev-info' : 'sev-none') + '">' + (tool.available ? 'available' : 'not found') + '</span>' +
         '<span class="tool-path" title="' + esc(tool.path) + '">' + esc(tool.path || 'Install it or set the path in .env') + '</span>' +
-        '<span class="tool-version">' + esc(tool.version || '') + '</span></div>';
+        '<span class="tool-version">' + esc(tool.version || '') + policy + '</span></div>';
     }).join('');
     const checkRows = checks.map(function (check) {
       return '<div class="health-check"><span class="health-mark ' + esc(check.status) + '"></span>' +
@@ -2468,6 +2496,7 @@
           '<div class="kv"><span>Version</span><span>' + esc(data.product) + ' ' + esc(data.version) + '</span></div>' +
           '<div class="kv"><span>Bind address</span><span class="mono">' + esc(fmtHostPort(process.host, process.port)) + '</span></div>' +
           '<div class="kv"><span>Dashboard auth</span><span>' + (process.auth_enabled ? 'enabled (' + esc(process.admin_user) + ')' : 'disabled') + '</span></div>' +
+          '<div class="kv"><span>Authenticator MFA</span><span>' + (process.mfa_enabled ? 'enabled' : 'not enrolled') + '</span></div>' +
           '<div class="kv"><span>Process</span><span class="mono">pid ' + num(process.pid) + '</span></div>' +
           '<div class="kv"><span>Python</span><span>' + esc(process.python) + '</span></div>' +
           '<div class="kv"><span>Host platform</span><span>' + esc(process.platform) + '</span></div>' +
@@ -2524,7 +2553,10 @@
         '<div class="kv"><span>Restore source</span><span class="mono">' + esc(data.last_restore_source || '—') + '</span></div>' +
         '<div class="kv"><span>Safety backup</span><span class="mono">' + esc(data.last_restore_safety_backup || '—') + '</span></div>' +
         (data.last_restore_error ? '<div class="kv danger-text"><span>Last error</span><span>' + esc(data.last_restore_error) + '</span></div>' : '') +
-        '<div class="row-actions" style="margin-top:14px"><button class="btn btn-primary" data-action="restore-db">Restore database</button></div>' +
+        '<div class="row-actions" style="margin-top:14px">' +
+          '<button class="btn" data-action="inspect-backup">Inspect backup</button>' +
+          '<button class="btn btn-primary" data-action="restore-db">Restore database</button></div>' +
+        '<div id="restore-inspect-result" class="muted small" style="margin-top:8px"></div>' +
       '</div></section>' +
       '<section class="panel"><div class="panel-head"><h2>Optional command-line tools</h2><span class="spacer"></span>' +
         '<span class="muted small">Failures never abort a scan; built-in checks remain available.</span></div>' +
@@ -2558,6 +2590,27 @@
             toast('Database backed up to ' + result.path + ' (' + bytes(result.size) + ')');
             router();
           } catch (error) { toast(errorText(error), 'error'); }
+        });
+        return;
+      }
+      if (name === 'inspect-backup') {
+        const pathInput = $('#restore-path');
+        const modeInput = $('#restore-mode');
+        const path = pathInput ? pathInput.value.trim() : '';
+        const mode = modeInput ? modeInput.value : 'all';
+        if (!path) { toast('Enter the absolute path to a backup file', 'error'); return; }
+        runWithButton(action, async function () {
+          try {
+            const info = await get('/server/database/inspect' + queryString({ path: path, mode: mode }));
+            const missing = (info.missing_optional || []).length ? ' Missing optional tables: ' + info.missing_optional.join(', ') + '.' : '';
+            $('#restore-inspect-result').textContent =
+              'Source schema ' + info.source_version + ' / current ' + info.current_version +
+              (info.upgrade_required ? ' · upgrade required before restore.' : ' · compatible.') + missing;
+            toast(info.upgrade_required ? 'Backup is compatible and will be upgraded' : 'Backup is compatible');
+          } catch (error) {
+            $('#restore-inspect-result').textContent = errorText(error);
+            toast(errorText(error), 'error');
+          }
         });
         return;
       }
@@ -2773,12 +2826,13 @@
     const toolRows = ['nmap', 'nuclei', 'testssl', 'trivy', 'subfinder', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].map(function (name) {
       const tool = tools[name] || { available: false, path: '', version: '' };
       const configured = toolPaths[name] || '';
+      const policy = tool.policy_status === 'outdated' ? ' <span class="badge sev-high" title="Minimum ' + esc(tool.minimum_version) + '">outdated</span>' : '';
       return '<div class="tool-row"><span class="tool-name">' + esc(name) + '</span>' +
         '<span class="badge ' + (tool.available ? 'sev-info' : 'sev-none') + '">' + (tool.available ? 'available' : 'not found') + '</span>' +
         '<input class="input mono" id="tool-path-' + esc(name) + '" value="' + esc(configured) + '" spellcheck="false" autocomplete="off" ' +
           'style="flex:1;min-width:180px;font-size:11.5px;padding:5px 8px" placeholder="' +
           esc(tool.path || 'Auto-detect from PATH') + '" title="Absolute path; leave empty to search PATH">' +
-        '<span class="tool-version">' + esc(tool.version || '') + '</span></div>';
+        '<span class="tool-version">' + esc(tool.version || '') + policy + '</span></div>';
     }).join('');
     let wordlist = null;
     try { wordlist = await get('/settings/wordlist'); }
@@ -2804,20 +2858,24 @@
     const smtp = settings.smtp || {};
     const notify = settings.notify_default || {};
     const limits = settings.limits || {};
+    const mfa = settings.mfa || {};
     const notificationsPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Email and notifications</h2></div><div class="panel-body">' +
       '<p class="muted small" style="margin-top:0">SMTP credentials and default notification targets. Schedule-specific addresses override these defaults. The SMTP password is encrypted at rest and is never returned by the API.</p>' +
       '<div class="form-grid">' +
         '<label class="field"><span>SMTP host</span><input class="input mono" id="set-smtp-host" value="' + esc(smtp.host || '') + '" placeholder="smtp.example.com" autocomplete="off"></label>' +
         '<label class="field"><span>SMTP port</span><input class="input mono" id="set-smtp-port" type="number" min="1" max="65535" value="' + esc(smtp.port || '587') + '"></label>' +
         '<label class="field"><span>SMTP username</span><input class="input" id="set-smtp-user" value="' + esc(smtp.user || '') + '" placeholder="scanner@example.com" autocomplete="off"></label>' +
-        '<label class="field"><span>SMTP password</span><input class="input" id="set-smtp-password" type="password" placeholder="Leave blank to keep current" autocomplete="new-password"></label>' +
+        '<label class="field"><span>SMTP password</span><input class="input" id="set-smtp-password" type="password" placeholder="' + (smtp.password_set ? 'Stored; leave blank to keep current' : 'Leave blank to keep current') + '" autocomplete="new-password"></label>' +
         '<label class="field"><span>From address</span><input class="input" id="set-smtp-from" value="' + esc(smtp.from || '') + '" placeholder="scanner@example.com" autocomplete="off"></label>' +
         '<label class="field"><span>Default notification email</span><input class="input" id="set-notify-email" value="' + esc(notify.email || '') + '" placeholder="soc@example.com" autocomplete="off"></label>' +
         '<label class="field full"><span>Default webhook URL</span><input class="input mono" id="set-notify-webhook" value="' + esc(notify.webhook || '') + '" placeholder="https://hooks.example.com/vulnscanner" autocomplete="off"></label>' +
       '</div>' +
       '<label class="check" style="margin-top:8px"><input type="checkbox" id="clear-smtp-password"><span>Clear the stored SMTP password</span></label>' +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-notifications">Save notification settings</button>' +
+      '<button class="btn" id="test-email">Send test email</button>' +
+      '<button class="btn" id="test-webhook">Send test webhook</button>' +
       '<span class="muted small">Notification failures are logged and do not fail a scan.</span></div>' +
+      '<p class="muted small" style="margin-top:8px">Test buttons use the saved SMTP/webhook configuration. Save changes first. Webhook destinations are SSRF-validated; private addresses require the explicit override under Advanced runtime.</p>' +
     '</div></section>';
 
     const guardrailsPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Scan guardrails</h2></div><div class="panel-body">' +
@@ -2836,22 +2894,56 @@
     '</div></section>';
 
     const advancedPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Advanced runtime</h2></div><div class="panel-body">' +
-      '<p class="muted small" style="margin-top:0">Deployment-level values are stored in <span class="mono">.env</span> for the launcher. Scan workers and the external-API master switch require a restart. Storage locations and the credential key are intentionally read-only here; changing them needs a planned data migration.</p>' +
+      '<p class="muted small" style="margin-top:0">Deployment-level values are stored in <span class="mono">' + esc(settings.env_file_path || '.env') + '</span> for the launcher. Scan workers, the external-API master switch and listener changes require a restart.</p>' +
       '<div class="kv"><span>Data directory</span><span class="mono">' + esc(settings.data_dir || '') + '</span></div>' +
       '<div class="kv"><span>Environment file</span><span class="mono">' + esc(settings.env_file_path || '') + '</span></div>' +
       '<div class="kv"><span>Database file</span><span class="mono">' + esc(settings.database_path || '') + '</span></div>' +
       '<div class="kv"><span>Credential key</span><span>' + (settings.credential_key_configured ? 'configured' : 'not found') + ' · <span class="mono">' + esc(settings.credential_key_path || '') + '</span></span></div>' +
+      '<div class="form-section"><h3>Storage location</h3>' +
+        '<div class="form-grid">' +
+          '<label class="field full"><span>Data directory <span class="muted">(absolute path)</span></span><input class="input mono" id="storage-data-dir" value="' + esc(settings.data_dir || '') + '" spellcheck="false" autocomplete="off"></label>' +
+          '<label class="field full"><span>Database file <span class="muted">(absolute .db path; empty uses &lt;data directory&gt;/vulnscanner.db)</span></span><input class="input mono" id="storage-db-path" value="' + esc(settings.database_path || '') + '" spellcheck="false" autocomplete="off"></label>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">' +
+          '<button class="btn" id="validate-storage">Validate paths</button>' +
+          '<button class="btn btn-danger" id="relocate-storage">Relocate storage…</button>' +
+          '<span class="muted small" id="storage-result">A safety backup is created before any file is moved. The old location is never deleted.</span>' +
+        '</div>' +
+        '<p class="muted small" style="margin-top:8px">Relocation copies the live database with SQLite\'s online backup API, copies the credential key and supporting directories, verifies integrity, updates the environment file and switches the running process. Restart VulnScanner afterwards so certificate and launcher paths are fully consistent.</p>' +
+      '</div>' +
       '<div class="form-grid" style="margin-top:12px">' +
         '<label class="field"><span>Scan workers</span><input class="input" id="adv-scan-workers" type="number" min="1" max="32" value="' + num(settings.scan_workers_saved) + '"><span class="hint">Active: ' + num(settings.scan_workers) + ' · saved: ' + num(settings.scan_workers_saved) + '</span></label>' +
         '<label class="field"><span>Subdomain wordlist path</span><input class="input mono" id="adv-wordlist-path" value="' + esc(settings.wordlist_path || '') + '" placeholder="Default under the data directory"></label>' +
         '<label class="field"><span>SSH known_hosts file</span><input class="input mono" id="adv-known-hosts" value="' + esc(settings.ssh_known_hosts || '') + '" placeholder="Empty disables host-key verification"></label>' +
         '<label class="field full"><span>SecLists download URL</span><input class="input mono" id="adv-seclists-url" value="' + esc(settings.seclists_download_url || '') + '"></label>' +
+        '<label class="field"><span>Session lifetime (hours)</span><input class="input" id="adv-session-ttl" type="number" min="1" max="168" value="' + num(settings.session_ttl_hours) + '"></label>' +
+        '<label class="field"><span>Session idle timeout (minutes)</span><input class="input" id="adv-session-idle" type="number" min="5" max="1440" value="' + num(settings.session_idle_minutes) + '"></label>' +
       '</div>' +
+      switchRow('adv-trust-proxy', 'Trust reverse-proxy headers',
+        'Trust X-Forwarded-For and X-Forwarded-Proto. Enable only when VulnScanner is reachable exclusively through a trusted TLS proxy.', settings.trust_proxy) +
       switchRow('adv-external-master', 'Deployment external API master switch',
         'Process-level switch for all outbound integrations. The per-scan Allow external APIs setting still applies. Restart required.', settings.external_api_master_saved) +
       '<div class="muted small" style="margin-top:4px">Active process: ' + (settings.external_api_master ? 'enabled' : 'disabled') + '</div>' +
+      switchRow('adv-allow-private', 'Allow private-network outbound URLs',
+        'Permit webhooks and SecLists downloads to resolve to loopback, RFC1918, link-local or reserved addresses. Leave off unless an internal service requires it. This weakens SSRF protection.', settings.allow_private_outbound) +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-advanced">Save advanced settings</button>' +
-      '<span class="muted small">Wordlist, known_hosts and SecLists URL apply immediately; worker and master-switch changes need a restart.</span></div>' +
+      '<span class="muted small">Wordlist, known_hosts, SecLists URL, session settings, proxy trust and the private-network switch apply immediately; worker and master-switch changes need a restart.</span></div>' +
+    '</div></section>';
+
+    const policy = settings.tool_policy || { enabled: false, warn_only: true, minimums: {} };
+    const policyInputs = Object.keys(policy.minimums || {}).sort().map(function (name) {
+      return '<label class="field"><span>' + esc(name) + ' minimum version</span>' +
+        '<input class="input mono" id="policy-min-' + esc(name) + '" value="' + esc(policy.minimums[name] || '') + '" spellcheck="false"></label>';
+    }).join('');
+    const toolPolicyPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Tool version policy</h2></div><div class="panel-body">' +
+      '<p class="muted small" style="margin-top:0">Optional policy for externally installed command-line tools. Python dependencies are locked; Nmap, Nuclei, Trivy and similar tools are installed by the operator. Warn-only mode records a scan event; strict mode refuses to start a scan with an outdated tool.</p>' +
+      switchRow('policy-enabled', 'Enable tool version policy',
+        'Compare installed optional tool versions with the configured minimums.', policy.enabled) +
+      switchRow('policy-warn-only', 'Warn only (do not block scans)',
+        'When disabled, a scan that needs an outdated tool fails before it starts.', policy.warn_only) +
+      '<div class="form-grid" style="margin-top:12px">' + policyInputs + '</div>' +
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-tool-policy">Save tool policy</button>' +
+      '<span class="muted small">Version strings are parsed numerically; unknown or unparseable versions are reported as unknown.</span></div>' +
     '</div></section>';
 
     view.innerHTML =
@@ -2920,6 +3012,7 @@
           '<button class="btn btn-primary" id="save-tool-paths">Save tool paths</button>' +
           '<span class="muted small">Absolute paths are stored in the database and mirrored to <span class="mono">.env</span>, then applied immediately. Leave a field empty to search <span class="mono">PATH</span>.</span></div>' +
         '</div></section>' +
+        toolPolicyPanel +
         wordlistPanel +
         advancedPanel +
         '<section class="panel"><div class="panel-head"><h2>Local data</h2></div><div class="panel-body">' +
@@ -2944,16 +3037,36 @@
           '<button class="btn btn-sm" id="save-bind" style="margin-top:6px">Save bind address</button>' +
           '<p class="muted small" style="margin-top:6px">Stored in the database and mirrored to <span class="mono">.env</span>; applied after restarting VulnScanner with <span class="mono">./run.sh</span> or <span class="mono">run.bat</span>. ' +
           'Keep <span class="mono">127.0.0.1</span> for local-only access; bind to <span class="mono">0.0.0.0</span> or <span class="mono">::</span> only behind a trusted network or TLS reverse proxy.</p>' +
-          '<div class="kv"><span>Dashboard auth</span><span>' + (settings.admin_auth_enabled ? 'HTTP Basic auth is enabled' : 'Not enabled') + '</span></div>' +
+          '<div class="kv"><span>Dashboard auth</span><span>' + (settings.admin_auth_enabled ? 'Session login is enabled' : 'Not enabled') + '</span></div>' +
+          '<div class="kv"><span>Session lifetime</span><span>' + num(settings.session_ttl_hours) + ' hours · idle timeout ' + num(settings.session_idle_minutes) + ' minutes</span></div>' +
           '<label class="field full" style="margin-top:8px"><span>Admin username</span>' +
           '<input class="input mono" id="admin-user-input" value="' + esc(settings.admin_user || 'admin') + '" maxlength="64" autocomplete="off" spellcheck="false"></label>' +
           '<button class="btn btn-sm" id="save-admin-user" style="margin-top:6px">Save admin username</button>' +
+          (settings.admin_auth_enabled ? '<label class="field full" style="margin-top:8px"><span>Current password <span class="muted">(required to change the password)</span></span>' +
+            '<input class="input" type="password" id="admin-current-password" autocomplete="current-password" maxlength="128"></label>' : '') +
           '<label class="field full" style="margin-top:8px"><span>Admin password</span>' +
           '<input class="input" type="password" id="admin-password-input" placeholder="At least 12 characters; leave empty to disable" ' +
           'minlength="12" maxlength="128" autocomplete="new-password" spellcheck="false"></label>' +
           '<button class="btn btn-sm" id="save-admin-pass" style="margin-top:6px">Save admin password</button>' +
           '<p class="muted small" style="margin-top:6px">Stored as a salted hash in the database and applied immediately. ' +
           'Use letters, digits, and <span class="mono">. _ ~ @ + = : , / -</span>.</p>' +
+          (settings.legacy_password_present ? '<div class="info-banner info-banner-warn" style="margin:10px 0"><strong>Legacy plaintext password detected.</strong> ' +
+            'A <span class="mono">VS_ADMIN_PASSWORD</span> value remains in the environment file. Remove it now; the database hash is authoritative.</div>' +
+            '<button class="btn btn-sm" id="cleanup-legacy-password">Remove legacy password</button>' : '') +
+          '<div class="form-section"><h3>Authenticator MFA</h3>' +
+            '<div class="kv"><span>Status</span><span>' + (mfa.enabled ? '<span class="badge sev-info">enabled</span>' : '<span class="badge sev-none">not enrolled</span>') + '</span></div>' +
+            '<div class="kv"><span>Recovery codes</span><span>' + (mfa.enabled ? num(mfa.recovery_codes_remaining) + ' remaining' : '—') + '</span></div>' +
+            '<p class="muted small" style="margin-top:8px">Use a standard TOTP authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Bitwarden, etc.). ' +
+            'MFA is required for browser sessions and for Basic-auth API clients, which must send <span class="mono">X-VS-MFA</span> or <span class="mono">X-VS-Recovery-Code</span>.</p>' +
+            '<div class="row-actions" style="justify-content:flex-start;flex-wrap:wrap;margin-top:10px">' +
+              (mfa.enabled
+                ? '<button class="btn btn-sm" id="mfa-regenerate">Regenerate recovery codes</button>' +
+                  '<button class="btn btn-sm btn-danger" id="mfa-disable">Disable MFA</button>'
+                : (settings.admin_auth_enabled
+                  ? '<button class="btn btn-sm btn-primary" id="mfa-setup">Set up authenticator</button>'
+                  : '<span class="muted small">Set a dashboard password first.</span>')) +
+            '</div>' +
+          '</div>' +
           '<div class="kv"><span>Agent tokens</span><span>SHA-256 hashed at rest</span></div>' +
           '<div class="kv"><span>Enrollment tokens</span><span>One-time use, 1–168 hour expiry</span></div>' +
           '<p class="modal-note" style="margin-top:12px">Bind to <span class="mono">0.0.0.0</span> only behind a trusted network or reverse proxy with TLS. ' +
@@ -2993,6 +3106,42 @@
           else if (password) payload.smtp_password = password;
           await patch('/settings', payload);
           toast('Notification settings saved');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#test-email').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const email = $('#set-notify-email').value.trim();
+          const result = await post('/settings/notifications/test', { channel: 'email', email: email });
+          toast(result.detail || 'Test email delivered');
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#test-webhook').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const webhook = $('#set-notify-webhook').value.trim();
+          const result = await post('/settings/notifications/test', { channel: 'webhook', webhook: webhook });
+          toast(result.detail || 'Test webhook delivered');
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#save-tool-policy').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const minimums = {};
+          Object.keys(policy.minimums || {}).forEach(function (name) {
+            const input = $('#policy-min-' + name);
+            if (input) minimums[name] = input.value.trim();
+          });
+          await post('/settings/tool-policy', {
+            enabled: $('#policy-enabled').checked,
+            warn_only: $('#policy-warn-only').checked,
+            minimums: minimums
+          });
+          toast('Tool version policy saved');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });
@@ -3037,8 +3186,12 @@
             external_api_master: $('#adv-external-master').checked,
             ssh_known_hosts: $('#adv-known-hosts').value.trim(),
             wordlist_path: $('#adv-wordlist-path').value.trim(),
-            seclists_subdomain_url: $('#adv-seclists-url').value.trim()
+            seclists_subdomain_url: $('#adv-seclists-url').value.trim(),
+            session_ttl_hours: Number($('#adv-session-ttl').value),
+            session_idle_minutes: Number($('#adv-session-idle').value),
+            trust_proxy: $('#adv-trust-proxy').checked
           });
+          await patch('/settings', { allow_private_outbound: $('#adv-allow-private').checked });
           toast(result.restart_required ? 'Advanced settings saved. Restart VulnScanner to apply worker/master-switch changes.' : 'Advanced settings saved');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
@@ -3089,10 +3242,227 @@
           if (!pw && !(await confirmAction('Disable dashboard authentication? Anyone who can reach the server will have full access.', 'Disable auth'))) {
             return;
           }
-          const result = await post('/settings/admin-password', { password: pw });
+          const current = $('#admin-current-password');
+          const result = await post('/settings/admin-password', {
+            password: pw,
+            current_password: current ? current.value : undefined
+          });
           input.value = '';
+          if (current) current.value = '';
           toast(result.set ? 'Admin password updated' : 'Dashboard authentication disabled');
           router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    function showRecoveryCodes(codes) {
+      openModal({
+        title: 'Save your recovery codes',
+        content: '<p class="muted small" style="margin-top:0">Each code can be used once if you lose access to your authenticator. Store them in a password manager or offline safe. They will not be shown again.</p>' +
+          '<pre class="audit-detail" id="recovery-code-list">' + esc((codes || []).join('\n')) + '</pre>' +
+          '<button class="btn btn-sm" id="copy-recovery-codes" style="margin-top:10px">Copy codes</button>',
+        actions: [
+          { label: 'I saved these codes', class: 'btn-primary', onClick: function (ctx) { ctx.close(); router(); } }
+        ],
+        onMount: function (overlay) {
+          const copy = overlay.querySelector('#copy-recovery-codes');
+          if (copy) copy.addEventListener('click', function () {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText((codes || []).join('\n')).then(function () { toast('Recovery codes copied'); }).catch(function () { toast('Copy failed; select the codes manually', 'error'); });
+            } else { toast('Clipboard is unavailable; select the codes manually', 'error'); }
+          });
+        }
+      });
+    }
+
+    const mfaSetup = $('#mfa-setup');
+    if (mfaSetup) mfaSetup.addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const setup = await post('/auth/mfa/setup', {});
+          openModal({
+            title: 'Set up authenticator MFA',
+            content: '<p class="muted small" style="margin-top:0">Add this account to your authenticator app using the key below, then enter the current 6-digit code to confirm.</p>' +
+              '<label class="field full"><span>Manual setup key</span><input class="input mono" id="mfa-secret" readonly value="' + esc(setup.secret) + '"></label>' +
+              '<label class="field full" style="margin-top:8px"><span>otpauth URI <span class="muted">(paste into an authenticator that supports URI import)</span></span>' +
+              '<textarea class="textarea mono" id="mfa-uri" rows="3" readonly>' + esc(setup.otpauth_uri) + '</textarea></label>' +
+              '<label class="field full" style="margin-top:8px"><span>Verification code</span><input class="input mono" id="mfa-enable-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="123456"></label>' +
+              '<div class="form-error" id="mfa-enable-error" role="alert"></div>',
+            actions: [
+              { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+              {
+                label: 'Enable MFA',
+                class: 'btn-primary',
+                onClick: function (ctx) {
+                  runWithButton(ctx.button, async function () {
+                    try {
+                      const result = await post('/auth/mfa/enable', { code: (ctx.card.querySelector('#mfa-enable-code').value || '').trim() });
+                      ctx.close();
+                      showRecoveryCodes(result.recovery_codes || []);
+                    } catch (error) {
+                      const box = ctx.card.querySelector('#mfa-enable-error');
+                      if (box) { box.textContent = errorText(error); box.classList.add('show'); }
+                    }
+                  });
+                }
+              }
+            ]
+          });
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    const mfaDisable = $('#mfa-disable');
+    if (mfaDisable) mfaDisable.addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          openModal({
+            title: 'Disable authenticator MFA',
+            content: '<p class="muted small" style="margin-top:0">Confirm your password and current authenticator or recovery code. All sessions will be signed out.</p>' +
+              '<label class="field full"><span>Current password</span><input class="input" type="password" id="mfa-disable-password" autocomplete="current-password"></label>' +
+              '<label class="field full" style="margin-top:8px"><span>Authenticator code</span><input class="input mono" id="mfa-disable-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>' +
+              '<label class="field full" style="margin-top:8px"><span>Or recovery code</span><input class="input mono" id="mfa-disable-recovery" maxlength="64"></label>',
+            actions: [
+              { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+              {
+                label: 'Disable MFA', class: 'btn-danger',
+                onClick: function (ctx) {
+                  runWithButton(ctx.button, async function () {
+                    try {
+                      await post('/auth/mfa/disable', {
+                        password: ctx.card.querySelector('#mfa-disable-password').value,
+                        code: ctx.card.querySelector('#mfa-disable-code').value.trim(),
+                        recovery_code: ctx.card.querySelector('#mfa-disable-recovery').value.trim()
+                      });
+                      ctx.close();
+                      toast('MFA disabled');
+                      setTimeout(function () { location.assign('/login'); }, 800);
+                    } catch (error) { toast(errorText(error), 'error'); }
+                  });
+                }
+              }
+            ]
+          });
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    const mfaRegenerate = $('#mfa-regenerate');
+    if (mfaRegenerate) mfaRegenerate.addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          openModal({
+            title: 'Regenerate recovery codes',
+            content: '<p class="muted small" style="margin-top:0">Existing recovery codes will stop working immediately.</p>' +
+              '<label class="field full"><span>Current password</span><input class="input" type="password" id="mfa-regen-password" autocomplete="current-password"></label>' +
+              '<label class="field full" style="margin-top:8px"><span>Authenticator code</span><input class="input mono" id="mfa-regen-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>',
+            actions: [
+              { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+              {
+                label: 'Regenerate', class: 'btn-primary',
+                onClick: function (ctx) {
+                  runWithButton(ctx.button, async function () {
+                    try {
+                      const result = await post('/auth/mfa/recovery-codes', {
+                        password: ctx.card.querySelector('#mfa-regen-password').value,
+                        code: ctx.card.querySelector('#mfa-regen-code').value.trim()
+                      });
+                      ctx.close();
+                      showRecoveryCodes(result.recovery_codes || []);
+                    } catch (error) { toast(errorText(error), 'error'); }
+                  });
+                }
+              }
+            ]
+          });
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    const cleanupLegacy = $('#cleanup-legacy-password');
+    if (cleanupLegacy) cleanupLegacy.addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          await post('/settings/legacy-password/cleanup', {});
+          toast('Legacy plaintext password removed');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    const storageDataInput = $('#storage-data-dir');
+    const storageDbInput = $('#storage-db-path');
+    if (storageDataInput && storageDbInput) {
+      const oldData = String(settings.data_dir || '').replace(/[\\/]+$/, '');
+      const oldDb = String(settings.database_path || '');
+      const dbName = oldDb.split(/[\\/]/).pop();
+      let lastData = oldData;
+      storageDataInput.addEventListener('input', function () {
+        const next = storageDataInput.value.trim().replace(/[\\/]+$/, '');
+        if (storageDbInput.value === lastData + '/' + dbName) {
+          storageDbInput.value = next ? next + '/' + dbName : '';
+        }
+        lastData = next;
+      });
+    }
+    $('#validate-storage').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          const result = await post('/server/storage/validate', {
+            data_dir: $('#storage-data-dir').value.trim(),
+            database_path: $('#storage-db-path').value.trim()
+          });
+          const warnings = (result.warnings || []).join(' ');
+          $('#storage-result').textContent = 'Target is valid: ' + result.database_path + (warnings ? ' · ' + warnings : '');
+          toast('Storage paths are valid');
+        } catch (error) {
+          $('#storage-result').textContent = errorText(error);
+          toast(errorText(error), 'error');
+        }
+      });
+    });
+    $('#relocate-storage').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          openModal({
+            title: 'Relocate database storage',
+            content: '<div class="info-banner info-banner-warn" style="margin:0 0 12px"><strong>This moves the live database.</strong> A safety backup is created first, the database is copied with SQLite\'s online backup API, integrity is verified, and the old location is left untouched. Restart VulnScanner afterwards.</div>' +
+              '<div class="kv"><span>Current data directory</span><span class="mono">' + esc(settings.data_dir) + '</span></div>' +
+              '<div class="kv"><span>New data directory</span><span class="mono">' + esc($('#storage-data-dir').value.trim()) + '</span></div>' +
+              '<div class="kv"><span>New database</span><span class="mono">' + esc($('#storage-db-path').value.trim() || '(default under the new data directory)') + '</span></div>' +
+              '<label class="check" style="margin-top:12px"><input type="checkbox" id="relocate-overwrite"><span>Replace an existing target database (a timestamped copy is kept)</span></label>' +
+              '<label class="field full" style="margin-top:12px"><span>Type <span class="mono">RELOCATE</span> to confirm</span><input class="input mono" id="relocate-confirm" autocomplete="off" spellcheck="false"></label>' +
+              '<div class="form-error" id="relocate-error" role="alert"></div>',
+            actions: [
+              { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+              {
+                label: 'Relocate storage', class: 'btn-danger',
+                onClick: function (ctx) {
+                  runWithButton(ctx.button, async function () {
+                    const confirmation = ctx.card.querySelector('#relocate-confirm').value.trim();
+                    if (confirmation.toUpperCase() !== 'RELOCATE') {
+                      const box = ctx.card.querySelector('#relocate-error');
+                      box.textContent = 'Type RELOCATE exactly to continue.';
+                      box.classList.add('show');
+                      return;
+                    }
+                    try {
+                      const result = await post('/server/storage/relocate', {
+                        data_dir: $('#storage-data-dir').value.trim(),
+                        database_path: $('#storage-db-path').value.trim() || null,
+                        copy_supporting_files: true,
+                        overwrite: ctx.card.querySelector('#relocate-overwrite').checked,
+                        force: false,
+                        confirmation: confirmation
+                      });
+                      ctx.close();
+                      toast(result.message || 'Storage relocated');
+                      setTimeout(function () { router(); }, 1200);
+                    } catch (error) {
+                      const box = ctx.card.querySelector('#relocate-error');
+                      if (box) { box.textContent = errorText(error); box.classList.add('show'); }
+                      toast(errorText(error), 'error');
+                    }
+                  });
+                }
+              }
+            ]
+          });
         } catch (error) { toast(errorText(error), 'error'); }
       });
     });
@@ -3312,6 +3682,31 @@
       index = paragraph(index);
     }
     return html.join('\n');
+  }
+
+  function pageHelpers() {
+    return {
+      $: $, get: get, esc: esc, num: num, fmtDate: fmtDate, fmtShort: fmtShort,
+      statusPill: statusPill, emptyHtml: emptyHtml, loadingHtml: loadingHtml,
+      queryString: queryString, toast: toast, errorText: errorText,
+      openModal: openModal, sevBadge: sevBadge
+    };
+  }
+
+  async function renderInventory(view) {
+    if (!window.VSPages || !window.VSPages.inventory) {
+      view.innerHTML = emptyHtml('Inventory module unavailable', 'Reload the page or check that /static/pages.js is served.');
+      return;
+    }
+    return window.VSPages.inventory(view, pageHelpers());
+  }
+
+  async function renderAudit(view) {
+    if (!window.VSPages || !window.VSPages.audit) {
+      view.innerHTML = emptyHtml('Audit module unavailable', 'Reload the page or check that /static/pages.js is served.');
+      return;
+    }
+    return window.VSPages.audit(view, pageHelpers());
   }
 
   async function renderHelp(view) {

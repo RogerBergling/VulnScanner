@@ -44,34 +44,24 @@ def test_wordlist_parsing_and_persistence(data_dir):
 
 
 def test_download_seclists_wordlist(monkeypatch, data_dir):
-    class Response:
-        closed = False
+    from app.net_guard import FetchResult
 
-        def raise_for_status(self):
-            return None
-
-        def iter_content(self, chunk_size=0):
-            assert chunk_size > 0
-            yield b"www\n"
-            yield b"mail\n# comment\n"
-
-        def close(self):
-            self.closed = True
-
-    response = Response()
-
-    def fake_get(url, timeout=0, stream=False):
+    def fake_get(url, **kwargs):
         assert "SecLists" in url
-        assert timeout == 30
-        assert stream is True
-        return response
+        assert kwargs["timeout"] == 30.0
+        assert kwargs["max_bytes"] > 0
+        return FetchResult(
+            url=url,
+            status_code=200,
+            content=b"www\nmail\n# comment\n",
+            content_type="text/plain",
+        )
 
-    monkeypatch.setattr(subdomains.requests, "get", fake_get)
+    monkeypatch.setattr(subdomains, "safe_get", fake_get)
     info = subdomains.download_seclists_wordlist()
 
     assert info["downloaded"] is True
     assert info["line_count"] == 2
-    assert response.closed is True
     assert subdomains.read_wordlist() == ["www", "mail"]
 
 

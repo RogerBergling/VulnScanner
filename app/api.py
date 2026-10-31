@@ -9,7 +9,6 @@ import platform as os_platform
 import shlex
 import shutil
 import sqlite3
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,18 +69,20 @@ from .credentials import (
     store_scan_credentials,
     update_credential,
 )
+from .audit import record_request
 from .database import (
     ensure_default_group,
     get_db,
     get_setting,
-    get_setting_optional,
     json_dump,
     json_load,
     set_setting,
     transaction,
     utcnow,
 )
+from .envfile import env_safe, upsert_env_entries
 from .jobs import submit_ad_import, submit_agent_result, submit_scan
+from .net_guard import UnsafeURLError, validate_outbound_url
 from .reporting import build_csv, build_html, build_json
 from .schemas import (
     ADImportRequest,
@@ -104,13 +105,13 @@ from .schemas import (
     FindingStatusUpdate,
     GroupCreate,
     GroupUpdate,
+    NotificationTestRequest,
     ScanCreate,
-    DatabaseBackupRequest,
-    DatabaseRestoreRequest,
     RuntimeSettingsUpdate,
     ScheduleCreate,
     ScheduleUpdate,
     SettingsUpdate,
+    ToolPolicyUpdate,
     ToolSettingsUpdate,
     WordlistUpdate,
 )
@@ -129,7 +130,12 @@ from .security import (
     authenticate_agent,
     create_enrollment_token,
     hash_password,
+    legacy_password_in_env_file,
+    mfa_enabled,
+    mfa_status,
+    verify_admin,
 )
+from .tool_policy import DEFAULT_MINIMUMS, get_policy, set_policy
 from .utils import (
     format_duration,
     human_age,
@@ -565,7 +571,7 @@ def get_group(group_id: int) -> dict[str, Any]:
 
 @router.patch("/groups/{group_id}")
 def update_group(group_id: int, payload: GroupUpdate) -> dict[str, Any]:
-    group = _fetch_group(group_id)
+    _fetch_group(group_id)
     updates = {}
     if payload.name is not None:
         updates["name"] = payload.name.strip()
@@ -1756,7 +1762,7 @@ def server_status() -> dict[str, Any]:
     reports_path = reports_dir()
     now = datetime.now(timezone.utc)
     uptime_seconds = max(0, int((now - _SERVER_STARTED_AT).total_seconds()))
-    auth_enabled = bool(os.getenv("VS_ADMIN_PASSWORD"))
+    auth_enabled = admin_auth_enabled()
     db_stats: dict[str, Any] = {
         "path": str(db_path),
         "size": _file_size(db_path),
@@ -1798,7 +1804,10 @@ def server_status() -> dict[str, Any]:
                     (SELECT COUNT(*) FROM agent_jobs WHERE status = 'queued') jobs_queued,
                     (SELECT COUNT(*) FROM agent_jobs
                         WHERE status IN ('running', 'processing')) jobs_running,
-                    (SELECT COUNT(*) FROM agent_jobs WHERE status = 'failed') jobs_failed
+                    (SELECT COUNT(*) FROM agent_jobs WHERE status = 'failed') jobs_failed,
+                    (SELECT COUNT(*) FROM asset_inventory) inventory_entries,
+                    (SELECT COUNT(*) FROM finding_history) finding_history_entries,
+                    (SELECT COUNT(*) FROM audit_log) audit_entries
                 """
             ).fetchone()
             counts = dict(counts_row)
@@ -1838,7 +1847,7 @@ def server_status() -> dict[str, Any]:
         "nuclei_enabled": get_setting("nuclei_enabled", "true") == "true",
         "nmap_enabled": get_setting("nmap_enabled", "true") == "true",
     }
-    tools = tool_status()
+    tools = _tools_with_policy()
     data_writable = os.access(db_path.parent, os.W_OK)
     reports_writable = os.access(reports_path, os.W_OK)
     checks = [
@@ -1868,8 +1877,13 @@ def server_status() -> dict[str, Any]:
             "label": "Dashboard authentication",
             "status": "ok" if auth_enabled else "warning",
             "detail": (
-                "HTTP Basic authentication is enabled"
-                if auth_enabled else "VS_ADMIN_PASSWORD is not set; keep the bind address on loopback"
+                "Session authentication and MFA are enabled"
+                if auth_enabled and mfa_enabled()
+                else (
+                    "Session authentication is enabled; MFA is not enrolled"
+                    if auth_enabled
+                    else "No admin password is set; keep the bind address on loopback"
+                )
             ),
         },
         {
@@ -1908,12 +1922,15 @@ def server_status() -> dict[str, Any]:
             "host": HOST,
             "port": PORT,
             "auth_enabled": auth_enabled,
-            "admin_user": os.getenv("VS_ADMIN_USER", "admin") if auth_enabled else "",
+            "mfa_enabled": mfa_enabled(),
+            "session_ttl_hours": _session_hours(),
+            "session_idle_minutes": _session_idle_minutes(),
+            "admin_user": admin_user() if auth_enabled else "",
             "external_api_environment": ENABLE_EXTERNAL_APIS,
         },
         "database": db_stats,
         "paths": {
-            "data_dir": str(db_path.parent),
+            "data_dir": str(data_dir()),
             "reports_dir": str(reports_path),
             "backup_dir": str(reports_path / "backups"),
             "reports_count": report_count,
@@ -1952,96 +1969,29 @@ def server_status() -> dict[str, Any]:
     }
 
 
-@router.get("/server/database/backups")
-def database_backups(directory: str | None = None) -> dict[str, Any]:
-    from .backup import list_backups
-
-    try:
-        return list_backups(directory)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/server/database/backup", status_code=201)
-def backup_database(
-    payload: DatabaseBackupRequest | None = None,
-) -> dict[str, Any]:
-    from .backup import create_backup
-
-    try:
-        return create_backup(
-            payload.destination if payload else None,
-            overwrite=payload.overwrite if payload else False,
-        )
-    except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (OSError, sqlite3.Error) as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Database backup failed: {exc}"
-        ) from exc
-
-
-@router.post("/server/database/restore")
-def restore_database_endpoint(payload: DatabaseRestoreRequest) -> dict[str, Any]:
-    from .backup import restore_database
-    from .scans import recover_interrupted_scans
-
-    before = (
-        get_setting("bind_host", os.getenv("VS_HOST", HOST)),
-        get_setting("bind_port", os.getenv("VS_PORT", str(PORT))),
-        get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false"),
-    )
-    try:
-        result = restore_database(payload.path, payload.mode)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (OSError, sqlite3.Error) as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Database restore failed: {exc}"
-        ) from exc
-
-    if payload.mode in {"all", "settings"}:
-        try:
-            _sync_env_from_settings()
-        except Exception as exc:
-            result["env_sync_error"] = str(exc)
-    if payload.mode in {"all", "scans"}:
-        try:
-            recover_interrupted_scans()
-        except Exception as exc:
-            result["recovery_error"] = str(exc)
-    after = (
-        get_setting("bind_host", os.getenv("VS_HOST", HOST)),
-        get_setting("bind_port", os.getenv("VS_PORT", str(PORT))),
-        get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false"),
-    )
-    result["restart_required"] = before != after
-    return result
-
-
-@router.post("/server/database/vacuum")
-def vacuum_database() -> dict[str, Any]:
-    db_path = database_path()
-    before = _file_size(db_path)
-    try:
-        with get_db() as conn:
-            conn.execute("VACUUM")
-    except sqlite3.Error as exc:
-        raise HTTPException(status_code=409, detail=f"Database maintenance failed: {exc}") from exc
-    after = _file_size(db_path)
-    return {
-        "ok": True,
-        "before": before,
-        "after": after,
-        "saved": max(0, before - after),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Settings and imports
 # ---------------------------------------------------------------------------
+
+def _tools_with_policy() -> dict[str, Any]:
+    from .tools_check import check_external_tools
+
+    return check_external_tools()
+
+
+def _session_hours() -> int:
+    try:
+        return max(1, min(168, int(os.getenv("VS_SESSION_TTL_HOURS", "12"))))
+    except ValueError:
+        return 12
+
+
+def _session_idle_minutes() -> int:
+    try:
+        return max(5, min(1440, int(os.getenv("VS_SESSION_IDLE_MINUTES", "30"))))
+    except ValueError:
+        return 30
+
 
 @router.get("/settings")
 def get_settings() -> dict[str, Any]:
@@ -2078,6 +2028,15 @@ def get_settings() -> dict[str, Any]:
         "external_apis_available": ENABLE_EXTERNAL_APIS,
         "admin_auth_enabled": admin_auth_enabled(),
         "admin_user": admin_user(),
+        "mfa_enabled": mfa_enabled(),
+        "mfa": mfa_status(),
+        "legacy_password_present": legacy_password_in_env_file(),
+        "session_ttl_hours": _session_hours(),
+        "session_idle_minutes": _session_idle_minutes(),
+        "trust_proxy": os.getenv("VS_TRUST_PROXY", "false").strip().lower()
+        in {"1", "true", "yes", "on"},
+        "allow_private_outbound": get_setting("allow_private_outbound", "false") == "true",
+        "tool_policy": get_policy(),
         "bind_host": configured_bind_host,
         "bind_port": configured_bind_port,
         "active_bind_host": HOST,
@@ -2106,7 +2065,7 @@ def get_settings() -> dict[str, Any]:
         "external_api_master": ENABLE_EXTERNAL_APIS,
         "external_api_master_saved": external_api_master_saved,
         "ssh_known_hosts": ssh_known_hosts_path(),
-        "tools": tool_status(),
+        "tools": _tools_with_policy(),
         "tool_paths": dict(TOOL_PATHS),
         "wordlist_path": str(subfinder_wordlist_path()),
         "seclists_url": SECLISTS_REPOSITORY_URL,
@@ -2125,6 +2084,7 @@ def get_settings() -> dict[str, Any]:
             "port": get_setting("smtp_port", "587"),
             "user": get_setting("smtp_user", ""),
             "from": get_setting("smtp_from", ""),
+            "password_set": bool(get_setting("smtp_password", "")),
         },
         "notify_default": {
             "email": get_setting("notify_email_default", ""),
@@ -2156,17 +2116,40 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
         if value is not None:
             set_setting(key, "true" if value else "false")
 
+    if "allow_private_outbound" in updates and updates["allow_private_outbound"] is not None:
+        set_setting(
+            "allow_private_outbound",
+            "true" if updates["allow_private_outbound"] else "false",
+        )
+
     for key in (
         "smtp_host",
         "smtp_port",
         "smtp_user",
         "smtp_from",
         "notify_email_default",
-        "notify_webhook_default",
     ):
         value = updates.get(key)
         if value is not None:
             set_setting(key, str(value))
+
+    if "notify_webhook_default" in updates and updates["notify_webhook_default"] is not None:
+        webhook = str(updates["notify_webhook_default"]).strip()
+        if webhook:
+            allow_private = (
+                get_setting("allow_private_outbound", "false") == "true"
+                or bool(updates.get("allow_private_outbound"))
+            )
+            try:
+                validate_outbound_url(
+                    webhook,
+                    allow_private=allow_private,
+                    resolve=False,
+                    purpose="Notification webhook",
+                )
+            except UnsafeURLError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        set_setting("notify_webhook_default", webhook)
 
     # SMTP passwords are secrets, not ordinary preferences. Encrypt them with
     # the same Fernet key used for target credentials. An empty value clears the
@@ -2538,127 +2521,146 @@ def cert_upload(
     }
 
 
-def _is_env_entry(line: str, key: str) -> bool:
-    stripped = line.strip()
-    if stripped.startswith("#"):
-        stripped = stripped[1:].lstrip()
-    return stripped.startswith(key + "=")
-
-
-def _upsert_env_entries(path: Path, entries: dict[str, str]) -> None:
-    """Add or replace ``KEY=VALUE`` entries while preserving other lines."""
-    lines: list[str] = []
-    if path.exists():
-        lines = path.read_text(encoding="utf-8").splitlines()
-    for key, value in entries.items():
-        entry = f"{key}={value}"
-        new_lines: list[str] = []
-        found = False
-        for line in lines:
-            if _is_env_entry(line, key):
-                if not found:
-                    new_lines.append(entry)
-                    found = True
-                # Drop duplicate entries for the same key.
-            else:
-                new_lines.append(line)
-        if not found:
-            new_lines.append(entry)
-        lines = new_lines
-    _write_env_file(path, lines)
-
-
-def _sync_env_from_settings() -> None:
-    """Write database-backed runtime settings to .env for the launcher.
-
-    The database is authoritative. The .env file remains the interface used by
-    ``run.sh``/``run.bat`` for the listener and by older installations for tool
-    paths, so it is refreshed after a settings restore.
-    """
-    bind_host = get_setting("bind_host", os.getenv("VS_HOST", HOST))
-    bind_port = get_setting("bind_port", os.getenv("VS_PORT", str(PORT)))
-    ssl_setting = get_setting("ssl_enabled", "true" if _ACTIVE_SSL else "false")
-    ssl_text = (
-        "true"
-        if ssl_setting.strip().lower() in {"1", "true", "yes", "on"}
-        else "false"
-    )
-    entries = {
-        "VS_HOST": bind_host,
-        "VS_PORT": str(bind_port),
-        "VS_SSL": ssl_text,
-        "VS_ADMIN_USER": get_setting(
-            "admin_user", os.getenv("VS_ADMIN_USER", "admin")
-        ),
-        "VS_ADMIN_PASSWORD": "",
-    }
-
-    if get_setting_optional("tool_paths") is None:
-        for name, env_name in TOOL_ENV_VARS.items():
-            entries[env_name] = ""
-            TOOL_PATHS[name] = ""
-            os.environ.pop(env_name, None)
-    else:
-        for name, env_name in TOOL_ENV_VARS.items():
-            entries[env_name] = TOOL_PATHS.get(name, "")
-
-    _upsert_env_entries(env_file_path(BASE_DIR), entries)
-    os.environ["VS_HOST"] = bind_host
-    os.environ["VS_PORT"] = str(bind_port)
-    os.environ["VS_SSL"] = ssl_text
-    os.environ["VS_ADMIN_USER"] = entries["VS_ADMIN_USER"]
-    os.environ.pop("VS_ADMIN_PASSWORD", None)
-
-
-def _write_env_file(path: Path, lines: list[str]) -> None:
-    """Atomically replace ``.env`` with mode 0600."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = "\n".join(lines).rstrip("\n") + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=".env.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.chmod(temp_name, 0o600)
-        except OSError:
-            pass
-        os.replace(temp_name, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    except BaseException:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
-
-
 @router.post("/settings/admin-password")
-def set_admin_password(payload: AdminPasswordUpdate) -> dict[str, Any]:
-    """Set or disable the dashboard password, stored as a hash in SQLite."""
+def set_admin_password(payload: AdminPasswordUpdate, request: Request) -> dict[str, Any]:
+    """Set or disable the dashboard password, stored as a hash in SQLite.
+
+    Changing an existing password requires the current password.  This stops a
+    hijacked session from locking the legitimate administrator out.
+    """
+    auth = getattr(request.state, "auth", None)
+    basic_already_verified = bool(auth and auth.method == "basic")
+    if admin_auth_enabled() and admin_user() and not basic_already_verified:
+        if not payload.current_password or not verify_admin(
+            admin_user(), payload.current_password
+        ):
+            record_request(
+                request,
+                "auth.password.change_denied",
+                category="auth",
+                outcome="failure",
+                detail="Current password missing or incorrect",
+            )
+            raise HTTPException(status_code=403, detail="Current password is incorrect")
     set_setting(
         "admin_password_hash",
         hash_password(payload.password) if payload.password else "",
     )
     # The database is authoritative. Clear the legacy plaintext environment
     # value so disabling authentication cannot fall back to an old password.
-    _upsert_env_entries(env_file_path(BASE_DIR), {"VS_ADMIN_PASSWORD": ""})
+    upsert_env_entries(env_file_path(BASE_DIR), {"VS_ADMIN_PASSWORD": ""})
     os.environ.pop("VS_ADMIN_PASSWORD", None)
-
+    # Revoke other browser sessions after a credential change. The current
+    # session remains usable; Basic-auth clients have no session to revoke.
+    current_id = (auth.session or {}).get("id") if auth else None
+    with get_db() as conn:
+        if current_id:
+            conn.execute("DELETE FROM auth_sessions WHERE id != ?", (current_id,))
+        else:
+            conn.execute("DELETE FROM auth_sessions")
+        conn.commit()
+    record_request(
+        request,
+        "auth.password.changed" if payload.password else "auth.password.disabled",
+        category="auth",
+    )
     return {"ok": True, "set": bool(payload.password), "restart_required": False}
 
 
 @router.post("/settings/admin-user")
-def set_admin_user(payload: AdminUserUpdate) -> dict[str, Any]:
+def set_admin_user(payload: AdminUserUpdate, request: Request) -> dict[str, Any]:
     """Change the dashboard Basic-auth username."""
     set_setting("admin_user", payload.username)
-    _upsert_env_entries(env_file_path(BASE_DIR), {"VS_ADMIN_USER": payload.username})
+    upsert_env_entries(env_file_path(BASE_DIR), {"VS_ADMIN_USER": payload.username})
     os.environ["VS_ADMIN_USER"] = payload.username
+    auth = getattr(request.state, "auth", None)
+    current_id = (auth.session or {}).get("id") if auth else None
+    with get_db() as conn:
+        if current_id:
+            conn.execute("DELETE FROM auth_sessions WHERE id != ?", (current_id,))
+        else:
+            conn.execute("DELETE FROM auth_sessions")
+        conn.commit()
+    record_request(
+        request,
+        "auth.username.changed",
+        category="auth",
+        detail=f"Admin username set to {payload.username}",
+    )
     return {"ok": True, "admin_user": payload.username}
+
+
+@router.post("/settings/legacy-password/cleanup")
+def cleanup_legacy_password_endpoint(request: Request) -> dict[str, Any]:
+    """Remove a plaintext legacy admin password from the environment file."""
+    from .security import cleanup_legacy_password
+
+    result = cleanup_legacy_password()
+    record_request(
+        request,
+        "auth.legacy_password.cleaned",
+        category="auth",
+        detail="Removed VS_ADMIN_PASSWORD from the environment file and process",
+    )
+    return {"ok": True, **result}
+
+
+@router.get("/settings/tool-policy")
+def get_tool_policy() -> dict[str, Any]:
+    return {"policy": get_policy(), "defaults": DEFAULT_MINIMUMS}
+
+
+@router.post("/settings/tool-policy")
+def update_tool_policy(payload: ToolPolicyUpdate, request: Request) -> dict[str, Any]:
+    try:
+        policy = set_policy(
+            enabled=payload.enabled,
+            warn_only=payload.warn_only,
+            minimums=payload.minimums,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_request(
+        request,
+        "settings.tool_policy.updated",
+        category="settings",
+        detail=json.dumps(policy, separators=(",", ":")),
+    )
+    return {"ok": True, "policy": policy, "tools": tool_status()}
+
+
+@router.post("/settings/notifications/test")
+def test_notification(payload: NotificationTestRequest, request: Request) -> dict[str, Any]:
+    from .scheduler import send_test_notification
+
+    try:
+        result = send_test_notification(
+            channel=payload.channel,
+            email=payload.email,
+            webhook=payload.webhook,
+        )
+    except UnsafeURLError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        record_request(
+            request,
+            "settings.notification_test.failed",
+            category="settings",
+            outcome="failure",
+            detail=f"{payload.channel}: {exc}",
+        )
+        raise HTTPException(
+            status_code=502, detail=f"Notification test failed: {exc}"
+        ) from exc
+    record_request(
+        request,
+        "settings.notification_test",
+        category="settings",
+        detail=f"{payload.channel}: {result.get('detail', 'delivered')}",
+    )
+    return {"ok": True, **result}
 
 
 @router.post("/settings/runtime")
@@ -2683,23 +2685,16 @@ def update_runtime_settings(payload: RuntimeSettingsUpdate) -> dict[str, Any]:
         entries["VS_ENABLE_EXTERNAL_APIS"] = "true" if enabled else "false"
         restart_required = restart_required or enabled != ENABLE_EXTERNAL_APIS
 
-    def env_safe(value: str, label: str) -> str:
-        unsafe = set("\r\n\x00;$\"`'|<>{}[]*!~#")
-        if os.name != "nt":
-            unsafe |= {" ", "\t", "\\", "&", "(", ")"}
-        else:
-            unsafe |= {"%", "^"}
-        if any(char in value for char in unsafe):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{label} contains characters that are unsafe in .env",
-            )
-        return value
+    def safe_value(value: str, label: str) -> str:
+        try:
+            return env_safe(value, label)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if "ssh_known_hosts" in updates:
         value = str(updates.get("ssh_known_hosts") or "").strip()
         if value:
-            value = env_safe(value, "SSH known_hosts path")
+            value = safe_value(value, "SSH known_hosts path")
             path = Path(value).expanduser()
             if not path.is_absolute() or not path.is_file():
                 raise HTTPException(
@@ -2712,7 +2707,7 @@ def update_runtime_settings(payload: RuntimeSettingsUpdate) -> dict[str, Any]:
     if "wordlist_path" in updates:
         value = str(updates.get("wordlist_path") or "").strip()
         if value:
-            value = env_safe(value, "Wordlist path")
+            value = safe_value(value, "Wordlist path")
             path = Path(value).expanduser()
             if not path.is_absolute():
                 raise HTTPException(
@@ -2740,12 +2735,19 @@ def update_runtime_settings(payload: RuntimeSettingsUpdate) -> dict[str, Any]:
     if "seclists_subdomain_url" in updates:
         value = str(updates.get("seclists_subdomain_url") or "").strip()
         if value:
-            value = env_safe(value, "SecLists URL")
+            value = safe_value(value, "SecLists URL")
         entries["VS_SECLISTS_SUBDOMAIN_URL"] = value
+
+    if updates.get("session_ttl_hours") is not None:
+        entries["VS_SESSION_TTL_HOURS"] = str(int(updates["session_ttl_hours"]))
+    if updates.get("session_idle_minutes") is not None:
+        entries["VS_SESSION_IDLE_MINUTES"] = str(int(updates["session_idle_minutes"]))
+    if updates.get("trust_proxy") is not None:
+        entries["VS_TRUST_PROXY"] = "true" if updates["trust_proxy"] else "false"
 
     if entries:
         try:
-            _upsert_env_entries(env_file_path(BASE_DIR), entries)
+            upsert_env_entries(env_file_path(BASE_DIR), entries)
         except OSError as exc:
             raise HTTPException(
                 status_code=500,
@@ -2779,7 +2781,7 @@ def set_bind_address(payload: BindAddressUpdate) -> dict[str, Any]:
         if ssl_enabled.strip().lower() in {"1", "true", "yes", "on"}
         else "false"
     )
-    _upsert_env_entries(
+    upsert_env_entries(
         env_file_path(BASE_DIR),
         {
             "VS_HOST": payload.bind_host,
@@ -2830,7 +2832,10 @@ def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
                 status_code=400,
                 detail=f"{name} path does not exist or is not a file",
             )
-        paths[name] = path
+        try:
+            paths[name] = env_safe(str(expanded), f"{name} path")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     set_setting(
         "tool_paths",
@@ -2842,14 +2847,14 @@ def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
         env_name: paths.get(name, "")
         for name, env_name in TOOL_ENV_VARS.items()
     }
-    _upsert_env_entries(env_file_path(BASE_DIR), entries)
+    upsert_env_entries(env_file_path(BASE_DIR), entries)
     for name, env_name in TOOL_ENV_VARS.items():
         os.environ[env_name] = paths.get(name, "")
 
     return {
         "ok": True,
         "tool_paths": dict(TOOL_PATHS),
-        "tools": tool_status(),
+        "tools": _tools_with_policy(),
     }
 
 

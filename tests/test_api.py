@@ -214,7 +214,7 @@ def test_scan_creation_validation_and_listing(api_client, customer):
     assert filtered.json()["total"] == 1
     assert filtered.json()["items"][0]["scan_type"] == "web"
 
-    search = api_client.get(f"/api/scans?q=example.test")
+    search = api_client.get("/api/scans?q=example.test")
     assert search.json()["total"] == 1
 
     active = api_client.get(f"/api/scans?customer_id={customer_id}&active=true")

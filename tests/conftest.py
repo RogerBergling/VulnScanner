@@ -17,6 +17,33 @@ os.environ.pop("VS_ADMIN_PASSWORD", None)
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _preserve_repo_env_file():
+    """Never let the test suite modify or leave a developer's real .env file."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / ".env"
+    original = path.read_bytes() if path.is_file() else None
+    yield
+    if original is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(original)
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    from app.rate_limit import reset_rate_limits
+
+    reset_rate_limits()
+    yield
+    reset_rate_limits()
+
+
 @pytest.fixture()
 def data_dir(tmp_path, monkeypatch):
     directory = tmp_path / "data"

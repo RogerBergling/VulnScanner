@@ -11,19 +11,56 @@ at `/api/docs` and the schema at `/api/openapi.json`.
 
 ## 1. Authentication
 
-If a dashboard password is configured, all dashboard and API routes require HTTP Basic
-authentication, except these public prefixes:
+If a dashboard password is configured, browser clients use a session cookie and
+API clients may use HTTP Basic authentication. Public prefixes:
 
 - `/api/health`
+- `/api/auth/login`
+- `/api/auth/status`
 - `/api/agent/` (agent token endpoints)
 - `/agent/` (agent scripts/downloads)
 - `/static/`
+- `/login`
 - `/api/docs`
 - `/api/openapi.json`
+
+### Browser session flow
+
+1. `POST /api/auth/login` with `{"username": "...", "password": "..."}`.
+2. If MFA is enabled and no code is supplied, the response is `401` with
+   `{"detail": "Authenticator code required", "mfa_required": true}`. Repeat
+   the request with `code` (TOTP) or `recovery_code`.
+3. A successful login sets `vs_session` (HttpOnly, SameSite=Strict) and
+   `vs_csrf` cookies and returns the CSRF token.
+4. Send `X-CSRF-Token` on every `POST`, `PUT`, `PATCH` and `DELETE` made with the
+   session cookie.
+5. `POST /api/auth/logout` deletes the session.
+
+### Basic auth and MFA
 
 ```bash
 curl -k -u admin:change-me https://127.0.0.1:8765/api/customers
 ```
+
+When MFA is enabled, Basic auth also requires a second factor:
+
+```http
+Authorization: Basic ...
+X-VS-MFA: 123456
+```
+
+or, for a one-time recovery code:
+
+```http
+Authorization: Basic ...
+X-VS-Recovery-Code: ABCDE-12345
+```
+
+Basic-auth requests are stateless and are not subject to CSRF validation.
+Browser sessions are rate-limited per source IP and username. A `429` response
+includes `Retry-After`.
+
+### Agent authentication
 
 Agent endpoints use an agent token instead:
 
@@ -38,16 +75,75 @@ Authorization: Bearer vs_agent_...
 ```
 
 Enrolment uses a one-time token in the request body. Agent APIs are not protected
-by dashboard Basic auth, so an agent does not need the administrator password.
+by dashboard authentication, so an agent does not need the administrator
+password.
 
 If no dashboard password is configured, dashboard/API authentication is disabled. Keep
 the service bound to `127.0.0.1` in that mode.
+
+### Auth endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/auth/status` | Public status: auth enabled, MFA enabled, current session and CSRF token. |
+| `POST` | `/api/auth/login` | Password login; optional `code` or `recovery_code`. |
+| `POST` | `/api/auth/logout` | Delete the current session (CSRF required). |
+| `GET` | `/api/auth/mfa` | MFA status and remaining recovery codes. |
+| `POST` | `/api/auth/mfa/setup` | Generate a pending TOTP secret and `otpauth://` URI. |
+| `POST` | `/api/auth/mfa/enable` | Verify a code and return ten one-time recovery codes. |
+| `POST` | `/api/auth/mfa/disable` | Disable MFA; requires the current password and MFA/recovery code. |
+| `POST` | `/api/auth/mfa/recovery-codes` | Regenerate recovery codes; requires password and MFA code. |
+
+`GET /api/auth/status` returns:
+
+```json
+{
+  "auth_enabled": true,
+  "mfa_enabled": true,
+  "authenticated": false,
+  "username": "",
+  "method": "none",
+  "csrf_token": "",
+  "legacy_password_present": false
+}
+```
+
+MFA setup returns a manual key and URI:
+
+```json
+{
+  "secret": "JBSWY3DPEHPK3PXP",
+  "otpauth_uri": "otpauth://totp/VulnScanner:admin?secret=...&issuer=VulnScanner",
+  "issuer": "VulnScanner",
+  "account": "admin",
+  "digits": 6,
+  "period": 30,
+  "algorithm": "SHA1"
+}
+```
+
+Enable it with the current code; the response is the only time recovery codes are
+returned:
+
+```json
+{"ok": true, "recovery_codes": ["ABCDE-12345", "..."], "mfa": {"enabled": true}}
+```
+
+Disable or regenerate with:
+
+```json
+{"password": "current-password", "code": "123456"}
+```
 
 ## 2. Conventions
 
 - IDs are integers except agent/job IDs, which are strings.
 - List endpoints return plain arrays unless documented otherwise.
 - `PATCH` updates only supplied fields.
+- Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` requests must send
+  `X-CSRF-Token`. Basic-auth API clients do not need it.
+- Every mutating API request is written to the audit trail with actor, source
+  IP, target and outcome.
 - Deleting a customer removes its groups, assets, agents, scans, findings and
   events. Export first.
 - A scan is immutable; `rescan` creates a new scan.
@@ -980,6 +1076,33 @@ object.
 Returns the latest completed scans for an asset, severity totals and the latest
 findings. `limit` is 1–100.
 
+## 9c. Inventory, finding history and audit
+
+### `GET /api/inventory`
+
+Query parameters: `customer_id`, `status`, `q`, `limit` (1–2000), `offset`.
+Returns discovered inventory entries joined to customer/asset names, plus a
+`device_types` summary.
+
+### `GET /api/assets/{asset_id}/history`
+
+Returns the asset, its inventory rows, finding-history rows and recent findings.
+
+### `GET /api/audit`
+
+Query parameters: `limit` (1–1000), `offset`, `category`, `action`, `actor`,
+`outcome`, `q`, `since`, `until`. Returns `total`, `entries` and paging values.
+Every mutating API request is recorded automatically; authentication and
+maintenance operations add descriptive action names.
+
+### `GET /api/audit/summary`
+
+Returns total events, failures and events in the last 24 hours.
+
+### `GET /api/audit/export`
+
+Exports the filtered audit trail as CSV (`text/csv`).
+
 ## 10. Server status and maintenance
 
 ### `GET /api/server/status`
@@ -1094,6 +1217,39 @@ including tool paths, listener/HTTPS choices and the admin password hash.
 {"ok": true, "path": "/secure/backups/vulnscanner-20260102-030405.db", "size": 123456, "created_at": "…"}
 ```
 
+### `GET /api/server/storage`
+
+Returns the active data directory, database path, size, reports directory,
+environment file, credential-key status and active scan count.
+
+### `POST /api/server/storage/validate`
+
+```json
+{"data_dir": "/var/lib/vulnscanner", "database_path": "/var/lib/vulnscanner/vulnscanner.db"}
+```
+
+Validates absolute paths, writability, filename suffix and conflicts without
+changing anything. Returns warnings when the target is inside the Git checkout.
+
+### `POST /api/server/storage/relocate`
+
+```json
+{
+  "data_dir": "/var/lib/vulnscanner",
+  "database_path": "/var/lib/vulnscanner/vulnscanner.db",
+  "copy_supporting_files": true,
+  "overwrite": false,
+  "force": false,
+  "confirmation": "RELOCATE"
+}
+```
+
+Relocates live storage: safety backup, online SQLite copy, integrity check,
+credential-key and supporting-file copy, environment-file update and live
+process switch. The old location is retained. Active scans block relocation
+unless `force` is true; an existing target database requires `overwrite`.
+Returns the new and previous paths, safety backup and restart flag.
+
 ### `POST /api/server/database/restore`
 
 ```json
@@ -1110,8 +1266,14 @@ including tool paths, listener/HTTPS choices and the admin password hash.
 - `settings` - restore the settings table only.
 
 The server creates a safety backup first, validates SQLite integrity, performs
-the restore in a transaction and checks foreign keys before committing. Active
-scans block `all` and `scans` restores with a `400` response.
+the restore in a transaction and checks foreign keys before committing. Older
+backups are upgraded in a temporary copy before restore; missing optional tables
+are created empty, while missing core tables reject the restore. A backup from a
+newer schema is rejected. The response includes `source_version`,
+`current_version`, `upgraded`, `missing_optional`, `safety_backup` and row
+counts. Full and settings restores revoke browser sessions because the restored
+admin password/MFA state may differ; sign in again. Active scans block `all` and
+`scans` restores with a `400` response.
 Returns the safety-backup path, restored counts and `restart_required` when
 listener settings changed:
 
@@ -1129,6 +1291,12 @@ listener settings changed:
 
 Invalid, incomplete or newer-schema backups return `400`; the live database is
 not changed.
+
+### `GET /api/server/database/inspect?path=...&mode=all`
+
+Inspects a backup without changing the live database. Returns the source schema
+version, current schema version, whether an upgrade is required, the tables
+present and any optional tables missing. A newer-schema backup returns `400`.
 
 ### `POST /api/server/database/vacuum`
 
@@ -1158,6 +1326,23 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "external_apis_available": true,
   "admin_auth_enabled": false,
   "admin_user": "admin",
+  "mfa_enabled": false,
+  "mfa": {
+    "enabled": false,
+    "recovery_codes_remaining": 0,
+    "pending": false,
+    "issuer": "VulnScanner"
+  },
+  "legacy_password_present": false,
+  "session_ttl_hours": 12,
+  "session_idle_minutes": 30,
+  "trust_proxy": false,
+  "allow_private_outbound": false,
+  "tool_policy": {
+    "enabled": false,
+    "warn_only": true,
+    "minimums": {"nmap": "7.80", "nuclei": "3.0.0"}
+  },
   "bind_host": "127.0.0.1",
   "bind_port": 8765,
   "active_bind_host": "127.0.0.1",
@@ -1181,7 +1366,15 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "external_api_master_saved": true,
   "ssh_known_hosts": "",
   "tools": {
-    "nmap": {"available": false, "path": "", "version": ""}
+    "nmap": {
+      "available": false,
+      "path": "",
+      "version": "Not installed",
+      "outdated_warning": false,
+      "minimum_version": "7.80",
+      "policy_status": "unknown",
+      "policy_enabled": false
+    }
   },
   "tool_paths": {"nmap": "", "testssl": "", "trivy": "", "subfinder": ""},
   "wordlist_path": "/path/to/data/wordlists/subdomains.txt",
@@ -1194,7 +1387,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
     "max_web_hosts": 20,
     "workers": 300
   },
-  "smtp": {"host": "", "port": "587", "user": "", "from": ""},
+  "smtp": {"host": "", "port": "587", "user": "", "from": "", "password_set": false},
   "notify_default": {"email": "", "webhook": ""},
   "max_repo_bytes": 536870912,
   "max_source_file_bytes": 1048576,
@@ -1213,9 +1406,12 @@ stored admin password hash or the legacy `VS_ADMIN_PASSWORD` fallback.
 stored in SQLite; `active_bind_host`, `active_bind_port` and
 `active_ssl_enabled` show the current process, and
 `bind_restart_required`/`ssl_restart_required` are `true` when a restart is
-needed. `smtp_password` is encrypted at rest and never returned by the API.
-`data_dir`, `database_path` and `credential_key_path` are informational;
-storage locations and the credential key are not changed through this API.
+needed. `smtp_password` is encrypted at rest and never returned by the API;
+`smtp.password_set` indicates whether a password is stored. `mfa` reports
+authenticator enrolment and remaining recovery codes. `data_dir`,
+`database_path` and `credential_key_path` are informational; use the storage
+relocation endpoints to change them. `tool_policy` reports the optional tool
+version policy.
 
 ### `PATCH /api/settings`
 
@@ -1234,6 +1430,7 @@ storage locations and the credential key are not changed through this API.
   "smtp_from": "scanner@example.com",
   "notify_email_default": "soc@example.com",
   "notify_webhook_default": "https://hooks.example.com/vulnscanner",
+  "allow_private_outbound": false,
   "max_web_hosts": 20,
   "workers": 300,
   "max_repo_bytes": 536870912,
@@ -1246,9 +1443,11 @@ storage locations and the credential key are not changed through this API.
 
 All fields are optional; omitted fields keep their current values. Boolean
 settings are `allow_external_apis`, `nuclei_enabled`, `nmap_enabled`,
-`testssl_enabled`, `trivy_enabled` and `subfinder_enabled`.
+`testssl_enabled`, `trivy_enabled`, `subfinder_enabled` and
+`allow_private_outbound`.
 `smtp_port` must be `1`–`65535`, and `notify_webhook_default` must start with
-`http://` or `https://`. Numeric guardrails are bounded: `max_web_hosts`
+`http://` or `https://`. Webhook delivery performs full SSRF validation;
+private destinations require `allow_private_outbound`. Numeric guardrails are bounded: `max_web_hosts`
 1–10000, `workers` 1–600, `max_repo_bytes` 1 MiB–10 GiB,
 `max_source_file_bytes` 1 KiB–100 MiB, `max_scan_files` 1–1000000,
 `max_cidr_hosts` 1–65536, and `agent_job_timeout` 60–86400 seconds. Returns the
@@ -1310,16 +1509,18 @@ on failure.
 ### `POST /api/settings/admin-password`
 
 ```json
-{"password": "a-long-random-password"}
+{"password": "a-long-random-password", "current_password": "the-current-password"}
 ```
 
-Stores a salted PBKDF2 hash in SQLite and applies it immediately. The legacy
-plaintext `VS_ADMIN_PASSWORD` value is cleared from `VS_ENV_FILE` (default
-`.env`) so the database is authoritative. A non-empty password must be 12–128 characters using letters,
-digits, and `. _ ~ @ + = : , / -`. Send an empty password to disable dashboard
-authentication (`admin_auth_enabled` becomes `false`). Invalid passwords return
-`422`. The hash is included in database backups, so restoring **Everything**
-restores the admin password too.
+Stores a salted PBKDF2 hash in SQLite and applies it immediately. A session
+request must include `current_password`; a request authenticated with Basic
+already proves the current password and may omit it. The legacy plaintext
+`VS_ADMIN_PASSWORD` value is cleared from `VS_ENV_FILE` (default `.env`) so the
+database is authoritative. A non-empty password must be 12–128 characters using
+letters, digits, and `. _ ~ @ + = : , / -`. Send an empty password to disable
+dashboard authentication (`admin_auth_enabled` becomes `false`). Invalid
+passwords return `422`. The hash is included in database backups, so restoring
+**Everything** restores the admin password too.
 
 ### `POST /api/settings/admin-user`
 
@@ -1339,19 +1540,63 @@ subsequent requests immediately; existing browser credentials must be updated.
   "external_api_master": false,
   "ssh_known_hosts": "/var/lib/vulnscanner/known_hosts",
   "wordlist_path": "/var/lib/vulnscanner/wordlists/subdomains.txt",
-  "seclists_subdomain_url": "https://example.com/subdomains.txt"
+  "seclists_subdomain_url": "https://example.com/subdomains.txt",
+  "session_ttl_hours": 12,
+  "session_idle_minutes": 30,
+  "trust_proxy": false
 }
 ```
 
 Stores deployment-level values in `VS_ENV_FILE` (default `.env`) and applies
 them to the process where possible. `scan_workers` (1–32) and
 `external_api_master` are read at startup, so changing them returns
-`restart_required: true`. The known_hosts path must be
+`restart_required: true`. Session lifetime, idle timeout and `trust_proxy`
+apply immediately. The known_hosts path must be
 an existing absolute file; a new wordlist path must be inside `VS_DATA_DIR`;
 the SecLists URL must use HTTP or HTTPS. Values must be safe to place in
 `.env`; shell metacharacters such as `&`, `;`, `$`, quotes and spaces on
 non-Windows hosts are rejected. Empty values clear the optional known_hosts,
 wordlist override or SecLists URL. Returns the refreshed settings object.
+
+### `POST /api/settings/notifications/test`
+
+```json
+{"channel": "email", "email": "soc@example.com"}
+```
+
+or:
+
+```json
+{"channel": "webhook", "webhook": "https://hooks.example.com/vulnscanner"}
+```
+
+Sends a test message using the saved SMTP or webhook configuration. Webhook
+URLs are SSRF-validated and redirects are not followed. Returns the channel,
+target and delivery detail; invalid or unsafe targets return `400`, and a
+delivery failure returns `502`.
+
+### `GET /api/settings/tool-policy`
+
+Returns the optional tool version policy and the default minimum versions.
+
+### `POST /api/settings/tool-policy`
+
+```json
+{
+  "enabled": true,
+  "warn_only": false,
+  "minimums": {"nmap": "7.80", "nuclei": "3.0.0"}
+}
+```
+
+Stores the policy in SQLite. In warn-only mode an outdated tool records a scan
+event; in strict mode a scan that needs an outdated tool fails before it starts.
+Returns the refreshed policy and tool status.
+
+### `POST /api/settings/legacy-password/cleanup`
+
+Removes a plaintext `VS_ADMIN_PASSWORD` entry from `VS_ENV_FILE` and clears it
+from the running process. The database hash remains authoritative.
 
 ### `POST /api/settings/kev/sync`
 
@@ -1387,6 +1632,7 @@ the web certificate used by the HTTPS listener.
 | Route | Description |
 | --- | --- |
 | `GET /` | SPA shell. |
+| `GET /login` | Session login page. |
 | `GET /manual` | Markdown user manual, inline. |
 | `GET /agent/download/vulnscanner_agent.py` | Python agent script (allow-listed). |
 | `GET /agent/download/VulnScannerAgent.ps1` | Native PowerShell agent (allow-listed). |
@@ -1395,7 +1641,7 @@ the web certificate used by the HTTPS listener.
 | `GET /agent/download/install-windows-agent.ps1` | Windows installer for the native PowerShell agent. |
 | `GET /agent/download/ad_audit.ps1` | AD collector. |
 | `GET /agent/{other-file}` | Read-only static agent directory. |
-| `GET /static/*` | CSS/JavaScript assets. |
+| `GET /static/*` | CSS/JavaScript assets (`app.js`, `pages.js`, `login.js`, `styles.css`). |
 
 Only the six allow-listed names are served through `/agent/download/`;
 unknown names return `404`.
@@ -1408,13 +1654,15 @@ unknown names return `404`.
 | `201` | Created. |
 | `204` | No content (`/favicon.ico`). |
 | `400` | Invalid business input, target, option or state. |
-| `401` | Basic auth or agent token required/invalid. |
+| `401` | Session, Basic auth, MFA or agent token required/invalid. |
+| `403` | CSRF token missing/invalid, or a sensitive operation requires the current password. |
 | `404` | Object or route not found. |
 | `405` | Method not allowed. |
-| `409` | Duplicate name, terminal scan or revoked agent. |
+| `409` | Duplicate name, terminal scan, revoked agent, active relocation or existing backup target. |
 | `413` | Agent result too large. |
 | `422` | Schema validation failed. |
-| `502` | KEV download failed. |
+| `429` | Login rate limit exceeded; see `Retry-After`. |
+| `502` | KEV/notification download or delivery failed. |
 
 ## 14. Example client flow
 
