@@ -985,7 +985,9 @@
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-external"><span><strong>Use Nuclei</strong> — run the optional Nuclei templates if installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
-        '</div><div class="modal-note" style="margin-top:8px">Only scan applications you are authorized to test. Active checks send real attack payloads.</div></div>';
+        '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab targets only. This disables certificate verification and is recorded in the scan event log.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry over plain HTTP if HTTPS fails. Use only for authorised lab targets; recorded in the scan event log.</span></label>' +
+        '</div><div class="modal-note" style="margin-top:8px">Only scan applications you are authorized to test. Active checks send real attack payloads. TLS verification is on by default.</div></div>';
     }
     if (type === 'network') {
       return '<div class="form-section"><h3>Network scan options</h3><div class="form-grid">' +
@@ -1001,7 +1003,9 @@
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — headers, exposed files and Nuclei on discovered HTTP ports.</span></label>' +
-        '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label></div>' +
+        '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab services only; recorded in the scan event log.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry plain HTTP when HTTPS fails; recorded in the scan event log.</span></label></div>' +
         '<div class="form-section" id="network-auth-fields" style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">' +
         '<div class="checkbox-row"><label class="check"><input type="checkbox" id="opt-auth"><span><strong>Authenticated checks</strong> — log in with a high-privilege account to inventory patches, packages, users and configuration (server scans only).</span></label></div>' +
         '<div class="form-grid" style="margin-top:10px">' +
@@ -1016,7 +1020,7 @@
         '</div>' +
         '<div class="checkbox-row" style="margin-top:10px">' +
           '<label class="check"><input type="checkbox" id="opt-winrm-https"><span><strong>WinRM over HTTPS</strong> (default port 5986).</span></label>' +
-          '<label class="check"><input type="checkbox" id="opt-verify-tls"><span>Verify the WinRM HTTPS certificate.</span></label>' +
+          '<label class="check"><input type="checkbox" id="opt-verify-tls" checked><span>Verify the WinRM HTTPS certificate.</span></label>' +
         '</div>' +
         '<div class="modal-note">Uses saved credentials from Settings, from this asset, or the per-scan credentials below. Only one authentication attempt is made per host so accounts are not locked out.</div>' +
         '<h4 style="margin:14px 0 6px">Linux (SSH) <span class="muted small">— optional per-scan override</span></h4>' +
@@ -1125,12 +1129,16 @@
                 payload.options.active = !!($('#opt-active', ctx.overlay) || {}).checked;
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
+                payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
+                payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
               } else if (type === 'network') {
                 payload.options.profile = ($('#opt-profile', ctx.overlay) || {}).value || 'common';
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
                 payload.options.web_checks = !!($('#opt-web-checks', ctx.overlay) || {}).checked;
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
+                payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
+                payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
                 const ports = ($('#opt-ports', ctx.overlay) || {}).value || '';
                 if (ports.trim()) payload.options.ports = ports.trim();
                 const agentId = ($('#opt-agent', ctx.overlay) || {}).value || '';

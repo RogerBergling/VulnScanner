@@ -106,6 +106,37 @@ def database_path() -> Path:
     return path
 
 
+def max_request_bytes() -> int:
+    """Return the maximum accepted HTTP request body size.
+
+    The limit is intentionally large enough for a 25 MiB agent result and a
+    20 MiB AD report, but bounded so an oversized body cannot exhaust memory.
+    """
+    return _env_int(
+        "VS_MAX_REQUEST_BYTES",
+        32 * 1024 * 1024,
+        low=1024 * 1024,
+        high=512 * 1024 * 1024,
+    )
+
+
+def allowed_hosts() -> list[str]:
+    """Return Host-header names accepted by TrustedHostMiddleware.
+
+    Local-first installs default to loopback and the test client. A service
+    behind a reverse proxy or accessed by DNS name must set
+    ``VS_ALLOWED_HOSTS=app.example.com`` (comma-separated).
+    """
+    configured = os.getenv("VS_ALLOWED_HOSTS", "").strip()
+    if configured:
+        return [item.strip() for item in configured.split(",") if item.strip()]
+    hosts = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver"}
+    host = os.getenv("VS_HOST", "127.0.0.1").strip()
+    if host and host not in {"0.0.0.0", "::"}:
+        hosts.add(host)
+    return sorted(hosts)
+
+
 def clear_limit_cache() -> None:
     _LIMIT_CACHE.clear()
 

@@ -372,6 +372,8 @@ Options:
 | Active checks | on | Send a small number of non-destructive test requests. Disable for a purely passive review. |
 | External tools | off | Run Nuclei if installed and allowed in Settings. |
 | Use testssl.sh | off | Run deep TLS checks when testssl.sh is installed and enabled in Settings. |
+| Ignore TLS certificate errors | off | Disable certificate verification for self-signed/lab targets. The scan event log records that verification was disabled. |
+| Allow HTTPS → HTTP fallback | off | Retry a failed HTTPS request over plain HTTP. The scan event log records the downgrade. |
 
 Web scanning does not log in, submit destructive forms, brute force, or exploit
 SQL injection/XSS. It reports indicators that require manual validation.
@@ -398,6 +400,8 @@ Options:
 | Ports | profile | Explicit list/ranges, for example `22,80,443,8000-8100`. Overrides the profile. |
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
+| Ignore TLS certificate errors | off | Disable certificate verification for discovered HTTPS services. Recorded in the scan event log. |
+| Allow HTTPS → HTTP fallback | off | Retry plain HTTP when HTTPS fails. Recorded in the scan event log. |
 | NSE vulners | off | With external tools, run the Nmap `vulners` script (server-side scans only). |
 | Use testssl.sh | off | With external tools, review discovered HTTPS services when testssl.sh is installed. |
 

@@ -298,6 +298,8 @@ deployment-level values that remain outside the GUI.
 | `VS_SESSION_TTL_HOURS` | `12` | Absolute browser session lifetime (1–168 hours). |
 | `VS_SESSION_IDLE_MINUTES` | `30` | Browser session idle timeout (5–1440 minutes). |
 | `VS_TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Forwarded-Proto` from a reverse proxy. Enable only when the app is unreachable except through that proxy. |
+| `VS_ALLOWED_HOSTS` | loopback/localhost | Comma-separated Host-header allowlist for `TrustedHostMiddleware`. Set the public DNS name(s) when behind a reverse proxy. |
+| `VS_MAX_REQUEST_BYTES` | `33554432` | Maximum accepted HTTP request body (32 MiB). Bounds JSON, multipart and agent-result requests. |
 | `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. Editable in Settings → Advanced runtime → Storage location. Use an absolute path **outside the Git checkout** for production. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Editable in Settings → Advanced runtime → Storage location. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
@@ -419,8 +421,14 @@ confirmed.
   ten one-time recovery codes. MFA is enforced for browser sessions and for
   Basic-auth API clients, which must send `X-VS-MFA` (TOTP) or
   `X-VS-Recovery-Code`.
-- State-changing cookie-authenticated requests require an `X-CSRF-Token`
+- State-changing requests require a matching `Origin`/`Referer` when a browser
+  sends one, and cookie-authenticated requests require an `X-CSRF-Token`
   header. Login attempts are rate-limited per source IP and per username.
+- Responses set HSTS on HTTPS, `Cache-Control: no-store` for API/login pages,
+  a restrictive CSP (including `object-src 'none'`) and cross-origin isolation
+  headers. `VS_ALLOWED_HOSTS` protects against Host-header poisoning.
+- Request bodies are bounded by `VS_MAX_REQUEST_BYTES` before JSON/multipart
+  parsing.
 - **Audit trail** records authentication, configuration, maintenance and every
   mutating API request. The Audit page supports filtering and CSV export.
 - Agent tokens are stored as SHA-256 hashes. Enrolment tokens are one-time and
@@ -452,6 +460,16 @@ scanning a production network.
 - [Enterprise readiness review](docs/ENTERPRISE_READINESS.md)
 - [Authorised use](docs/AUTHORIZED_USE.md)
 - [Integrations](docs/INTEGRATIONS.md)
+- [Security policy](SECURITY.md)
+- [MIT license](LICENSE)
+
+## License
+
+VulnScanner is released under the [MIT License](LICENSE). You may use, copy,
+modify, merge, publish, distribute, sublicense and sell copies of the software,
+provided the copyright and permission notice are included. The software is
+provided without warranty; you remain responsible for authorised use and for
+the security of your deployment.
 
 ## Dependency locking and supply chain
 
@@ -510,4 +528,5 @@ validation gate; run the same commands locally before pushing:
 uv run pytest -q
 uv run ruff check app tests agent
 uv run bandit -q -r app agent/vulnscanner_agent.py
+uv run pip-audit -r requirements.txt --progress-spinner off
 ```

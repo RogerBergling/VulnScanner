@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -51,6 +53,16 @@ jobs:
 
       - name: Bandit (high severity)
         run: uv run --python ${{ matrix.python-version }} bandit -q -lll -r app agent/vulnscanner_agent.py
+
+      - name: Dependency audit
+        if: matrix.python-version == '3.11'
+        run: uv run --python ${{ matrix.python-version }} pip-audit -r requirements.txt --progress-spinner off
+
+      - name: Secret scanning
+        if: matrix.python-version == '3.11'
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: JavaScript syntax
         run: |

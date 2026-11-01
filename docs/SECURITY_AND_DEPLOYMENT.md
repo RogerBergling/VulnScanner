@@ -82,9 +82,23 @@ accepted timestep. Enabling or disabling MFA revokes other sessions.
 
 Cookie-authenticated state-changing requests require `X-CSRF-Token`; the token
 is delivered in a non-HttpOnly `vs_csrf` cookie and in the login response.
-Login attempts are rate-limited per source IP and per username (five failures per
-five minutes per username; twenty per IP). A `429` response includes
-`Retry-After`. Basic-auth API clients are stateless and exempt from CSRF.
+State-changing requests also reject a browser `Origin`/`Referer` that is not
+same-origin or listed in `VS_ALLOWED_HOSTS`. Login attempts are rate-limited per
+source IP and per username (five failures per five minutes per username; twenty
+per IP). A `429` response includes `Retry-After`. Basic-auth API clients are
+stateless and exempt from CSRF.
+
+Responses include HSTS on HTTPS, `Cache-Control: no-store` for API and login
+pages, a restrictive CSP with `object-src 'none'`, and cross-origin isolation
+headers. `TrustedHostMiddleware` rejects Host headers outside
+`VS_ALLOWED_HOSTS` (defaults to loopback/localhost). Request bodies are bounded
+by `VS_MAX_REQUEST_BYTES` (default 32 MiB) before JSON/multipart parsing.
+
+Web scans verify TLS certificates by default. `ignore_tls_errors` and
+`allow_http_fallback` are explicit per-scan opt-ins and are recorded in the
+scan event log. WinRM HTTPS verification defaults to on; SSH host-key
+verification remains a deployment decision until the planned TOFU/enforcement
+work is complete.
 
 Every mutating API request is recorded in the audit trail together with
 authentication, MFA, settings, backup, restore and storage-relocation actions.
@@ -301,6 +315,9 @@ VS_ADMIN_USER=admin
 VS_ADMIN_PASSWORD=replace-with-a-long-random-password
 VS_DATA_DIR=/var/lib/vulnscanner
 VS_ENABLE_EXTERNAL_APIS=true
+VS_ALLOWED_HOSTS=app.example.com
+# Set only when the app is reachable exclusively through the TLS proxy.
+VS_TRUST_PROXY=true
 EOF'
 sudo chown vulnscanner:vulnscanner /etc/vulnscanner/vulnscanner.env
 sudo chmod 600 /etc/vulnscanner/vulnscanner.env
@@ -541,6 +558,8 @@ Before exposing the service beyond localhost:
 - [ ] Reverse proxy requires HTTPS and restricts source networks.
 - [ ] `VS_TRUST_PROXY` set only when the app is reachable exclusively through a
       trusted proxy that sets `X-Forwarded-Proto`/`X-Forwarded-For`.
+- [ ] `VS_ALLOWED_HOSTS` includes only the public DNS names used for the app.
+- [ ] `VS_MAX_REQUEST_BYTES` matches the largest approved import/agent payload.
 - [ ] Login rate limits and audit alerts monitored.
 - [ ] Firewall allows only the proxy and required agent paths.
 - [ ] Dedicated unprivileged service account.
@@ -557,6 +576,13 @@ Before exposing the service beyond localhost:
 - [ ] Retention and authorised-use rules documented.
 - [ ] Host and Python dependencies patched.
 - [ ] Agent inventory reviewed and stale agents revoked.
+
+## 9a. License and vulnerability disclosure
+
+VulnScanner is released under the MIT License; see [LICENSE](../LICENSE). The
+security policy and private reporting process are in
+[SECURITY.md](../SECURITY.md). Enterprise deployments should retain the license
+notice and review the policy before commissioning an external assessment.
 
 ## 10. Known limitations and residual risk
 

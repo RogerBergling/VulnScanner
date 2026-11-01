@@ -6,19 +6,22 @@ import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
 from .api import router as api_router
 from .audit import record_request
+from .body_limit import BodySizeLimitMiddleware
 from .config import (
     BASE_DIR,
     HOST,
     PORT,
+    allowed_hosts,
     data_dir,
     migrate_env_tool_paths,
     reload_tool_paths,
@@ -38,7 +41,12 @@ from .security import (
     migrate_env_admin_password,
     mfa_enabled,
 )
-from .sessions import CSRF_HEADER, authenticate_request, cleanup_sessions
+from .sessions import (
+    CSRF_HEADER,
+    authenticate_request,
+    cleanup_sessions,
+    request_is_secure,
+)
 
 logging.basicConfig(
     level=os.getenv("VS_LOG_LEVEL", "INFO").upper(),
@@ -64,6 +72,15 @@ async def lifespan(_app: FastAPI):
     scheme = "https" if os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"} else "http"
     logger.info("VulnScanner %s starting on %s://%s:%s", __version__, scheme, HOST, PORT)
     logger.info("Database: %s", database_path())
+    if HOST not in {"127.0.0.1", "::1", "localhost"} and not os.getenv(
+        "VS_ALLOWED_HOSTS", ""
+    ).strip():
+        logger.warning(
+            "VS_ALLOWED_HOSTS is not set while listening on %s. Requests with "
+            "Host headers other than loopback/localhost will be rejected; set "
+            "VS_ALLOWED_HOSTS to the DNS name(s) clients use.",
+            HOST,
+        )
     if admin_auth_enabled():
         logger.info(
             "Dashboard authentication is enabled (user: %s, MFA: %s)",
@@ -106,6 +123,11 @@ app.include_router(maintenance_router)
 app.include_router(storage_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+# Reject oversized bodies before FastAPI/Pydantic parses them. TrustedHost
+# protects against Host-header poisoning when the listener is not loopback-only.
+app.add_middleware(BodySizeLimitMiddleware)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts())
+
 _PUBLIC_PREFIXES = (
     "/api/health",
     "/api/agent/",
@@ -124,20 +146,65 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "X-Permitted-Cross-Domain-Policies": "none",
 }
 
 
-def _secure_response(response: Response, path: str) -> Response:
+def _secure_response(
+    response: Response, path: str, request: Request | None = None
+) -> Response:
     for key, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(key, value)
+    if request is not None and request_is_secure(request):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000"
+        )
+    if path.startswith("/api/") or path in {"/", "/login"}:
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("Pragma", "no-cache")
     if not path.startswith("/api/") and not path.startswith("/agent/"):
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
-            "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            "object-src 'none'; frame-src 'none'; frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'",
         )
     return response
+
+
+def _hostname(value: str) -> str:
+    try:
+        parsed = urlparse(value if "://" in value else "//" + value)
+    except ValueError:
+        return ""
+    return (parsed.hostname or "").lower().strip("[]")
+
+
+def _origin_allowed(request: Request) -> bool:
+    """Reject cross-origin state-changing browser requests.
+
+    The CSRF token remains the primary control. Origin/Referer validation is
+    defence in depth and also protects the unauthenticated login endpoint.
+    CLI/API clients that do not send Origin or Referer continue to work.
+    """
+    candidate = request.headers.get("origin") or request.headers.get("referer")
+    if not candidate:
+        return True
+    if candidate.strip().lower() == "null":
+        return False
+    origin_host = _hostname(candidate)
+    if not origin_host:
+        return False
+    request_host = _hostname(request.headers.get("host", "")) or (
+        request.url.hostname or ""
+    ).lower()
+    allowed = {item.lower().strip("[]") for item in allowed_hosts()}
+    if "*" in allowed:
+        return True
+    return origin_host in allowed or (bool(request_host) and origin_host == request_host)
 
 
 @app.middleware("http")
@@ -147,6 +214,16 @@ async def security_and_auth(request: Request, call_next):
     auth = authenticate_request(request)
     request.state.auth = auth
     request.state.actor = auth.actor
+
+    if request.method.upper() in _UNSAFE_METHODS and not _origin_allowed(request):
+        return _secure_response(
+            JSONResponse(
+                {"detail": "Cross-origin request rejected"},
+                status_code=403,
+            ),
+            path,
+            request,
+        )
 
     if not auth.authenticated and not public:
         if path.startswith("/api/"):
@@ -161,6 +238,7 @@ async def security_and_auth(request: Request, call_next):
                     },
                 ),
                 path,
+                request,
             )
         accept = request.headers.get("accept", "")
         if "text/html" in accept:
@@ -169,7 +247,9 @@ async def security_and_auth(request: Request, call_next):
                 safe="/",
             )
             return _secure_response(
-                RedirectResponse(url=f"/login?next={target}", status_code=303), path
+                RedirectResponse(url=f"/login?next={target}", status_code=303),
+                path,
+                request,
             )
         return _secure_response(
             Response(
@@ -180,6 +260,7 @@ async def security_and_auth(request: Request, call_next):
                 },
             ),
             path,
+            request,
         )
 
     # Cookie-authenticated browser requests need an explicit CSRF token. API
@@ -199,13 +280,16 @@ async def security_and_auth(request: Request, call_next):
                     status_code=403,
                 ),
                 path,
+                request,
             )
 
     if path == "/login" and auth.authenticated and auth.method != "disabled":
-        return _secure_response(RedirectResponse(url="/", status_code=303), path)
+        return _secure_response(
+            RedirectResponse(url="/", status_code=303), path, request
+        )
 
     response = await call_next(request)
-    _secure_response(response, path)
+    _secure_response(response, path, request)
 
     if (
         path.startswith("/api/")

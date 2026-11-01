@@ -1197,7 +1197,9 @@ def collect_windows(
     transport = str(ctx.option("winrm_transport", "ntlm") or "ntlm").lower()
     if transport not in {"ntlm", "basic", "credssp", "kerberos"}:
         transport = "ntlm"
-    verify = ctx.option_bool("verify_tls", False)
+    verify = ctx.option_bool("verify_tls", True)
+    if not verify:
+        ctx.log("WinRM TLS certificate verification is disabled for this scan", "warning")
     endpoint = f"{scheme}://{host}:{port}/wsman"
     operation_timeout = max(20, int(timeout) + 5)
     read_timeout = max(60, int(timeout) * 4)

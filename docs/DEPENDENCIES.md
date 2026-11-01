@@ -30,6 +30,7 @@ uv sync --frozen --no-install-project --group dev
 .venv/bin/python -m pytest -q
 .venv/bin/ruff check app tests agent
 .venv/bin/bandit -q -lll -r app agent/vulnscanner_agent.py
+.venv/bin/pip-audit -r requirements.txt --progress-spinner off
 ```
 
 `uv` 0.13 or newer is required. The lock is universal: platform-specific
@@ -68,6 +69,7 @@ uv sync --frozen --no-install-project --group dev
 .venv/bin/python -m pytest -q
 .venv/bin/ruff check app tests agent
 .venv/bin/bandit -q -lll -r app agent/vulnscanner_agent.py
+.venv/bin/pip-audit -r requirements.txt --progress-spinner off
 ```
 
 `check-dependencies.sh` verifies that `uv.lock` is current and that both

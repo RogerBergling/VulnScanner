@@ -210,7 +210,13 @@ SECURITY_HEADERS = [
 ]
 
 
-def _session() -> requests.Session:
+def _session(verify_tls: bool = True) -> requests.Session:
+    """Create a scanner HTTP session.
+
+    TLS verification is enabled by default. A scan must explicitly opt in to
+    ignoring certificate errors, which is intended only for self-signed lab
+    targets and is recorded in scan metadata/events.
+    """
     session = requests.Session()
     session.headers.update(
         {
@@ -219,7 +225,7 @@ def _session() -> requests.Session:
             "Accept-Language": "en-US,en;q=0.7",
         }
     )
-    session.verify = False
+    session.verify = bool(verify_tls)
     return session
 
 
@@ -287,11 +293,20 @@ def _resolve_web_target(ctx: ScanContext, session: requests.Session) -> tuple[st
         return response.url or requested, response, _safe_text(response)
     except requests.RequestException as exc:
         parsed = urlparse(requested)
-        if parsed.scheme == "https":
+        if parsed.scheme == "https" and ctx.option_bool("allow_http_fallback", False):
             fallback = urlunparse(parsed._replace(scheme="http"))
-            ctx.log(f"HTTPS failed ({exc.__class__.__name__}); trying HTTP", "warning")
+            ctx.log(
+                "HTTPS failed; falling back to plain HTTP because "
+                "allow_http_fallback is enabled",
+                "warning",
+            )
             response = _get(session, fallback, timeout=12)
             return response.url or fallback, response, _safe_text(response)
+        if parsed.scheme == "https":
+            raise RuntimeError(
+                f"Could not reach {redact_url(requested)} over HTTPS: {exc}. "
+                "Fix the certificate or explicitly enable the HTTP fallback for this scan."
+            ) from exc
         raise RuntimeError(f"Could not reach {redact_url(requested)}: {exc}") from exc
 
 
@@ -771,7 +786,14 @@ def _run_nuclei(result: ScanResult, url: str, ctx: ScanContext) -> None:
 
 def scan(ctx: ScanContext) -> ScanResult:
     result = ScanResult()
-    session = _session()
+    ignore_tls = ctx.option_bool("ignore_tls_errors", False)
+    if ignore_tls:
+        ctx.log(
+            "TLS certificate verification is disabled for this scan "
+            "(ignore_tls_errors=true)",
+            "warning",
+        )
+    session = _session(verify_tls=not ignore_tls)
     try:
         url, response, body = _resolve_web_target(ctx, session)
         ctx.progress(20, "Analyzing HTTP response")
@@ -782,6 +804,8 @@ def scan(ctx: ScanContext) -> ScanResult:
             "server": truncate(response.headers.get("server", ""), 200),
             "content_type": truncate(response.headers.get("content-type", ""), 200),
             "content_length": len(response.content or b""),
+            "tls_verification": not ignore_tls,
+            "http_fallback_allowed": ctx.option_bool("allow_http_fallback", False),
         }
         ctx.log(f"HTTP {response.status_code} from {redact_url(response.url)}")
 

@@ -22,6 +22,20 @@ def test_mutating_requests_are_audited(api_client):
     assert "patch /api/settings" in exported.text
 
 
+def test_audit_csv_neutralises_spreadsheet_formulas(data_dir):
+    from app.audit import export_csv, record
+
+    record(
+        "test.formula",
+        category="test",
+        actor="=HYPERLINK(\"https://example.test\")",
+        detail="+cmd|' /C calc'!A0",
+    )
+    exported = export_csv(category="test")
+    assert "'=HYPERLINK" in exported
+    assert "'+cmd" in exported
+
+
 def test_login_events_are_audited(client):
     client.post("/api/settings/admin-password", json={"password": "audit-password-123"})
     client.post(

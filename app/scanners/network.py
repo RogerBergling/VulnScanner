@@ -161,7 +161,7 @@ def _http_service(
     schemes = ["https", "http"] if port in TLS_PORTS else ["http", "https"]
     response = None
     used_scheme = schemes[0]
-    session = web_session()
+    session = web_session(verify_tls=not ctx.option_bool("ignore_tls_errors", False))
     try:
         for scheme in schemes:
             try:
@@ -212,7 +212,7 @@ def _web_vulnerability_checks(
     body: str,
 ) -> None:
     """Run the reusable web checks against a discovered HTTP service."""
-    session = web_session()
+    session = web_session(verify_tls=not ctx.option_bool("ignore_tls_errors", False))
     try:
         _add_header_findings(result, url, response, body, ctx)
         try:

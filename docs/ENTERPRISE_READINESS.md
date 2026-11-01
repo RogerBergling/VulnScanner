@@ -1,9 +1,17 @@
 # Enterprise Readiness Review
 
-**Product:** VulnScanner 1.1.0  
-**Review date:** 2026-10-31  
+**Product:** VulnScanner 1.1.1
+
+**Review date:** 2026-10-31 (status update 2026-11-01)
+
 **Scope:** application code, API, authentication, scanner runtime, agent model,
 database, backup/restore, deployment scripts, CI, tests and documentation.
+
+> **Implementation status (2026-11-01):** quick wins 2 (TLS verification
+> defaults), 3 (audit CSV neutralisation), 5 (security headers, trusted hosts,
+> Origin checks), 6 (request-body limits), 9 (MIT license/security policy) and
+> 10 (dependency audit/secret scanning in CI) are implemented. The remaining
+> findings and the P0/P1 roadmap are unchanged.
 
 This is a working backlog for making VulnScanner suitable for a regulated
 enterprise deployment. It is intentionally blunt: the product is a strong
@@ -33,14 +41,15 @@ gaps are organisational and operational rather than individual code defects:
    plaintext; the Fernet key has no rotation or KMS/HSM integration.
 5. **Local file permissions are not hardened by default.** The data directory
    and database are created with the caller's umask (typically `0775`/`0644`).
-6. **Scanner trust defaults are too permissive.** Web scans disable TLS
-   verification and can silently downgrade HTTPS to HTTP; SSH host-key
-   verification is optional.
+6. **Scanner trust defaults were too permissive.** Web TLS verification and
+   downgrade controls were fixed in 1.1.1; SSH host-key verification remains
+   optional.
 7. **Observability and operational controls are thin.** No metrics, tracing,
    request IDs, readiness probe, structured audit shipping or graceful scan
    drain.
-8. **Supply-chain and compliance artefacts are incomplete.** No SBOM, signed
-   releases, `LICENSE`, `SECURITY.md`, dependency audit in CI or Windows CI.
+8. **Supply-chain and compliance artefacts are incomplete.** No SBOM or signed
+   releases; dependency audit and secret scanning are now in CI, and `LICENSE`
+   (MIT) plus `SECURITY.md` were added in 1.1.1. Windows CI remains open.
 
 ## 2. Scorecard
 
@@ -120,25 +129,18 @@ database/backup files; CI verifies it; the hardening checklist matches reality.
 
 ### 3.3 Verify TLS during web scans and make downgrade explicit
 
-**Current state:** `app/scanners/web.py` sets `session.verify = False` for every
-web scan and `_resolve_web_target()` silently retries HTTPS over HTTP when the
-HTTPS request fails.
+**Status: resolved in 1.1.1.** Web/network HTTP checks now verify TLS by
+default. `ignore_tls_errors` and `allow_http_fallback` are explicit per-scan
+opt-ins, recorded in scan metadata and the scan event log. WinRM HTTPS
+verification now defaults to on.
 
-**Risk:** a network attacker can alter responses, inject false findings, hide
-real findings or observe probe traffic. Silent downgrade weakens the
-authorisation boundary and can make a scan report look authoritative when it is
-not.
+**Original finding:** `app/scanners/web.py` set `session.verify = False` for
+every web scan and `_resolve_web_target()` silently retried HTTPS over HTTP when
+the HTTPS request failed.
 
-**Recommended change:**
-
-- Default to `verify=True` with the system trust store.
-- Add an explicit per-scan `ignore_tls_errors` option (default `false`) with a
-  visible warning in the UI and a scan event when enabled.
-- Make HTTPS-to-HTTP fallback opt-in (`allow_http_fallback`, default `false`).
-- Record the final scheme, certificate verification result and downgrade event
-  in scan metadata.
-- Apply the same default to WinRM (`verify_tls` currently defaults false in
-  `app/scanners/authenticated.py`) and document the trade-off.
+**Risk:** a network attacker could alter responses, inject false findings, hide
+real findings or observe probe traffic. Silent downgrade weakened the
+authorisation boundary.
 
 **Acceptance criteria:** a scan against a self-signed target fails with a clear
 message unless the operator opts in; no silent scheme downgrade occurs.
@@ -214,34 +216,29 @@ first; a deliberately broken migration aborts without changing the live data.
 
 ### 3.7 Add global request-size and body limits
 
-**Current state:** FastAPI/Pydantic parses JSON and multipart bodies before
-route-level size checks. Agent result and AD report limits are applied after
-parsing. Agent capability/path lists are not length-bounded.
+**Status: core limit resolved in 1.1.1.** `BodySizeLimitMiddleware` rejects
+declared or streamed bodies above `VS_MAX_REQUEST_BYTES` (default 32 MiB) before
+FastAPI/Pydantic parsing. Remaining work: per-route limits and explicit bounds
+on every list field (`capabilities`, `paths`, `modules`, references).
 
-**Risk:** unauthenticated or low-privilege requests can exhaust memory/CPU with
-oversized bodies. A compromised agent token can send a very large result before
-the 25 MiB check runs.
+**Original finding:** FastAPI/Pydantic parsed JSON and multipart bodies before
+route-level size checks. Agent result and AD report limits were applied after
+parsing.
 
-**Recommended change:**
-
-- Add ASGI middleware that rejects `Content-Length` over a configurable limit
-  and counts streamed bytes.
-- Use per-route limits: login/auth small, JSON API medium, agent result and AD
-  import large but bounded.
-- Bound all list fields (`capabilities`, `paths`, `modules`, references) in
-  Pydantic.
-- Return `413` with a stable error envelope and log the rejection in audit.
+**Risk:** oversized requests could exhaust memory/CPU. A compromised agent token
+could send a very large result before the 25 MiB check ran.
 
 **Acceptance criteria:** a 100 MiB request is rejected before JSON parsing;
-oversized agent results are rejected without memory growth; tests cover each
-limit.
+oversized agent results are rejected without unbounded memory growth; tests
+cover the global limit.
 
 ### 3.8 Make the audit trail defensible
 
 **Current state:** `app/audit.py` records mutating API requests and explicit
 security events. It is a normal SQLite table; administrators can edit/delete it
 with database access. Reads and report exports are not recorded. Audit CSV
-export does not neutralise spreadsheet formulas.
+formula neutralisation was added in 1.1.1; the remaining integrity, read-event
+and retention gaps are unchanged.
 
 **Risk:** an insider can alter the trail. Sensitive report downloads have no
 attribution. Opening an exported CSV in Excel can execute a formula injected
@@ -275,9 +272,9 @@ configurable.
   limit allows an attacker to lock the administrator out for five minutes.
 - Add `Origin`/`Referer` validation on state-changing requests in addition to
   CSRF tokens.
-- Use `__Host-` cookie prefixes, `Cache-Control: no-store` on auth/API
-  responses, HSTS on HTTPS, `TrustedHostMiddleware`, `Cross-Origin-Opener-Policy`
-  and `Cross-Origin-Resource-Policy`.
+- `Cache-Control: no-store`, HSTS, `TrustedHostMiddleware`, Origin checks and
+  cross-origin isolation headers are implemented in 1.1.1. Remaining: use
+  `__Host-` cookie prefixes and add a session-management UI.
 - Add a session list/“sign out everywhere” UI and periodic expired-session
   cleanup.
 - Rehash legacy PBKDF2 hashes to Argon2id on successful login; add breached
@@ -326,7 +323,7 @@ configurable.
 
 ### 4.5 Supply chain and CI
 
-- Add `pip-audit`/OSV dependency audit and `gitleaks` to CI.
+- `pip-audit` and `gitleaks` are now part of CI (1.1.1).
 - Add SBOM generation (CycloneDX/SPDX) and attach it to releases.
 - Add a coverage threshold and an integration test that exercises a real
   backup → migrate → restore cycle.
@@ -336,8 +333,8 @@ configurable.
 - Pin and verify external tool versions/checksums; the tool policy currently
   compares versions but does not verify provenance.
 - Verify the SecLists download against a pinned hash/signature.
-- Add a `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md` and a vulnerability
-  disclosure process. Enterprise procurement will ask for these first.
+- `LICENSE` (MIT) and `SECURITY.md` are now present (1.1.1). Remaining:
+  `CONTRIBUTING.md`, SBOM and signed releases.
 
 ### 4.6 Scanning safety and governance
 
@@ -403,18 +400,22 @@ configurable.
 These are low-risk changes that materially improve the security posture:
 
 1. `umask 077` in `run.sh` and `scripts/update.sh`; `chmod 0700` data dir,
-   `0600` DB/WAL/SHM/backups; add a startup permission check.
+   `0600` DB/WAL/SHM/backups; add a startup permission check. **Open**
 2. Default web-scan TLS verification to on; make insecure/downgrade explicit
-   and audited.
-3. Neutralise formulas in `app/audit.py` CSV export.
+   and audited. **Done (1.1.1)**
+3. Neutralise formulas in `app/audit.py` CSV export. **Done (1.1.1)**
 4. Escape certificate paths in the Settings UI (currently inserted raw).
+   **Open**
 5. Add `Cache-Control: no-store` for `/api/` and `/login`, HSTS when HTTPS,
    `object-src 'none'`, `TrustedHostMiddleware` and an Origin check.
-6. Add a global request-body limit middleware.
-7. Take a verified backup automatically before migrations.
+   **Done (1.1.1)**
+6. Add a global request-body limit middleware. **Done (1.1.1)**
+7. Take a verified backup automatically before migrations. **Open**
 8. Cache tool-version checks and `PRAGMA quick_check` for server status.
+   **Open**
 9. Add `LICENSE`, `SECURITY.md` and a short vulnerability-disclosure policy.
-10. Add `pip-audit` and `gitleaks` to CI.
+   **Done (1.1.1)**
+10. Add `pip-audit` and `gitleaks` to CI. **Done (1.1.1)**
 
 ## 7. Suggested roadmap
 
@@ -464,19 +465,19 @@ Do not lose these properties while adding enterprise features:
 | Single administrator, no RBAC | `app/security.py`, `app/sessions.py`, docs known limitations |
 | Data dir/DB permissions | `app/config.py` (`data_dir`, `database_path`), `run.sh`, `scripts/update.sh` |
 | Update archive permissions | `scripts/update.sh` (`tar -czf`) |
-| Web TLS verification disabled | `app/scanners/web.py` (`session.verify = False`) |
+| Web TLS verification | `app/scanners/web.py` — verified by default; explicit opt-out (resolved 1.1.1) |
 | Silent HTTPS→HTTP fallback | `app/scanners/web.py` (`_resolve_web_target`) |
 | Optional SSH host-key verification | `app/scanners/authenticated.py` |
 | Internal CA not used for mTLS | `app/certs.py`, `app/api.py` cert endpoints, UI claim |
 | Plaintext backups | `app/backup.py` (`create_backup`) |
 | No key rotation | `app/credentials.py` |
 | In-process jobs/scheduler | `app/jobs.py`, `app/scheduler.py`, `app/main.py` shutdown |
-| No request body limit | `app/main.py` middleware, `app/api.py` agent/AD routes |
-| Audit CSV raw cells | `app/audit.py` (`export_csv`) |
+| Request body limit | `app/body_limit.py` — global 32 MiB limit (resolved 1.1.1; per-route limits remain) |
+| Audit CSV formula injection | `app/audit.py` (`export_csv`) — neutralised (resolved 1.1.1) |
 | No read/export audit | `app/main.py` middleware logs only mutating requests |
 | No metrics/tracing/readiness | absence of modules; `app/main.py` `/api/health` only |
-| CI gaps | `.github/workflows/ci.yml` |
-| No license/security policy | repository root |
+| CI gaps | `.github/workflows/ci.yml` — pip-audit/gitleaks added; SBOM/Windows CI remain |
+| License/security policy | `LICENSE`, `SECURITY.md` (resolved 1.1.1) |
 | Tool/SecLists provenance | `app/tool_policy.py`, `app/scanners/subdomains.py` |
 | Missing retention | no purge jobs for scans/audit/OSV/enrollment |
 

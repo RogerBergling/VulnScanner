@@ -142,6 +142,10 @@ Disable or regenerate with:
 - `PATCH` updates only supplied fields.
 - Cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` requests must send
   `X-CSRF-Token`. Basic-auth API clients do not need it.
+- When a browser sends `Origin` or `Referer`, state-changing requests must be
+  same-origin or use a host in `VS_ALLOWED_HOSTS`; otherwise they return `403`.
+- API and login responses are marked `Cache-Control: no-store`. HTTPS responses
+  include HSTS. Host headers outside `VS_ALLOWED_HOSTS` return `400`.
 - Every mutating API request is written to the audit trail with actor, source
   IP, target and outcome.
 - Deleting a customer removes its groups, assets, agents, scans, findings and
@@ -159,7 +163,7 @@ Public health check.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "time": "2026-01-02T03:04:05+00:00"
 }
 ```
@@ -171,7 +175,7 @@ Lists scan types and agent modules.
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "scan_types": [
     {"id": "web", "name": "Website / web application"},
     {"id": "network", "name": "Server / network services"},
@@ -583,7 +587,13 @@ Options are filtered per scan type:
 
 ```json
 {
-  "web": {"active": true, "external_tools": false, "testssl": false},
+  "web": {
+    "active": true,
+    "external_tools": false,
+    "testssl": false,
+    "ignore_tls_errors": false,
+    "allow_http_fallback": false
+  },
   "network": {
     "ports": "22,80,443,8000-8100",
     "profile": "common",
@@ -602,7 +612,9 @@ Options are filtered per scan type:
     "winrm_port": 5985,
     "winrm_https": false,
     "winrm_transport": "ntlm",
-    "verify_tls": false
+    "verify_tls": true,
+    "ignore_tls_errors": false,
+    "allow_http_fallback": false
   },
   "repo": {
     "include_secrets": true,
@@ -650,10 +662,20 @@ Authenticated network options:
 | `winrm_port` | `5985` (or `5986` for HTTPS) | WinRM port. |
 | `winrm_https` | `false` | Use HTTPS and certificate validation per `verify_tls`. |
 | `winrm_transport` | `ntlm` | `ntlm`, `basic`, `credssp` or `kerberos`. |
-| `verify_tls` | `false` | Validate the WinRM HTTPS certificate. |
+| `verify_tls` | `true` | Validate the WinRM HTTPS certificate. Set to `false` only for a self-signed lab target; the scan log records the downgrade. |
+
+Web/TLS options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `ignore_tls_errors` | `false` | Disable certificate verification for web/network HTTP checks. Recorded as a scan warning. |
+| `allow_http_fallback` | `false` | Retry an HTTPS target over plain HTTP if HTTPS fails. Recorded as a scan warning. |
 
 Authenticated checks run only on the VulnScanner server. A delegated agent scan
 ignores credentials and performs unauthenticated TCP/web checks only.
+
+Request bodies are limited by `VS_MAX_REQUEST_BYTES` (default 32 MiB). Larger
+requests return `413` before JSON or multipart parsing.
 
 ### `GET /api/scans/{scan_id}`
 
@@ -885,7 +907,7 @@ enrolment token.
   "enrollment_token": "vs_enroll_...",
   "name": "web01",
   "platform": "Linux",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "hostname": "web01",
   "capabilities": ["system", "packages", "ports"],
   "ip": ""
@@ -902,7 +924,7 @@ Requires `X-Agent-Token` or a Bearer agent token.
 ```json
 {
   "platform": "Linux",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "hostname": "web01",
   "capabilities": ["system"],
   "ip": ""
@@ -1115,7 +1137,7 @@ be downloaded as a diagnostics snapshot.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "started_at": "2026-01-02T03:04:05+00:00",
   "uptime_seconds": 3600,
   "uptime_human": "1h",
@@ -1316,7 +1338,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "allow_external_apis": true,
   "nuclei_enabled": true,
   "nmap_enabled": true,
@@ -1659,7 +1681,7 @@ unknown names return `404`.
 | `404` | Object or route not found. |
 | `405` | Method not allowed. |
 | `409` | Duplicate name, terminal scan, revoked agent, active relocation or existing backup target. |
-| `413` | Agent result too large. |
+| `413` | Request body or agent result exceeds the configured limit. |
 | `422` | Schema validation failed. |
 | `429` | Login rate limit exceeded; see `Retry-After`. |
 | `502` | KEV/notification download or delivery failed. |

@@ -138,6 +138,16 @@ def list_entries(
     }
 
 
+def _csv_cell(value: Any) -> Any:
+    """Neutralise spreadsheet formula injection in exported audit cells."""
+    if value is None:
+        return ""
+    text = str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r", "\n")):
+        return "'" + text
+    return text
+
+
 def export_csv(
     *,
     limit: int = 10_000,
@@ -179,16 +189,16 @@ def export_csv(
     for entry in reversed(result["entries"]):
         writer.writerow(
             [
-                entry.get("id"),
-                entry.get("created_at"),
-                entry.get("actor"),
-                entry.get("action"),
-                entry.get("category"),
-                entry.get("target"),
-                entry.get("outcome"),
-                entry.get("ip"),
-                entry.get("detail"),
-                entry.get("user_agent"),
+                _csv_cell(entry.get("id")),
+                _csv_cell(entry.get("created_at")),
+                _csv_cell(entry.get("actor")),
+                _csv_cell(entry.get("action")),
+                _csv_cell(entry.get("category")),
+                _csv_cell(entry.get("target")),
+                _csv_cell(entry.get("outcome")),
+                _csv_cell(entry.get("ip")),
+                _csv_cell(entry.get("detail")),
+                _csv_cell(entry.get("user_agent")),
             ]
         )
     return buffer.getvalue()

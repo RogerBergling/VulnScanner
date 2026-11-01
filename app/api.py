@@ -819,7 +819,13 @@ def asset_credentials_update(asset_id: int, payload: AssetCredentialUpdate) -> d
 def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
     clean: dict[str, Any] = {}
     bool_keys = {
-        "web": ["active", "external_tools", "testssl"],
+        "web": [
+            "active",
+            "external_tools",
+            "testssl",
+            "ignore_tls_errors",
+            "allow_http_fallback",
+        ],
         "network": [
             "external_tools",
             "nmap_vulners",
@@ -828,6 +834,8 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "winrm_https",
             "verify_tls",
             "testssl",
+            "ignore_tls_errors",
+            "allow_http_fallback",
         ],
         "repo": [
             "include_secrets",

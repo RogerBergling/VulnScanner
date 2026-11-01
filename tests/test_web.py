@@ -6,10 +6,57 @@ from app.scanners.web import (
     _add_header_findings,
     _exposed_files,
     _injection_checks,
+    _resolve_web_target,
     _run_nuclei,
+    _session,
     _title,
 )
 from tests.helpers import DummyContext, FakeResponse, FakeSession
+
+
+def test_web_session_verifies_tls_by_default():
+    assert _session().verify is True
+    assert _session(False).verify is False
+
+
+def test_https_fallback_requires_explicit_opt_in(monkeypatch):
+    import requests
+
+    import app.scanners.web as web
+
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectionError("certificate verify failed")
+
+    monkeypatch.setattr(web, "_get", fail)
+    context = DummyContext()
+    try:
+        _resolve_web_target(context, object())
+    except RuntimeError as exc:
+        assert "HTTP fallback" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("HTTPS fallback should be disabled by default")
+
+
+def test_https_fallback_can_be_enabled(monkeypatch):
+    import requests
+
+    import app.scanners.web as web
+
+    calls = []
+
+    def fake_get(_session, url, timeout=0, **_kwargs):
+        calls.append(url)
+        if url.startswith("https://"):
+            raise requests.ConnectionError("certificate verify failed")
+        return FakeResponse(url=url, body="<title>fallback</title>")
+
+    monkeypatch.setattr(web, "_get", fake_get)
+    context = DummyContext(options={"allow_http_fallback": True})
+    url, response, body = _resolve_web_target(context, object())
+    assert url.startswith("http://")
+    assert response.status_code == 200
+    assert "fallback" in body
+    assert calls[0].startswith("https://")
 
 
 def test_title_extraction():

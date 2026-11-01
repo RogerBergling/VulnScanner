@@ -314,5 +314,21 @@ def test_winrm_endpoint_uses_domain_and_https_options(monkeypatch):
     )
     assert captured["endpoint"] == "https://192.0.2.20:5986/wsman"
     assert captured["kwargs"]["auth"] == ("CORP\\svc", "pw")
-    assert captured["kwargs"]["server_cert_validation"] == "ignore"
+    assert captured["kwargs"]["server_cert_validation"] == "validate"
     assert inventory["winrm_https"] is True
+
+    # Certificate validation can only be disabled by an explicit scan option.
+    authenticated.collect_windows(
+        "192.0.2.20",
+        {"username": "svc", "domain": "CORP", "account_type": "domain", "secret": "pw"},
+        5.0,
+        DummyContext(
+            {
+                "winrm_https": True,
+                "winrm_port": 5986,
+                "winrm_transport": "ntlm",
+                "verify_tls": False,
+            }
+        ),
+    )
+    assert captured["kwargs"]["server_cert_validation"] == "ignore"
