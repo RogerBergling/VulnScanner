@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app import __version__
+
 
 def test_health_meta_and_dashboard(client):
     health = client.get("/api/health")
@@ -37,6 +39,8 @@ def test_spa_index_manual_and_security_headers(client):
     index = client.get("/")
     assert index.status_code == 200
     assert "VulnScanner" in index.text
+    assert f'v<span id="app-version">{__version__}</span>' in index.text
+    assert "{{VERSION}}" not in index.text
     assert "script-src 'self'" in index.headers["content-security-policy"]
     assert index.headers["x-frame-options"] == "DENY"
 

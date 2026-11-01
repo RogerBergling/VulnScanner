@@ -9,7 +9,13 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -57,6 +63,12 @@ logger = logging.getLogger("vulnscanner")
 STATIC_DIR = BASE_DIR / "app" / "static"
 AGENT_DIR = BASE_DIR / "agent"
 AGENT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Inject the release version into the SPA shell so the sidebar is correct even
+# before app.js fetches /api/health. Avoids a second hard-coded version string.
+_INDEX_HTML = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace(
+    "{{VERSION}}", __version__
+)
 
 
 @asynccontextmanager
@@ -308,8 +320,8 @@ async def security_and_auth(request: Request, call_next):
 
 
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def index() -> HTMLResponse:
+    return HTMLResponse(_INDEX_HTML)
 
 
 @app.get("/login", include_in_schema=False)
