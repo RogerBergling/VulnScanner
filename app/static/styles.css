@@ -652,3 +652,23 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   max-height: 260px;
   overflow: auto;
 }
+
+/* ---------- Build metadata ---------- */
+.build-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .01em;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

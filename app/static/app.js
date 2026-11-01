@@ -472,6 +472,12 @@
     const counts = data.counts || {};
     const severity = data.severity || {};
     const total = num(severity.total);
+    const build = data.build || {};
+    const buildLabel = 'Version ' + (build.version || '—') +
+      ' · Build #' + (build.number || 'dev') +
+      (build.commit ? ' (' + build.commit + ')' : '') +
+      (build.date ? ' · ' + build.date + ' ' + (build.hour || '') : '') +
+      (build.timezone ? ' ' + build.timezone : '');
     const risk = data.risk || { score: 0, label: 'None' };
     const riskLabel = String(risk.label || 'None');
     const sevBars = SEVERITIES.map(function (key) {
@@ -507,7 +513,8 @@
 
     view.innerHTML =
       '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Security overview</h1>' +
-        '<div class="page-sub">Latest results per asset across all customers. Local data, updated as scans complete.</div></div>' +
+        '<div class="page-sub">Latest results per asset across all customers. Local data, updated as scans complete.</div>' +
+        '<div class="build-meta" title="' + esc(build.display || buildLabel) + '">' + esc(buildLabel) + '</div></div>' +
         '<div class="page-actions"><button class="btn" data-action="import-ad">Import AD report</button>' +
         '<button class="btn btn-primary" data-action="new-scan">' +
           '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>' +
@@ -2502,6 +2509,10 @@
       '<div class="dash-grid-2" style="margin-bottom:16px">' +
         '<section class="panel"><div class="panel-head"><h2>Runtime</h2></div><div class="panel-body">' +
           '<div class="kv"><span>Version</span><span>' + esc(data.product) + ' ' + esc(data.version) + '</span></div>' +
+          '<div class="kv"><span>Build</span><span>#' + esc((data.build || {}).number || 'dev') +
+            ((data.build || {}).commit ? ' · ' + esc(data.build.commit) : '') + '</span></div>' +
+          '<div class="kv"><span>Built</span><span>' + esc((data.build || {}).date || '—') + ' ' +
+            esc((data.build || {}).hour || '') + ' ' + esc((data.build || {}).timezone || '') + '</span></div>' +
           '<div class="kv"><span>Bind address</span><span class="mono">' + esc(fmtHostPort(process.host, process.port)) + '</span></div>' +
           '<div class="kv"><span>Dashboard auth</span><span>' + (process.auth_enabled ? 'enabled (' + esc(process.admin_user) + ')' : 'disabled') + '</span></div>' +
           '<div class="kv"><span>Authenticator MFA</span><span>' + (process.mfa_enabled ? 'enabled' : 'not enrolled') + '</span></div>' +

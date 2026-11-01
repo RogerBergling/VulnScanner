@@ -164,6 +164,16 @@ Public health check.
   "status": "ok",
   "product": "VulnScanner",
   "version": "1.1.1",
+  "build": {
+    "version": "1.1.1",
+    "number": "42",
+    "commit": "abc1234",
+    "time": "2026-11-01T11:14:00+00:00",
+    "date": "2026-11-01",
+    "hour": "11:14",
+    "timezone": "UTC",
+    "display": "v1.1.1 · build #42 (abc1234) · 2026-11-01 11:14 UTC"
+  },
   "time": "2026-01-02T03:04:05+00:00"
 }
 ```
@@ -176,6 +186,13 @@ Lists scan types and agent modules.
 {
   "product": "VulnScanner",
   "version": "1.1.1",
+  "build": {
+    "number": "42",
+    "commit": "abc1234",
+    "date": "2026-11-01",
+    "hour": "11:14",
+    "timezone": "UTC"
+  },
   "scan_types": [
     {"id": "web", "name": "Website / web application"},
     {"id": "network", "name": "Server / network services"},
@@ -218,7 +235,14 @@ risk score/label, recent scans, top critical/high findings and a 14-day trend.
   "risk": {"score": 72, "label": "High"},
   "recent_scans": [],
   "top_findings": [],
-  "trend": []
+  "trend": [],
+  "build": {
+    "number": "42",
+    "commit": "abc1234",
+    "date": "2026-11-01",
+    "hour": "11:14",
+    "timezone": "UTC"
+  }
 }
 ```
 

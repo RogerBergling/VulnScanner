@@ -86,6 +86,7 @@ files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
 | `app/audit.py` | Append-only security audit trail, filtering and CSV export. |
 | `app/migrations.py` | Ordered schema migration ledger and in-place upgrade of older backups. |
 | `app/runtime_settings.py` | Mirrors database-backed listener/tool/admin values into `VS_ENV_FILE` for launchers and service managers. |
+| `app/build_info.py` | Resolves release version, build number/commit and build date/time from release env vars or Git, cached for the process. |
 | `app/net_guard.py` | SSRF-resistant URL validation and redirect-aware downloads. |
 | `app/tool_policy.py` | Optional CLI tool minimum-version policy and scan enforcement. |
 | `app/jobs.py` | Small `ThreadPoolExecutor` that runs scan, AD import and agent-result tasks off the request thread. The pool size is `VS_SCAN_WORKERS` (default 4, range 1-32). |

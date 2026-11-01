@@ -70,6 +70,7 @@ from .credentials import (
     update_credential,
 )
 from .audit import record_request
+from .build_info import build_info
 from .database import (
     ensure_default_group,
     get_db,
@@ -288,6 +289,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "product": "VulnScanner",
         "version": __version__,
+        "build": build_info(),
         "time": utcnow(),
     }
 
@@ -403,6 +405,7 @@ def dashboard() -> dict[str, Any]:
         "recent_scans": [_scan_public(row) for row in recent],
         "top_findings": top_findings,
         "trend": sorted(trend_map.values(), key=lambda item: item["date"]),
+        "build": build_info(),
     }
 
 
@@ -1919,6 +1922,7 @@ def server_status() -> dict[str, Any]:
         "status": "ok" if not db_error else "degraded",
         "product": "VulnScanner",
         "version": __version__,
+        "build": build_info(),
         "time": now.replace(microsecond=0).isoformat(),
         "started_at": _SERVER_STARTED_AT.isoformat(),
         "uptime_seconds": uptime_seconds,
@@ -2239,6 +2243,7 @@ def meta() -> dict[str, Any]:
     return {
         "product": "VulnScanner",
         "version": __version__,
+        "build": build_info(),
         "scan_types": [
             {"id": "web", "name": "Website / web application"},
             {"id": "network", "name": "Server / network services"},

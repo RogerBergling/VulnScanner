@@ -300,6 +300,9 @@ deployment-level values that remain outside the GUI.
 | `VS_TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Forwarded-Proto` from a reverse proxy. Enable only when the app is unreachable except through that proxy. |
 | `VS_ALLOWED_HOSTS` | loopback/localhost | Comma-separated Host-header allowlist for `TrustedHostMiddleware`. Set the public DNS name(s) when behind a reverse proxy. |
 | `VS_MAX_REQUEST_BYTES` | `33554432` | Maximum accepted HTTP request body (32 MiB). Bounds JSON, multipart and agent-result requests. |
+| `VS_BUILD_NUMBER` | Git commit count | Release/build identifier shown on the dashboard. Set by CI/packaging for reproducible artifacts. |
+| `VS_BUILD_TIME` | Git commit time | ISO-8601 build timestamp shown on the dashboard. Set by CI/packaging. |
+| `VS_BUILD_COMMIT` | Git short SHA | Commit identifier shown with the build number. Set by CI/packaging. |
 | `VS_DATA_DIR` | `./data` | Persistent data root: database, certificates, reports, wordlists, backups and temporary clones. Editable in Settings → Advanced runtime → Storage location. Use an absolute path **outside the Git checkout** for production. |
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Editable in Settings → Advanced runtime → Storage location. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
@@ -447,6 +450,14 @@ confirmed.
 Read [docs/AUTHORIZED_USE.md](docs/AUTHORIZED_USE.md) and
 [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md) before
 scanning a production network.
+
+## Version and build metadata
+
+The dashboard header shows the release version, build number, commit and build
+date/time. The same values are available from `GET /api/health`,
+`GET /api/dashboard`, `GET /api/meta` and the Server page. Source checkouts
+derive them from Git; packaged releases should set `VS_BUILD_NUMBER`,
+`VS_BUILD_TIME` and `VS_BUILD_COMMIT` in the build environment.
 
 ## Documentation
 

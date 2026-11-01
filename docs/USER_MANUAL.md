@@ -255,8 +255,9 @@ its safety limits.
 
 The left navigation contains:
 
-- **Dashboard** - risk score, severity totals, recent scans, top findings and a
-  14-day trend.
+- **Dashboard** - risk score, severity totals, recent scans, top findings, a
+  14-day trend and the running release/build metadata (version, build number,
+  commit and build date/time).
 - **Customers** - customers, groups and assets.
 - **Scans** - scan list, new scan dialog, scan detail, findings, reports.
 - **Agents** - endpoint enrolment, per-agent monitoring/configuration, token
