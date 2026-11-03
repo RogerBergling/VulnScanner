@@ -255,6 +255,7 @@ class SettingsUpdate(BaseModel):
     smtp_port: str | None = Field(default=None, max_length=5)
     smtp_user: str | None = Field(default=None, max_length=320)
     smtp_password: str | None = Field(default=None, max_length=1024)
+    smtp_insecure: bool | None = None
     smtp_from: str | None = Field(default=None, max_length=320)
     notify_email_default: str | None = Field(default=None, max_length=320)
     notify_webhook_default: str | None = Field(default=None, max_length=2048)
@@ -310,6 +311,7 @@ class RuntimeSettingsUpdate(BaseModel):
     scan_workers: int | None = Field(default=None, ge=1, le=32)
     external_api_master: bool | None = None
     ssh_known_hosts: str | None = Field(default=None, max_length=4096)
+    ssh_host_key_policy: Literal["enforce", "warn"] | None = None
     wordlist_path: str | None = Field(default=None, max_length=4096)
     seclists_subdomain_url: str | None = Field(default=None, max_length=2048)
     session_ttl_hours: int | None = Field(default=None, ge=1, le=168)

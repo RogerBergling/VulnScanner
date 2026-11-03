@@ -16,7 +16,7 @@ from .base import ScanContext, ScanResult
 from .dependencies import scan_dependencies
 from .secrets import scan_secrets
 from .source import scan_source
-from .tools import run_tool, tool_path
+from .tools import run_tool, safe_tool_env, tool_path
 from .trivy import scan_trivy
 
 
@@ -57,7 +57,7 @@ def _clone_github(ctx: ScanContext, target: str, token: str | None = None) -> Pa
     if not ctx.option_bool("git_history", False):
         command.extend(["--depth", "1", "--single-branch"])
     command.extend([target, str(destination)])
-    env = os.environ.copy()
+    env = safe_tool_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
     if token:

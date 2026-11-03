@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator
 
-from .config import database_path
+from .config import data_dir, database_path
 from .migrations import LATEST_VERSION, apply_migrations
 
 SCHEMA_VERSION = LATEST_VERSION
@@ -285,12 +285,23 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _secure_database_permissions(path: Any) -> None:
+    """Keep the SQLite database and its WAL sidecars private."""
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(f"{path}{suffix}", 0o600)
+        except OSError:
+            pass
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(database_path(), timeout=30, isolation_level=None)
+    path = database_path()
+    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 30000")
+    _secure_database_permissions(path)
     return conn
 
 
@@ -318,6 +329,9 @@ def transaction() -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
+    # Ensure the data root exists with restrictive permissions before SQLite
+    # creates the database or WAL sidecars.
+    data_dir()
     with get_db() as conn:
         apply_migrations(conn, SCHEMA)
         # Always ensure settings exist
@@ -335,6 +349,7 @@ def init_db() -> None:
             "smtp_port": "587",
             "smtp_user": "",
             "smtp_password": "",
+            "smtp_insecure": "false",
             "smtp_from": "",
             "notify_email_default": "",
             "notify_webhook_default": "",

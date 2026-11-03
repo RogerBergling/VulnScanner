@@ -38,6 +38,21 @@ def test_tool_status_handles_version_timeout(monkeypatch):
     assert status["nmap"]["available"] is False
 
 
+def test_run_tool_does_not_inherit_application_secrets(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args, 0, "ok", "")
+
+    monkeypatch.setenv("VS_CREDENTIAL_KEY", "do-not-leak")
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    tools.run_tool(["echo", "hello"], env={"EXTRA": "1"})
+    assert "VS_CREDENTIAL_KEY" not in captured["env"]
+    assert captured["env"]["EXTRA"] == "1"
+    assert "PATH" in captured["env"]
+
+
 def test_run_tool_uses_arguments_without_shell(monkeypatch):
     captured = {}
 

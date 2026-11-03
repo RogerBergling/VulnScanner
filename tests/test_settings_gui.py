@@ -20,6 +20,7 @@ def test_settings_expose_gui_configuration(api_client):
         "external_api_master",
         "external_api_master_saved",
         "ssh_known_hosts",
+        "ssh_host_key_policy",
         "seclists_download_url",
         "smtp",
         "notify_default",
@@ -38,7 +39,7 @@ def test_settings_expose_gui_configuration(api_client):
         "legacy_password_present",
     ):
         assert key in settings
-    assert {"host", "port", "user", "from"} <= set(settings["smtp"])
+    assert {"host", "port", "user", "from", "insecure"} <= set(settings["smtp"])
     assert {"email", "webhook"} <= set(settings["notify_default"])
     assert {"max_web_hosts", "workers"} <= set(settings["limits"])
 
@@ -51,6 +52,7 @@ def test_update_notifications_and_guardrails(api_client):
             "smtp_port": "2525",
             "smtp_user": "scanner@example.test",
             "smtp_password": "smtp-password-123",
+            "smtp_insecure": True,
             "smtp_from": "scanner@example.test",
             "notify_email_default": "soc@example.test",
             "notify_webhook_default": "https://hooks.example.test/vulnscanner",
@@ -67,6 +69,7 @@ def test_update_notifications_and_guardrails(api_client):
     data = response.json()
     assert data["smtp"]["host"] == "smtp.example.test"
     assert data["smtp"]["port"] == "2525"
+    assert data["smtp"]["insecure"] is True
     assert data["notify_default"]["email"] == "soc@example.test"
     assert data["limits"]["max_web_hosts"] == 123
     assert data["limits"]["workers"] == 45
@@ -112,6 +115,7 @@ def test_runtime_settings_write_env_and_apply(api_client, data_dir, monkeypatch,
             "VS_SCAN_WORKERS",
             "VS_ENABLE_EXTERNAL_APIS",
             "VS_SSH_KNOWN_HOSTS",
+            "VS_SSH_HOST_KEY_POLICY",
             "VS_SUBFINDER_WORDLIST",
             "VS_SECLISTS_SUBDOMAIN_URL",
             "VS_SESSION_TTL_HOURS",
@@ -126,6 +130,7 @@ def test_runtime_settings_write_env_and_apply(api_client, data_dir, monkeypatch,
                 "scan_workers": 6,
                 "external_api_master": False,
                 "ssh_known_hosts": str(known_hosts),
+                "ssh_host_key_policy": "warn",
                 "wordlist_path": str(wordlist),
                 "seclists_subdomain_url": "https://example.test/subdomains.txt",
                 "session_ttl_hours": 24,
@@ -148,6 +153,7 @@ def test_runtime_settings_write_env_and_apply(api_client, data_dir, monkeypatch,
         assert "VS_SCAN_WORKERS=6" in env_text
         assert "VS_ENABLE_EXTERNAL_APIS=false" in env_text
         assert f"VS_SSH_KNOWN_HOSTS={known_hosts}" in env_text
+        assert "VS_SSH_HOST_KEY_POLICY=warn" in env_text
         assert f"VS_SUBFINDER_WORDLIST={wordlist}" in env_text
         assert "VS_SECLISTS_SUBDOMAIN_URL=https://example.test/subdomains.txt" in env_text
         assert "VS_SESSION_TTL_HOURS=24" in env_text

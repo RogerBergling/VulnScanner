@@ -2,12 +2,61 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from ..config import TOOL_PATHS
+
+# External tools need a normal process environment, but not the application's
+# secrets. These keys are sufficient for PATH lookup, temporary files, locale,
+# proxy/CA configuration and Windows tool execution.
+SAFE_ENV_KEYS = {
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+    "WINDIR",
+    "TERM",
+    "NO_COLOR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+}
+
+
+def safe_tool_env(extra: dict[str, Any] | None = None) -> dict[str, str]:
+    """Return a minimal environment for an external scanner subprocess.
+
+    The server process may contain ``VS_CREDENTIAL_KEY``, SMTP passwords or
+    other secrets. External tools must not inherit them by default.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in SAFE_ENV_KEYS
+    }
+    if extra:
+        env.update({str(key): str(value) for key, value in extra.items()})
+    return env
 
 TOOL_NAMES = (
     "nmap",
@@ -82,6 +131,6 @@ def run_tool(
         text=True,
         timeout=timeout,
         cwd=cwd,
-        env=env,
+        env=safe_tool_env(env),
         check=False,
     )

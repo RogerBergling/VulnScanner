@@ -12,6 +12,13 @@ database, backup/restore, deployment scripts, CI, tests and documentation.
 > Origin checks), 6 (request-body limits), 9 (MIT license/security policy) and
 > 10 (dependency audit/secret scanning in CI) are implemented. The remaining
 > findings and the P0/P1 roadmap are unchanged.
+>
+> **Additional hardening (2026-11-03):** SMTP TLS certificate verification,
+> restrictive data/database permissions, SSH host-key enforcement by default,
+> rejection of embedded target credentials, minimal external-tool environments,
+> and HTTPS enforcement for WinRM Basic/CredSSP are implemented. The separate
+> wordlist file-read, GitHub token host-allowlist, repository/AD path-scope and
+> login-redirect findings remain open.
 
 This is a working backlog for making VulnScanner suitable for a regulated
 enterprise deployment. It is intentionally blunt: the product is a strong
@@ -39,11 +46,12 @@ gaps are organisational and operational rather than individual code defects:
    Python process with an in-process thread pool and SQLite.
 4. **No protected backup/key lifecycle.** Backups and the live database are
    plaintext; the Fernet key has no rotation or KMS/HSM integration.
-5. **Local file permissions are not hardened by default.** The data directory
-   and database are created with the caller's umask (typically `0775`/`0644`).
+5. **Local file permissions are not hardened by default.** Fixed in 1.1.2:
+   the launchers/startup code enforce `umask 077`, `0700` data roots and `0600`
+   database/WAL/SHM files. Existing deployments must still be checked.
 6. **Scanner trust defaults were too permissive.** Web TLS verification and
-   downgrade controls were fixed in 1.1.1; SSH host-key verification remains
-   optional.
+   downgrade controls were fixed in 1.1.1; SSH host-key verification is
+   enforced by default in 1.1.2. Trust-on-first-use approval remains open.
 7. **Observability and operational controls are thin.** No metrics, tracing,
    request IDs, readiness probe, structured audit shipping or graceful scan
    drain.
@@ -102,27 +110,15 @@ rows identify the human; API tokens cannot exceed their scopes.
 
 ### 3.2 Harden filesystem permissions
 
-**Current state:** `app/config.data_dir()` uses `mkdir()` with the process
-umask; `app/database.connect()` lets SQLite create the database with the umask.
-On a typical Linux host this produces a `0775` data directory and `0644`
-database. `scripts/update.sh` writes a plaintext `.tgz` backup with the default
-umask (`0664` in the review environment).
+**Status: resolved for POSIX installs in 1.1.2.** `run.sh` and
+`scripts/update.sh` set `umask 077`; `data_dir()` enforces `0700`;
+`database.connect()` enforces `0600` on the database, WAL and SHM files; update
+archives are `0600`. A regression test checks the modes. Windows ACL guidance
+and a startup warning for pre-existing permissive files remain open.
 
-**Risk:** any local user can read findings, audit history, password hashes,
-agent metadata and the encrypted credential blobs. A world-readable update
-archive contains the database and credential key.
-
-**Recommended change:**
-
-- Set `umask 077` at the top of `run.sh` and `scripts/update.sh`; set restrictive
-  ACLs in `run.bat` or document Windows ACL steps.
-- After creating the data directory/database, enforce `0700` on the directory
-  and `0600` on the database, `-wal`, `-shm`, credential key, `.env` and
-  backups.
-- `chmod 600` the update archive and use `umask 077` inside the backup step.
-- Add a startup check that refuses to run with a world-readable database or
-  key file, or logs a prominent warning with remediation.
-- Add a test that asserts the modes on a fresh database.
+**Original risk:** a world-readable data directory/database exposed findings,
+audit history, password hashes, agent metadata and encrypted credential blobs;
+a world-readable update archive exposed the database and credential key.
 
 **Acceptance criteria:** a fresh install creates `0700` directories and `0600`
 database/backup files; CI verifies it; the hardening checklist matches reality.
@@ -147,21 +143,15 @@ message unless the operator opts in; no silent scheme downgrade occurs.
 
 ### 3.4 Enforce SSH host-key verification
 
-**Current state:** `app/scanners/authenticated.py` verifies SSH host keys only
-when `VS_SSH_KNOWN_HOSTS` is configured; otherwise it logs the fingerprint and
-continues.
+**Status: enforced by default in 1.1.2.** Authenticated SSH scans now refuse to
+send credentials unless the target key is present in `VS_SSH_KNOWN_HOSTS`.
+`VS_SSH_HOST_KEY_POLICY=warn` is an explicit lab-only opt-out and is logged.
 
-**Risk:** credential disclosure to an impersonated SSH endpoint. This is
-especially serious because authenticated scans use high-privilege accounts.
+**Remaining work:** trust-on-first-use approval in the UI, persistent key-change
+events and a GUI action to import/update known_hosts.
 
-**Recommended change:**
-
-- Default to `RejectPolicy` when a known_hosts file exists.
-- For first contact, implement explicit trust-on-first-use: show the fingerprint
-  in the UI, require an operator approval, then persist it.
-- Refuse authenticated SSH scans with `verify_host_key=false` unless a
-  deliberate “lab mode” setting is enabled and audited.
-- Provide a GUI action to import/update known_hosts and show key changes.
+**Original risk:** credential disclosure to an impersonated SSH endpoint. This
+was especially serious because authenticated scans use high-privilege accounts.
 
 **Acceptance criteria:** an unknown host key blocks the scan by default; the
 operator can approve it once; a changed key is treated as a security event.
@@ -463,11 +453,11 @@ Do not lose these properties while adding enterprise features:
 | Finding | Evidence |
 | --- | --- |
 | Single administrator, no RBAC | `app/security.py`, `app/sessions.py`, docs known limitations |
-| Data dir/DB permissions | `app/config.py` (`data_dir`, `database_path`), `run.sh`, `scripts/update.sh` |
-| Update archive permissions | `scripts/update.sh` (`tar -czf`) |
+| Data dir/DB permissions | `app/config.py` (`data_dir`), `app/database.py`, `run.sh`, `scripts/update.sh` — hardened 1.1.2 |
+| Update archive permissions | `scripts/update.sh` (`tar -czf`) — `umask 077`/`0600` added 1.1.2 |
 | Web TLS verification | `app/scanners/web.py` — verified by default; explicit opt-out (resolved 1.1.1) |
 | Silent HTTPS→HTTP fallback | `app/scanners/web.py` (`_resolve_web_target`) |
-| Optional SSH host-key verification | `app/scanners/authenticated.py` |
+| SSH host-key verification | `app/scanners/authenticated.py` — enforced by default 1.1.2; TOFU UI remains |
 | Internal CA not used for mTLS | `app/certs.py`, `app/api.py` cert endpoints, UI claim |
 | Plaintext backups | `app/backup.py` (`create_backup`) |
 | No key rotation | `app/credentials.py` |

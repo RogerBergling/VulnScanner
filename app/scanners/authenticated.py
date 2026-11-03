@@ -21,7 +21,12 @@ import socket
 from datetime import datetime, timezone
 from typing import Any
 
-from ..config import DANGEROUS_PORTS, ENABLE_EXTERNAL_APIS, ssh_known_hosts_path
+from ..config import (
+    DANGEROUS_PORTS,
+    ENABLE_EXTERNAL_APIS,
+    ssh_host_key_policy,
+    ssh_known_hosts_path,
+)
 from ..credentials import CredentialError, resolve_for_scan
 from ..database import get_setting
 from ..utils import truncate
@@ -494,19 +499,29 @@ def _attempt_host(
 
 
 def _verify_ssh_host_key(transport, host: str, port: int, ctx: ScanContext | None) -> None:
-    """Verify the remote SSH host key when a known_hosts file is configured."""
+    """Verify the remote SSH host key.
+
+    Host-key verification is required by default. ``warn`` is an explicit
+    lab-only policy and is recorded in the scan event log.
+    """
     paramiko = _paramiko()
     remote = transport.get_remote_server_key()
     fingerprint = ":".join(f"{byte:02x}" for byte in remote.get_fingerprint())
     known_hosts = ssh_known_hosts_path()
     if not known_hosts:
-        if ctx:
-            ctx.log(
-                f"SSH host key for {host}:{port} is {remote.get_name()} "
-                f"MD5:{fingerprint} (set VS_SSH_KNOWN_HOSTS to enforce verification)",
-                "warning",
-            )
-        return
+        if ssh_host_key_policy() == "warn":
+            if ctx:
+                ctx.log(
+                    f"SSH host key verification disabled by policy for {host}:{port}; "
+                    f"key {remote.get_name()} MD5:{fingerprint}",
+                    "warning",
+                )
+            return
+        raise ConnectionFailed(
+            "SSH host-key verification is required but VS_SSH_KNOWN_HOSTS is not "
+            "configured. Add the host key to a known_hosts file or set "
+            "VS_SSH_HOST_KEY_POLICY=warn only for an isolated lab."
+        )
     try:
         host_keys = paramiko.HostKeys(known_hosts)
     except (OSError, paramiko.SSHException) as exc:
@@ -1197,6 +1212,17 @@ def collect_windows(
     transport = str(ctx.option("winrm_transport", "ntlm") or "ntlm").lower()
     if transport not in {"ntlm", "basic", "credssp", "kerberos"}:
         transport = "ntlm"
+    if transport in {"basic", "credssp"} and scheme != "https":
+        raise ConnectionFailed(
+            "WinRM basic and CredSSP authentication require HTTPS. "
+            "Enable WinRM over HTTPS (port 5986) before scanning."
+        )
+    if scheme != "https":
+        ctx.log(
+            "WinRM is using HTTP; enable WinRM over HTTPS to protect credentials "
+            "and inventory in transit",
+            "warning",
+        )
     verify = ctx.option_bool("verify_tls", True)
     if not verify:
         ctx.log("WinRM TLS certificate verification is disabled for this scan", "warning")

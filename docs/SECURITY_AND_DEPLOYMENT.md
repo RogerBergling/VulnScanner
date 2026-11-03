@@ -96,9 +96,12 @@ by `VS_MAX_REQUEST_BYTES` (default 32 MiB) before JSON/multipart parsing.
 
 Web scans verify TLS certificates by default. `ignore_tls_errors` and
 `allow_http_fallback` are explicit per-scan opt-ins and are recorded in the
-scan event log. WinRM HTTPS verification defaults to on; SSH host-key
-verification remains a deployment decision until the planned TOFU/enforcement
-work is complete.
+scan event log. WinRM HTTPS verification defaults to on; WinRM `basic` and
+`credssp` transports are refused over HTTP. SSH host-key verification is
+enforced by default and requires a `known_hosts` entry; `warn` is an explicit
+lab-only policy that is recorded in the scan event log. SMTP STARTTLS/SMTPS
+certificate verification is enabled by default; the lab-only insecure override
+is a separate Settings toggle.
 
 Every mutating API request is recorded in the audit trail together with
 authentication, MFA, settings, backup, restore and storage-relocation actions.
@@ -247,15 +250,22 @@ Run VulnScanner as a dedicated, unprivileged account:
 
 ```bash
 sudo useradd --system --home /opt/vulnscanner --shell /usr/sbin/nologin vulnscanner
-sudo install -d -o vulnscanner -g vulnscanner -m 0750 /var/lib/vulnscanner
-sudo install -d -o vulnscanner -g vulnscanner -m 0750 /var/lib/vulnscanner/reports
+sudo install -d -o vulnscanner -g vulnscanner -m 0700 /var/lib/vulnscanner
+sudo install -d -o vulnscanner -g vulnscanner -m 0700 /var/lib/vulnscanner/reports
 ```
 
-The database, certificates and reports should not be world-readable:
+The launcher and startup code enforce `umask 077`, `0700` on the data root and
+`0600` on the database, WAL/SHM sidecars, environment file, credential key and
+backups. On Windows, `run.bat` restricts the environment file to the current
+user; apply equivalent ACLs to the data directory, database and backups. Verify
+an existing deployment:
 
 ```bash
 chmod 700 /var/lib/vulnscanner
-chmod 600 /var/lib/vulnscanner/vulnscanner.db
+chmod 600 /var/lib/vulnscanner/vulnscanner.db \
+          /var/lib/vulnscanner/vulnscanner.db-wal \
+          /var/lib/vulnscanner/vulnscanner.db-shm \
+          /var/lib/vulnscanner/credential.key
 ```
 
 Agent state files and `.env`/environment files contain credentials. Restrict
@@ -563,8 +573,10 @@ Before exposing the service beyond localhost:
 - [ ] Login rate limits and audit alerts monitored.
 - [ ] Firewall allows only the proxy and required agent paths.
 - [ ] Dedicated unprivileged service account.
-- [ ] Data directory mode `0700`, database and environment file mode `0600`
-      or stricter.
+- [ ] Data directory mode `0700`; database, WAL/SHM, credential key and
+      environment file mode `0600` or stricter.
+- [ ] SSH `known_hosts` configured and host-key policy left on `enforce`.
+- [ ] WinRM uses HTTPS for Basic/CredSSP; SMTP TLS verification left enabled.
 - [ ] Backups configured, encrypted and restore-tested.
 - [ ] `VS_ENABLE_EXTERNAL_APIS` set according to policy.
 - [ ] Optional tools installed from trusted sources, pinned by path and covered

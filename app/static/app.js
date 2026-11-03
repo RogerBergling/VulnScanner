@@ -2890,6 +2890,8 @@
         '<label class="field full"><span>Default webhook URL</span><input class="input mono" id="set-notify-webhook" value="' + esc(notify.webhook || '') + '" placeholder="https://hooks.example.com/vulnscanner" autocomplete="off"></label>' +
       '</div>' +
       '<label class="check" style="margin-top:8px"><input type="checkbox" id="clear-smtp-password"><span>Clear the stored SMTP password</span></label>' +
+      switchRow('set-smtp-insecure', 'Allow insecure SMTP TLS',
+        'Disable SMTP server certificate verification. Use only for an isolated lab with a self-signed SMTP server; this is recorded in the server log.', smtp.insecure) +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-notifications">Save notification settings</button>' +
       '<button class="btn" id="test-email">Send test email</button>' +
       '<button class="btn" id="test-webhook">Send test webhook</button>' +
@@ -2933,7 +2935,11 @@
       '<div class="form-grid" style="margin-top:12px">' +
         '<label class="field"><span>Scan workers</span><input class="input" id="adv-scan-workers" type="number" min="1" max="32" value="' + num(settings.scan_workers_saved) + '"><span class="hint">Active: ' + num(settings.scan_workers) + ' · saved: ' + num(settings.scan_workers_saved) + '</span></label>' +
         '<label class="field"><span>Subdomain wordlist path</span><input class="input mono" id="adv-wordlist-path" value="' + esc(settings.wordlist_path || '') + '" placeholder="Default under the data directory"></label>' +
-        '<label class="field"><span>SSH known_hosts file</span><input class="input mono" id="adv-known-hosts" value="' + esc(settings.ssh_known_hosts || '') + '" placeholder="Empty disables host-key verification"></label>' +
+        '<label class="field"><span>SSH known_hosts file</span><input class="input mono" id="adv-known-hosts" value="' + esc(settings.ssh_known_hosts || '') + '" placeholder="Required when policy is enforce"></label>' +
+        '<label class="field"><span>SSH host-key policy</span><select class="select" id="adv-ssh-host-key-policy">' +
+          '<option value="enforce"' + (settings.ssh_host_key_policy !== 'warn' ? ' selected' : '') + '>Enforce (recommended)</option>' +
+          '<option value="warn"' + (settings.ssh_host_key_policy === 'warn' ? ' selected' : '') + '>Warn only (lab)</option>' +
+        '</select><span class="hint">Warn mode allows authenticated SSH scans without a known_hosts file and logs a warning.</span></label>' +
         '<label class="field full"><span>SecLists download URL</span><input class="input mono" id="adv-seclists-url" value="' + esc(settings.seclists_download_url || '') + '"></label>' +
         '<label class="field"><span>Session lifetime (hours)</span><input class="input" id="adv-session-ttl" type="number" min="1" max="168" value="' + num(settings.session_ttl_hours) + '"></label>' +
         '<label class="field"><span>Session idle timeout (minutes)</span><input class="input" id="adv-session-idle" type="number" min="5" max="1440" value="' + num(settings.session_idle_minutes) + '"></label>' +
@@ -3116,6 +3122,7 @@
             smtp_host: $('#set-smtp-host').value.trim(),
             smtp_port: $('#set-smtp-port').value.trim(),
             smtp_user: $('#set-smtp-user').value.trim(),
+            smtp_insecure: $('#set-smtp-insecure').checked,
             smtp_from: $('#set-smtp-from').value.trim(),
             notify_email_default: $('#set-notify-email').value.trim(),
             notify_webhook_default: $('#set-notify-webhook').value.trim()
@@ -3204,6 +3211,7 @@
             scan_workers: Number($('#adv-scan-workers').value),
             external_api_master: $('#adv-external-master').checked,
             ssh_known_hosts: $('#adv-known-hosts').value.trim(),
+            ssh_host_key_policy: $('#adv-ssh-host-key-policy').value,
             wordlist_path: $('#adv-wordlist-path').value.trim(),
             seclists_subdomain_url: $('#adv-seclists-url').value.trim(),
             session_ttl_hours: Number($('#adv-session-ttl').value),

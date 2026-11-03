@@ -5,6 +5,7 @@
 # `git clean`, `git reset --hard`, or deletes the data directory. Override the
 # paths with VS_REPO_DIR, VS_DATA_DIR, VS_BACKUP_DIR and VS_SERVICE.
 set -euo pipefail
+umask 077
 
 REPO_DIR="${VS_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 ENV_FILE="${VS_ENV_FILE:-$REPO_DIR/.env}"
@@ -55,6 +56,7 @@ BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd)"
 BACKUP_FILE="$BACKUP_DIR/vulnscanner-before-update-$STAMP.tgz"
 echo "[update] Backing up $DATA_DIR to $BACKUP_FILE"
 tar -C "$(dirname "$DATA_DIR")" -czf "$BACKUP_FILE" "$(basename "$DATA_DIR")"
+chmod 600 "$BACKUP_FILE"
 echo "[update] Backup written: $BACKUP_FILE"
 
 restart_on_exit() {

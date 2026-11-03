@@ -8,6 +8,7 @@ if "%ENV_FILE%"==".env" if not exist .env if exist .env.example (
   echo [vulnscanner] Creating .env from .env.example
   copy /Y .env.example .env >nul
 )
+if exist "%ENV_FILE%" icacls "%ENV_FILE%" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>&1
 
 rem Load simple KEY=VALUE pairs from the environment file (comments and blank lines ignored).
 if exist "%ENV_FILE%" (

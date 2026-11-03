@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Start VulnScanner with a local virtual environment.
 set -euo pipefail
+umask 077
 cd "$(dirname "$0")"
 
 ENV_FILE="${VS_ENV_FILE:-.env}"

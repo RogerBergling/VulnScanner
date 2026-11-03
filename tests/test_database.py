@@ -1,3 +1,8 @@
+import os
+import stat
+
+import pytest
+
 from app.database import (
     ensure_default_group,
     get_db,
@@ -46,6 +51,13 @@ def test_database_is_initialized_with_defaults(data_dir):
     }.issubset(tables)
     assert get_setting("product_name") == "VulnScanner"
     assert get_setting("missing", "fallback") == "fallback"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not portable")
+def test_data_and_database_permissions_are_private(data_dir):
+    assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+    database = data_dir / "vulnscanner.db"
+    assert stat.S_IMODE(database.stat().st_mode) == 0o600
 
 
 def test_settings_upsert(data_dir):

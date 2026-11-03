@@ -10,11 +10,14 @@ import pytest
 from app.scanners import authenticated
 from app.scanners.authenticated import (
     AuthFailed,
+    ConnectionFailed,
     _add_linux_findings,
     _add_windows_findings,
     _attempt_host,
+    _verify_ssh_host_key,
     _windows_eol,
     authenticated_scan,
+    collect_windows,
     parse_linux_output,
     parse_windows_output,
     select_target_os,
@@ -290,6 +293,45 @@ def test_winrm_invalid_credentials_maps_to_auth_failure(monkeypatch):
             {"username": "svc", "secret": "pw", "auth_type": "password"},
             5.0,
             DummyContext(),
+        )
+
+
+def test_ssh_host_key_verification_is_required_by_default(monkeypatch):
+    class Key:
+        @staticmethod
+        def get_name():
+            return "ssh-ed25519"
+
+        @staticmethod
+        def get_fingerprint():
+            return b"\x01" * 16
+
+    class Transport:
+        @staticmethod
+        def get_remote_server_key():
+            return Key()
+
+    monkeypatch.setattr(authenticated, "ssh_known_hosts_path", lambda: "")
+    monkeypatch.setattr(authenticated, "ssh_host_key_policy", lambda: "enforce")
+    with pytest.raises(ConnectionFailed, match="host-key verification"):
+        _verify_ssh_host_key(Transport(), "192.0.2.10", 22, DummyContext())
+
+    context = DummyContext()
+    monkeypatch.setattr(authenticated, "ssh_host_key_policy", lambda: "warn")
+    _verify_ssh_host_key(Transport(), "192.0.2.10", 22, context)
+    assert any("verification disabled" in message for _level, message in context.logs)
+
+
+def test_winrm_basic_requires_https(monkeypatch):
+    monkeypatch.setattr(
+        authenticated, "_winrm", lambda: types.SimpleNamespace(Session=object)
+    )
+    with pytest.raises(ConnectionFailed, match="require HTTPS"):
+        collect_windows(
+            "192.0.2.20",
+            {"username": "svc", "secret": "pw"},
+            5.0,
+            DummyContext({"winrm_transport": "basic"}),
         )
 
 

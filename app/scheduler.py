@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import smtplib
+import ssl
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from typing import Any, List, Optional
@@ -535,6 +536,18 @@ def _log_delivery(
         return
 
 
+def _smtp_ssl_context() -> ssl.SSLContext:
+    """Return a verified SMTP TLS context, with an explicit lab opt-out."""
+    context = ssl.create_default_context()
+    if get_setting("smtp_insecure", "false") == "true":
+        logger.warning(
+            "SMTP TLS certificate verification is disabled (smtp_insecure=true)"
+        )
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def _send_email(to_address: str, subject: str, body: str) -> None:
     smtp_host = get_setting("smtp_host", "")
     smtp_port = int(get_setting("smtp_port", "587"))
@@ -549,13 +562,14 @@ def _send_email(to_address: str, subject: str, body: str) -> None:
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = to_address
+    context = _smtp_ssl_context()
     if smtp_port == 465:
-        client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+        client = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10, context=context)
     else:
         client = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
     with client as smtp:
         if smtp_port != 465:
-            smtp.starttls()
+            smtp.starttls(context=context)
         smtp.login(smtp_user, smtp_pass)
         smtp.sendmail(from_addr, [to_address], msg.as_string())
 

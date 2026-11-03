@@ -70,6 +70,12 @@ def _env_int(
 def data_dir() -> Path:
     path = Path(os.getenv("VS_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
+    # The data directory contains the database, credential key and backups.
+    # Keep it private even when the caller has a permissive umask.
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
     return path
 
 
@@ -226,6 +232,17 @@ def seclists_subdomain_url() -> str:
 def ssh_known_hosts_path() -> str:
     """Return the optional known_hosts path used by authenticated SSH scans."""
     return os.getenv("VS_SSH_KNOWN_HOSTS", "").strip()
+
+
+def ssh_host_key_policy() -> str:
+    """Return the SSH host-key policy.
+
+    ``enforce`` (default) refuses authenticated SSH scans when no known_hosts
+    file is configured. ``warn`` is an explicit lab-only escape hatch and is
+    recorded in the scan event log.
+    """
+    value = os.getenv("VS_SSH_HOST_KEY_POLICY", "enforce").strip().lower()
+    return value if value in {"enforce", "warn"} else "enforce"
 
 
 HOST = os.getenv("VS_HOST", "127.0.0.1")

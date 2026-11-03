@@ -52,6 +52,7 @@ from .config import (
     get_limit,
     reports_dir,
     seclists_subdomain_url,
+    ssh_host_key_policy,
     ssh_known_hosts_path,
     subfinder_wordlist_path,
 )
@@ -2077,6 +2078,7 @@ def get_settings() -> dict[str, Any]:
         "external_api_master": ENABLE_EXTERNAL_APIS,
         "external_api_master_saved": external_api_master_saved,
         "ssh_known_hosts": ssh_known_hosts_path(),
+        "ssh_host_key_policy": ssh_host_key_policy(),
         "tools": _tools_with_policy(),
         "tool_paths": dict(TOOL_PATHS),
         "wordlist_path": str(subfinder_wordlist_path()),
@@ -2097,6 +2099,7 @@ def get_settings() -> dict[str, Any]:
             "user": get_setting("smtp_user", ""),
             "from": get_setting("smtp_from", ""),
             "password_set": bool(get_setting("smtp_password", "")),
+            "insecure": get_setting("smtp_insecure", "false") == "true",
         },
         "notify_default": {
             "email": get_setting("notify_email_default", ""),
@@ -2169,6 +2172,11 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
     if "smtp_password" in updates and updates["smtp_password"] is not None:
         password = str(updates["smtp_password"])
         set_setting("smtp_password", encrypt_secret(password) if password else "")
+
+    if "smtp_insecure" in updates and updates["smtp_insecure"] is not None:
+        set_setting(
+            "smtp_insecure", "true" if updates["smtp_insecure"] else "false"
+        )
 
     for key in (
         "max_web_hosts",
@@ -2716,6 +2724,9 @@ def update_runtime_settings(payload: RuntimeSettingsUpdate) -> dict[str, Any]:
                 )
             value = str(path.resolve())
         entries["VS_SSH_KNOWN_HOSTS"] = value
+
+    if updates.get("ssh_host_key_policy") is not None:
+        entries["VS_SSH_HOST_KEY_POLICY"] = str(updates["ssh_host_key_policy"])
 
     if "wordlist_path" in updates:
         value = str(updates.get("wordlist_path") or "").strip()

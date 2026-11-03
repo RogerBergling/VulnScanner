@@ -474,10 +474,13 @@ Requirements on the targets:
   the local Administrators group. For domain accounts, use a tiered
   administration model rather than Domain Admin everywhere. HTTPS with a trusted
   certificate is recommended; enable **Use HTTPS** and **Verify TLS** in the scan
-  options when available.
+  options. **Basic** and **CredSSP** transports are refused over HTTP; use HTTPS.
 - **Linux**: SSH reachable, an account with `sudo` rights, and either a password
   or a key. Password authentication and non-interactive `sudo` must be permitted
-  for the collector to read protected files and package state.
+  for the collector to read protected files and package state. SSH host-key
+  verification is enforced by default: add the target key to the configured
+  `known_hosts` file. The **SSH host-key policy** can be set to `warn` only for an
+  isolated lab; it records a warning in the scan event log.
 
 **Lockout protection.** Each host receives at most one authentication attempt per
 scan. The scanner never retries with the same or a different credential, so a
@@ -780,7 +783,8 @@ The Settings page shows:
 - Toggles for external APIs, Nuclei, Nmap, testssl.sh, Trivy and Subfinder.
 - **Email and notifications** for SMTP host/port/user/password/from and default
   notification email/webhook, with **Send test email** and **Send test
-  webhook** buttons.
+  webhook** buttons. SMTP TLS certificates are verified by default; **Allow
+  insecure SMTP TLS** is a lab-only opt-out and is logged.
 - **Scan guardrails** for web-host, worker, repository-size, source-file,
   file-count, CIDR-host and agent-job-timeout limits.
 - Optional tool installation status, versions and editable absolute paths.
@@ -791,9 +795,9 @@ The Settings page shows:
 - **Target credentials** for authenticated network scans, with encrypted
   passwords/SSH keys, customer/global scope and default flags.
 - **Advanced runtime** for scan workers, the deployment external-API master
-  switch, SSH known_hosts, the subdomain wordlist path, the SecLists download
-  URL, session lifetime/idle timeout, reverse-proxy trust, the private-network
-  outbound override and **Storage location**.
+  switch, SSH known_hosts and host-key policy, the subdomain wordlist path, the
+  SecLists download URL, session lifetime/idle timeout, reverse-proxy trust,
+  the private-network outbound override and **Storage location**.
 - **Security and access** for the bind address/port, HTTPS, admin username,
   dashboard password and authenticator MFA.
 - Database path, size and reports path.

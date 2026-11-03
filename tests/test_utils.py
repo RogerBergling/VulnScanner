@@ -62,6 +62,10 @@ def test_normalize_target_url():
         normalize_target_url("ftp://example.com")
     with pytest.raises(ValueError):
         normalize_target_url("https:///nohost")
+    with pytest.raises(ValueError):
+        normalize_target_url("https://user:pass@example.com")
+    with pytest.raises(ValueError):
+        normalize_target_url("https://user@example.com")
 
 
 def test_repo_target_resolution(tmp_path):
@@ -72,6 +76,8 @@ def test_repo_target_resolution(tmp_path):
         normalize_repo_target("git@github.com:owner/repo.git")
     with pytest.raises(ValueError):
         normalize_repo_target(str(tmp_path / "missing"))
+    with pytest.raises(ValueError):
+        normalize_repo_target("https://user:pass@example.com/repo.git")
 
 
 def test_validate_host_target():

@@ -1,7 +1,7 @@
 [project]
 name = "vulnscanner"
 # Keep in sync with app/__init__.py.
-version = "1.1.1"
+version = "1.1.2"
 description = "Local-first vulnerability scanner and management platform"
 license = "MIT"
 license-files = ["LICENSE"]

@@ -123,6 +123,8 @@ def normalize_target_url(target: str) -> str:
     parsed = urlparse(target)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("Only http:// and https:// targets are supported")
+    if parsed.username or parsed.password:
+        raise ValueError("Target URLs must not contain embedded credentials")
     if not parsed.hostname:
         raise ValueError("Target must contain a hostname")
     if re.search(r"\s", parsed.hostname):
@@ -145,6 +147,11 @@ def normalize_repo_target(target: str) -> str:
     if target.startswith("http://"):
         raise ValueError("Plain HTTP clone URLs are not supported. Use HTTPS or a local path.")
     if target.startswith("https://"):
+        parsed = urlparse(target)
+        if parsed.username or parsed.password:
+            raise ValueError("Repository URLs must not contain embedded credentials")
+        if not parsed.hostname:
+            raise ValueError("Repository URL must contain a hostname")
         return target
     path = Path(target).expanduser()
     if not path.is_absolute():

@@ -163,9 +163,9 @@ Public health check.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "build": {
-    "version": "1.1.1",
+    "version": "1.1.2",
     "number": "42",
     "commit": "abc1234",
     "time": "2026-11-01T11:14:00+00:00",
@@ -185,7 +185,7 @@ Lists scan types and agent modules.
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "build": {
     "number": "42",
     "commit": "abc1234",
@@ -697,6 +697,9 @@ Web/TLS options:
 
 Authenticated checks run only on the VulnScanner server. A delegated agent scan
 ignores credentials and performs unauthenticated TCP/web checks only.
+`basic` and `credssp` WinRM transports require HTTPS; `ntlm` over HTTP is
+allowed but produces a warning. SSH host-key verification is enforced by
+default; `ssh_host_key_policy` controls the lab-only `warn` escape hatch.
 
 Request bodies are limited by `VS_MAX_REQUEST_BYTES` (default 32 MiB). Larger
 requests return `413` before JSON or multipart parsing.
@@ -931,7 +934,7 @@ enrolment token.
   "enrollment_token": "vs_enroll_...",
   "name": "web01",
   "platform": "Linux",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "hostname": "web01",
   "capabilities": ["system", "packages", "ports"],
   "ip": ""
@@ -948,7 +951,7 @@ Requires `X-Agent-Token` or a Bearer agent token.
 ```json
 {
   "platform": "Linux",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "hostname": "web01",
   "capabilities": ["system"],
   "ip": ""
@@ -1161,7 +1164,7 @@ be downloaded as a diagnostics snapshot.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "started_at": "2026-01-02T03:04:05+00:00",
   "uptime_seconds": 3600,
   "uptime_human": "1h",
@@ -1362,7 +1365,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "allow_external_apis": true,
   "nuclei_enabled": true,
   "nmap_enabled": true,
@@ -1411,6 +1414,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
   "external_api_master": true,
   "external_api_master_saved": true,
   "ssh_known_hosts": "",
+  "ssh_host_key_policy": "enforce",
   "tools": {
     "nmap": {
       "available": false,
@@ -1433,7 +1437,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
     "max_web_hosts": 20,
     "workers": 300
   },
-  "smtp": {"host": "", "port": "587", "user": "", "from": "", "password_set": false},
+  "smtp": {"host": "", "port": "587", "user": "", "from": "", "password_set": false, "insecure": false},
   "notify_default": {"email": "", "webhook": ""},
   "max_repo_bytes": 536870912,
   "max_source_file_bytes": 1048576,
@@ -1473,6 +1477,7 @@ version policy.
   "smtp_port": "587",
   "smtp_user": "scanner@example.com",
   "smtp_password": "smtp-password",
+  "smtp_insecure": false,
   "smtp_from": "scanner@example.com",
   "notify_email_default": "soc@example.com",
   "notify_webhook_default": "https://hooks.example.com/vulnscanner",
@@ -1489,8 +1494,9 @@ version policy.
 
 All fields are optional; omitted fields keep their current values. Boolean
 settings are `allow_external_apis`, `nuclei_enabled`, `nmap_enabled`,
-`testssl_enabled`, `trivy_enabled`, `subfinder_enabled` and
-`allow_private_outbound`.
+`testssl_enabled`, `trivy_enabled`, `subfinder_enabled`,
+`allow_private_outbound` and `smtp_insecure`. `smtp_insecure=true` disables
+SMTP TLS certificate verification and is intended only for isolated lab use.
 `smtp_port` must be `1`–`65535`, and `notify_webhook_default` must start with
 `http://` or `https://`. Webhook delivery performs full SSRF validation;
 private destinations require `allow_private_outbound`. Numeric guardrails are bounded: `max_web_hosts`
@@ -1585,6 +1591,7 @@ subsequent requests immediately; existing browser credentials must be updated.
   "scan_workers": 6,
   "external_api_master": false,
   "ssh_known_hosts": "/var/lib/vulnscanner/known_hosts",
+  "ssh_host_key_policy": "enforce",
   "wordlist_path": "/var/lib/vulnscanner/wordlists/subdomains.txt",
   "seclists_subdomain_url": "https://example.com/subdomains.txt",
   "session_ttl_hours": 12,
@@ -1597,12 +1604,15 @@ Stores deployment-level values in `VS_ENV_FILE` (default `.env`) and applies
 them to the process where possible. `scan_workers` (1–32) and
 `external_api_master` are read at startup, so changing them returns
 `restart_required: true`. Session lifetime, idle timeout and `trust_proxy`
-apply immediately. The known_hosts path must be
-an existing absolute file; a new wordlist path must be inside `VS_DATA_DIR`;
+apply immediately. `ssh_host_key_policy` is `enforce` or `warn` (lab only).
+The known_hosts path must be an existing absolute file; a new wordlist path
+must be inside `VS_DATA_DIR`;
 the SecLists URL must use HTTP or HTTPS. Values must be safe to place in
 `.env`; shell metacharacters such as `&`, `;`, `$`, quotes and spaces on
 non-Windows hosts are rejected. Empty values clear the optional known_hosts,
-wordlist override or SecLists URL. Returns the refreshed settings object.
+wordlist override or SecLists URL. With `ssh_host_key_policy=enforce` (the
+default), clearing known_hosts causes authenticated SSH scans to fail until a
+known_hosts file is configured. Returns the refreshed settings object.
 
 ### `POST /api/settings/notifications/test`
 

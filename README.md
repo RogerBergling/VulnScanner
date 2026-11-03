@@ -353,7 +353,8 @@ deployment-level values that remain outside the GUI.
 | `VS_MAX_CIDR_HOSTS` | `256` | Maximum addresses expanded from one CIDR target. Editable in Settings → Scan guardrails. |
 | `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before a running agent job is marked failed and its scan is closed. Editable in Settings → Scan guardrails. |
 | `VS_SCAN_WORKERS` | `4` | Parallel server-side scan workers (1-32). Editable in Settings → Advanced runtime; restart required. |
-| `VS_SSH_KNOWN_HOSTS` | empty | Optional known_hosts file. When set, authenticated SSH scans verify the remote host key before sending credentials. Editable in Settings → Advanced runtime. |
+| `VS_SSH_KNOWN_HOSTS` | empty | known_hosts file for authenticated SSH scans. Required by default before credentials are sent. Editable in Settings → Advanced runtime. |
+| `VS_SSH_HOST_KEY_POLICY` | `enforce` | `enforce` requires known_hosts; `warn` is a lab-only opt-out and records a warning in the scan event log. Editable in Settings → Advanced runtime. |
 
 ## Data, backup and upgrades
 
@@ -476,6 +477,13 @@ confirmed.
 - Saved target credentials are encrypted with Fernet and never returned by the
   API. Each host receives at most one authentication attempt per scan to reduce
   account-lockout risk.
+- Authenticated SSH scans enforce known_hosts verification by default. WinRM
+  Basic and CredSSP authentication require HTTPS.
+- SMTP TLS certificates are verified by default; the lab-only insecure opt-out
+  is explicit in Settings.
+- External scanner tools receive a minimal environment without application
+  secrets. The data directory and SQLite database are created with private
+  permissions by the launcher and startup code.
 - Webhook and SecLists URLs are SSRF-validated. Loopback, RFC1918, link-local,
   multicast and reserved destinations are rejected unless the administrator
   explicitly enables private-network outbound URLs.
