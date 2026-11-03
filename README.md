@@ -2,41 +2,16 @@
 
 VulnScanner is a local-first vulnerability scanner and management platform. It
 stores customers, asset groups, assets, scans, findings and endpoint agents in a
-single SQLite database, and it provides a  web interface for running
-and reviewing scans.
-
-VulnScanner can scan:
-
-- Websites and web applications (HTTP security checks, exposed files, security
-  headers, cookies, forms, and optional active checks).
-- Servers and network services (TCP port discovery, service banners, risky
-  ports, built-in web checks on discovered HTTP ports, and optional Nmap/NSE
-  enrichment).
-- Linux and Windows hosts over SSH/WinRM with a high-privilege account
-  (patch level, package CVEs, configuration and inventory), in addition to
-  unauthenticated network checks.
-- Local source repositories and GitHub repositories (secrets, dependency
-  vulnerabilities, source-code review, optional Gitleaks/Semgrep/osv-scanner/Nuclei).
-- Linux and Windows endpoints through an outbound-polling agent.
-- Active Directory configuration from a read-only JSON report produced by the
-  bundled PowerShell collector or the Windows agent.
-
-It is designed for a single analyst workstation or a small authorised team. It
-does not require a separate database server, a Node.js build step, or any
-inbound firewall rules on scanned endpoints.
+single SQLite database and provides a web interface for running and reviewing
+scans.
 
 > **Authorised use only.** Only scan systems you own or have explicit written
 > permission to test. See [AUTHORIZED_USE.md](docs/AUTHORIZED_USE.md).
-<img width="3433" height="1084" alt="image" src="https://github.com/user-attachments/assets/e7508247-6842-44d4-b1e7-7886436b26cb" />
 
-## Quick start
+## The easy way to get up and running
 
-Requirements: Python 3.11 or newer (the universal lock is tested on 3.11 and
-3.14; Ubuntu/Debian also need `python3-venv`), and optionally Git, Nmap, Nuclei,
-testssl.sh, Trivy, Subfinder,
-Gitleaks, Semgrep and osv-scanner. Authenticated host scans use `paramiko`
-(SSH) and `pywinrm` (WinRM), which are installed from the hashed
-`requirements.txt` lock.
+**Prerequisites:** Python 3.11+ and, on Ubuntu/Debian, `python3-venv`. The
+built-in scanners work without any optional tools.
 
 Linux/macOS:
 
@@ -50,18 +25,80 @@ Windows:
 run.bat
 ```
 
+Then:
+
+1. Open <https://127.0.0.1:8765> and accept the self-signed certificate warning.
+2. Go to **Settings → Security**, set an admin password and enable MFA.
+3. Create a customer, group and asset under **Customers**.
+4. Open **Scans → New scan**, choose the target and start the scan.
+5. Review findings and export JSON, CSV or an HTML report.
+
+That is the whole setup. The launcher creates `.env` and `.venv`, installs the
+hashed runtime dependencies, and starts Uvicorn. There is no Docker requirement,
+no separate database server and no Node.js build step.
+
+**First-run notes:**
+
+- The default listener is HTTPS on `127.0.0.1` with a self-signed certificate.
+  This is intended for a single-user workstation.
+- Set `VS_SSL=false` in `.env` only when a TLS-terminating reverse proxy is in
+  front of the app.
+- Do not expose the default listener to an untrusted network. See
+  [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md).
+- Optional tools such as Nmap, Nuclei, testssl.sh, Trivy, Subfinder, Gitleaks,
+  Semgrep and osv-scanner can be added later. Built-in checks still run without
+  them.
+- Back up the data directory before using real customer data.
+
+**Next:** [First scan](#first-scan) ·
+[Optional external tools](#optional-external-tools) ·
+[User manual](docs/USER_MANUAL.md) ·
+[API reference](docs/API.md)
+
+## What it scans
+
+- Websites and web applications: HTTP security checks, exposed files, security
+  headers, cookies, forms and optional active checks.
+- Servers and network services: TCP port discovery, service banners, risky
+  ports, built-in web checks on discovered HTTP ports, and optional Nmap/NSE
+  enrichment.
+- Linux and Windows hosts over SSH/WinRM with a high-privilege account: patch
+  level, package CVEs, configuration and inventory, in addition to
+  unauthenticated network checks.
+- Local source repositories and GitHub repositories: secrets, dependency
+  vulnerabilities, source-code review, and optional Gitleaks, Semgrep,
+  osv-scanner and Nuclei.
+- Linux and Windows endpoints through an outbound-polling agent.
+- Active Directory configuration from a read-only JSON report produced by the
+  bundled PowerShell collector or the Windows agent.
+
+It is designed for a single analyst workstation or a small authorised team. It
+does not require a separate database server, a Node.js build step, or any
+inbound firewall rules on scanned endpoints.
+
+<img width="3433" height="1084" alt="VulnScanner dashboard" src="https://github.com/user-attachments/assets/e7508247-6842-44d4-b1e7-7886436b26cb" />
+
+## Installation details
+
+The normal installation path is the launcher shown above. Use this section for
+requirements, custom service managers and troubleshooting.
+
+Requirements: Python 3.11 or newer (the universal lock is tested on 3.11 and
+3.14; Ubuntu/Debian also need `python3-venv`), and optionally Git, Nmap, Nuclei,
+testssl.sh, Trivy, Subfinder, Gitleaks, Semgrep and osv-scanner. Authenticated
+host scans use `paramiko` (SSH) and `pywinrm` (WinRM), which are installed from
+the hashed `requirements.txt` lock.
+
 The launcher creates `.env` from `.env.example` if it does not exist, creates
-`.venv`, installs the hashed runtime dependencies, and starts Uvicorn. Open
-<https://127.0.0.1:8765> and accept the self-signed certificate warning on first
-use.
+`.venv`, installs the hashed runtime dependencies, and starts Uvicorn.
 
 The default listener is HTTPS on loopback with a self-signed certificate, which
 is suitable for a single-user workstation. The certificate and key are created
 under `$VS_DATA_DIR/certs/` (default `./data/certs/`) on first start. Set
-`VS_SSL=false` in `.env` for plain HTTP,
-for example when a TLS-terminating reverse proxy is in front of the app. For
-anything reachable from another machine, use a reverse proxy for production TLS
-(see [docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
+`VS_SSL=false` in `.env` for plain HTTP, for example when a TLS-terminating
+reverse proxy is in front of the app. For anything reachable from another
+machine, use a reverse proxy for production TLS (see
+[docs/SECURITY_AND_DEPLOYMENT.md](docs/SECURITY_AND_DEPLOYMENT.md)).
 
 All application configuration is available from the GUI. **Settings** covers
 integration toggles, SMTP and notifications, scan guardrails, tool paths,
@@ -80,7 +117,7 @@ If the browser reports `SSL_ERROR_RX_RECORD_TOO_LONG`, you are using `https://`
 against a server that is running plain HTTP. Start the server with `./run.sh`
 (the default is HTTPS) or browse `http://127.0.0.1:8765` when `VS_SSL=false`.
 
-Manual installation:
+### Manual installation
 
 ```bash
 python3 -m venv .venv
