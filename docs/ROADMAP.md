@@ -45,7 +45,12 @@ Nessus-class vulnerability scanner with:
    unauthenticated Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana
    detection, RDP NLA negotiation parsing and VNC security-type handshake;
    read-only; per-scan toggle in the network scan dialog).
-4. **Scan policies** (GUI-defined, reusable). (open)
+4. **Scan policies** (GUI-defined, reusable). — **done**
+   (`app/policies.py` + migration 7: five built-in presets — Discovery,
+   Basic network scan, Web application, PCI-DSS, OWASP Top 10 — plus
+   operator-defined policies with JSON options, managed in Settings; a
+   policy dropdown on the scan dialog; an optional default policy; policy
+   options merge with explicit scan options winning).
 5. **sqlmap integration.** — **done** (`app/scanners/sqlmap.py`, double-gated:
    Settings → Dangerous tools switch plus a per-scan option; runs against
    parameterized URLs discovered by the built-in injection probes, bounded by

@@ -343,6 +343,23 @@ Rescan creates a new scan with the same target and options. It does not reuse
 the old result. Finding status is propagated by fingerprint when the scan is
 attached to the same asset.
 
+### 5.0 Scan policies
+
+The **Policy** dropdown on the scan dialog applies a reusable option preset.
+Built-in presets are seeded automatically:
+
+- **Discovery** — fast asset discovery: top-1000 ports, no web/cve/nuclei depth.
+- **Basic network scan** — balanced unauthenticated scan with deep web checks,
+  service probes, CVE matching and the Nuclei signature engine.
+- **Web application** — full web assessment including deep TLS review.
+- **PCI-DSS** — compliance-oriented network scan with TLS review.
+- **OWASP Top 10** — web scan focused on OWASP-relevant signature tags.
+
+Explicit options chosen in the scan dialog override the policy per key.
+Operators manage policies (and an optional default policy) under
+**Settings → Scan policies**; custom policies accept any scan option as JSON.
+Built-in policies cannot be edited or deleted.
+
 ### 5.1 Web scan
 
 Target forms:

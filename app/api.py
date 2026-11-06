@@ -110,6 +110,8 @@ from .schemas import (
     GroupCreate,
     GroupUpdate,
     NotificationTestRequest,
+    PolicyCreate,
+    PolicyUpdate,
     ScanCreate,
     RuntimeSettingsUpdate,
     ScheduleCreate,
@@ -122,6 +124,16 @@ from .schemas import (
 from .scanners.kev import KevSyncError, sync_kev
 from .scanners.nuclei import TAG_RE, update_templates
 from .scanners.pingcastle import parse_pingcastle_xml
+from .policies import (
+    create_policy,
+    default_policy_id,
+    delete_policy,
+    get_scan_policy,
+    list_policies,
+    resolve_policy,
+    set_default_policy,
+    update_policy,
+)
 from .scanners.subdomains import (
     download_seclists_wordlist,
     normalize_domain,
@@ -1191,6 +1203,11 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="A scan target is required")
     normalized_target = _normalize_scan_target(payload.scan_type, target)
     options = _clean_options(payload.scan_type, payload.options)
+    policy_id = payload.policy_id if payload.policy_id is not None else default_policy_id()
+    try:
+        options = resolve_policy(policy_id, payload.scan_type, options)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     credential_entries: dict[str, dict[str, Any]] | None = None
     if payload.credentials:
         if payload.scan_type != "network":
@@ -2121,6 +2138,7 @@ def get_settings() -> dict[str, Any]:
         in {"1", "true", "yes", "on"},
         "allow_private_outbound": get_setting("allow_private_outbound", "false") == "true",
         "dangerous_tools_enabled": get_setting("dangerous_tools_enabled", "false") == "true",
+        "default_scan_policy": default_policy_id(),
         "tool_policy": get_policy(),
         "bind_host": configured_bind_host,
         "bind_port": configured_bind_port,
@@ -2393,6 +2411,57 @@ def import_ad_report(payload: ADImportRequest) -> dict[str, Any]:
     return _scan_detail(scan_id)
 
 
+@router.get("/policies")
+def scan_policies() -> list[dict[str, Any]]:
+    return list_policies()
+
+
+@router.post("/policies", status_code=201)
+def add_policy(payload: PolicyCreate) -> dict[str, Any]:
+    try:
+        return create_policy(
+            payload.name, payload.scan_type, payload.options, payload.description
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/policies/{policy_id}")
+def edit_policy(policy_id: int, payload: PolicyUpdate) -> dict[str, Any]:
+    updates = payload.model_dump(exclude_unset=True)
+    try:
+        return update_policy(policy_id, **updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/policies/{policy_id}")
+def remove_policy(policy_id: int) -> dict[str, Any]:
+    try:
+        deleted = delete_policy(policy_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return {"deleted": True}
+
+
+@router.post("/policies/default")
+def set_default_scan_policy(payload: dict[str, Any]) -> dict[str, Any]:
+    policy_id = payload.get("policy_id")
+    if policy_id not in (None, ""):
+        try:
+            policy_id = int(policy_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="policy_id must be an integer or null") from exc
+        if get_scan_policy(policy_id) is None:
+            raise HTTPException(status_code=404, detail="Policy not found")
+        set_default_policy(policy_id)
+    else:
+        set_default_policy(None)
+    return {"default_policy_id": default_policy_id()}
+
+
 @router.get("/meta")
 def meta() -> dict[str, Any]:
     return {
@@ -2416,6 +2485,7 @@ def meta() -> dict[str, Any]:
             {"id": "repo", "name": "Repository inventory in selected paths"},
             {"id": "ad", "name": "Active Directory audit (Windows)"},
         ],
+        "default_scan_policy": default_policy_id(),
     }
 
 # ============================================================================

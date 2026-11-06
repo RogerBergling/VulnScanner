@@ -233,6 +233,19 @@ CREATE TABLE IF NOT EXISTS epss_cache (
     fetched_at TEXT NOT NULL
 );
 
+-- Reusable scan policies: Nessus-like configuration presets that a scan can
+-- apply; per-scan options override the policy.
+CREATE TABLE IF NOT EXISTS scan_policies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    scan_type TEXT NOT NULL DEFAULT 'network',
+    builtin INTEGER NOT NULL DEFAULT 0,
+    options TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- Scheduled scans define recurring targets that run on a schedule and may send
 -- notifications when completed.
 CREATE TABLE IF NOT EXISTS scan_schedules (
@@ -396,6 +409,12 @@ def init_db() -> None:
             "last_backup_path": "",
             "product_name": "VulnScanner",
             "risk_acceptance_note": "",
+            "dangerous_tools_enabled": "false",
+            "default_scan_policy": "",
+            "nuclei_default_tags": "cve,misconfiguration,exposure",
+            "nuclei_templates_updated_at": "",
+            "nuclei_templates_status": "",
+            "nuclei_templates_detail": "",
         }
         for key, value in defaults.items():
             conn.execute(
@@ -403,6 +422,10 @@ def init_db() -> None:
                 (key, value),
             )
         conn.commit()
+    # Seed the built-in scan policies (idempotent by name).
+    from .policies import seed_builtin_policies
+
+    seed_builtin_policies()
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:

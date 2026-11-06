@@ -1201,6 +1201,8 @@
           Object.keys(SCAN_TYPES).map(function (key) {
             return '<option value="' + key + '">' + esc(SCAN_TYPES[key].label) + '</option>';
           }).join('') + '</select></label>' +
+        '<label class="field"><span>Policy <span class="muted">(optional)</span></span><select class="select" id="scan-policy"></select>' +
+          '<span class="hint" id="scan-policy-hint">Applies a reusable option preset; dialog options override the policy.</span></label>' +
         '<label class="field"><span>Customer</span><select class="select" id="scan-customer" name="customer_id" required>' +
           customers.map(function (customer) {
             return '<option value="' + customer.id + '">' + esc(customer.name) + '</option>';
@@ -1237,6 +1239,8 @@
               const payload = {
                 customer_id: customerId, scan_type: type, target: target, options: {}
               };
+              const policyValue = ($('#scan-policy', ctx.overlay) || {}).value || '';
+              if (policyValue) payload.policy_id = Number(policyValue);
               if (groupValue) payload.group_id = Number(groupValue);
               if (assetValue) payload.asset_id = Number(assetValue);
               if (type === 'web') {
@@ -1351,6 +1355,28 @@
         const tokenField = $('#github-token-field', overlay);
         let detail = null;
         let agentCache = null;
+        let policyCache = null;
+
+        async function loadPolicies(force) {
+          if (policyCache && !force) return policyCache;
+          try { policyCache = await get('/policies'); }
+          catch (ignore) { policyCache = []; }
+          return policyCache;
+        }
+
+        function renderPolicySelect(type) {
+          const select = $('#scan-policy', overlay);
+          if (!select) return;
+          const policies = policyCache || [];
+          const matching = policies.filter(function (policy) { return policy.scan_type === type; });
+          const defaultId = (state.meta && state.meta.default_scan_policy) || null;
+          let html = '<option value="">Custom options</option>';
+          matching.forEach(function (policy) {
+            const isDefault = defaultId !== null && Number(defaultId) === Number(policy.id);
+            html += '<option value="' + policy.id + '">' + esc(policy.name) + (policy.builtin ? ' (built-in)' : '') + (isDefault ? ' (default)' : '') + '</option>';
+          });
+          select.innerHTML = html;
+        }
 
         async function loadAgents(force) {
           if (agentCache && !force) return agentCache;
@@ -1390,6 +1416,7 @@
           const previousAgent = ($('#opt-agent', overlay) || {}).value || '';
           const previousProfile = ($('#opt-profile', overlay) || {}).value || '';
           const previousPorts = ($('#opt-ports', overlay) || {}).value || '';
+          renderPolicySelect(type);
           targetInput.placeholder = config.placeholder;
           targetInput.rows = type === 'network' ? 5 : 2;
           targetInput.style.minHeight = type === 'network' ? '104px' : '44px';
@@ -1524,6 +1551,7 @@
         groupSelect.addEventListener('change', function () { renderAssets(); assetSelect.value = ''; renderType(); });
         assetSelect.addEventListener('change', function () { applyAsset(true); });
         loadAgents().then(function () { if (typeSelect.value === 'network') renderType(); });
+        loadPolicies().then(function () { renderPolicySelect(typeSelect.value); });
 
         if (initial.type && SCAN_TYPES[initial.type]) typeSelect.value = initial.type;
         if (initial.customerId) customerSelect.value = String(initial.customerId);
@@ -2936,6 +2964,53 @@
       '</div><div class="form-error"></div></form>';
   }
 
+  function policyModal(item) {
+    const policy = item || null;
+    const modal = openModal({
+      title: policy ? 'Edit policy' : 'Add policy',
+      size: 'wide',
+      content: '<form id="policy-form" autocomplete="off"><div class="form-grid">' +
+        '<label class="field"><span>Name</span><input class="input" id="policy-name" maxlength="120" value="' + esc(policy ? policy.name : '') + '" placeholder="DMZ basic scan" required></label>' +
+        '<label class="field"><span>Scan type</span><select class="select" id="policy-type">' +
+          ['network', 'web', 'domain'].map(function (type) {
+            return '<option value="' + type + '"' + (policy && policy.scan_type === type ? ' selected' : '') + '>' + esc(type) + '</option>';
+          }).join('') + '</select></label>' +
+        '<label class="field full"><span>Description</span><input class="input" id="policy-desc" maxlength="2000" value="' + esc(policy ? policy.description : '') + '" placeholder="What this policy is for"></label>' +
+        '<label class="field full"><span>Options (JSON)</span><textarea class="textarea mono" id="policy-options" rows="8" spellcheck="false" placeholder="{ &quot;profile&quot;: &quot;common&quot;, &quot;nuclei&quot;: true }">' +
+          esc(policy ? JSON.stringify(policy.options || {}, null, 2) : '') + '</textarea>' +
+          '<span class="hint">Option names match the scan dialog toggles, for example <span class="mono">profile</span>, <span class="mono">web_checks</span>, <span class="mono">cve_lookup</span>, <span class="mono">nuclei</span>, <span class="mono">nuclei_tags</span>, <span class="mono">service_probes</span>, <span class="mono">testssl</span>.</span></label>' +
+        '</div><div class="form-error"></div></form>',
+      actions: [
+        { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+        { label: policy ? 'Save policy' : 'Add policy', class: 'btn-primary', onClick: function (ctx) {
+          runWithButton(ctx.button, async function () {
+            clearFormError(ctx.overlay);
+            try {
+              const name = $('#policy-name', ctx.overlay).value.trim();
+              if (!name) throw new Error('Enter a policy name');
+              let options = {};
+              const rawOptions = $('#policy-options', ctx.overlay).value.trim();
+              if (rawOptions) {
+                try { options = JSON.parse(rawOptions); } catch (parseError) { throw new Error('Options are not valid JSON: ' + parseError.message); }
+                if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('Options must be a JSON object');
+              }
+              const payload = {
+                name: name,
+                scan_type: $('#policy-type', ctx.overlay).value,
+                description: $('#policy-desc', ctx.overlay).value.trim(),
+                options: options
+              };
+              if (policy) await patch('/policies/' + policy.id, payload);
+              else await post('/policies', payload);
+              ctx.close(); toast(policy ? 'Policy updated' : 'Policy added'); router();
+            } catch (error) { formError(ctx.overlay, errorText(error)); }
+          });
+        } }
+      ]
+    });
+    return modal;
+  }
+
   function credentialModal(item, customers) {
     const credential = item || null;
     const modal = openModal({
@@ -3043,11 +3118,30 @@
     catch (error) { certInfo = { web: { exists: false, cert_path: null, key_path: null, cert_size_bytes: 0 }, internal: { exists: false, ca_path: null, cert_path: null, key_path: null, cert_size_bytes: 0 } }; }
     let credentials = [];
     let customers = [];
+    let policies = [];
     try {
-      const loaded = await Promise.all([get('/credentials'), get('/customers')]);
+      const loaded = await Promise.all([get('/credentials'), get('/customers'), get('/policies')]);
       credentials = loaded[0] || [];
       customers = loaded[1] || [];
+      policies = loaded[2] || [];
     } catch (ignore) { /* credential management is optional */ }
+    const policyRows = policies.length ? policies.map(function (policy) {
+      const optionCount = Object.keys(policy.options || {}).length;
+      const isDefault = settings.default_scan_policy !== null && settings.default_scan_policy !== undefined && Number(settings.default_scan_policy) === Number(policy.id);
+      return '<div class="tool-row"><span class="tool-name">' + esc(policy.name) +
+        (isDefault ? ' <span class="badge sev-info">default</span>' : '') + '</span>' +
+        '<span class="badge sev-none">' + esc(policy.scan_type) + '</span>' +
+        '<span class="tool-path">' + esc(policy.description) + '</span>' +
+        '<span class="tool-version">' + optionCount + ' option(s)' + (policy.builtin ? ' · built-in' : '') + '</span>' +
+        '<span class="row-actions">' +
+        (isDefault
+          ? '<button class="btn btn-sm" data-action="policy-default-clear">Clear default</button>'
+          : '<button class="btn btn-sm" data-action="policy-default" data-policy="' + policy.id + '">Set default</button>') +
+        (policy.builtin ? '' :
+          '<button class="btn btn-sm" data-action="edit-policy" data-policy="' + policy.id + '">Edit</button>' +
+          '<button class="btn btn-sm btn-subtle danger-text" data-action="delete-policy" data-policy="' + policy.id + '" data-name="' + esc(policy.name) + '">Delete</button>') +
+        '</span></div>';
+    }).join('') : '<p class="muted small" style="margin:0">No scan policies. Built-in presets are created automatically; add your own here.</p>';
     const credentialRows = credentials.length ? credentials.map(function (item) {
       const account = (item.domain ? item.domain + '\\' : '') + item.username;
       const scope = item.customer_id ? 'Customer #' + item.customer_id : 'Global';
@@ -3097,6 +3191,10 @@
     const notify = settings.notify_default || {};
     const limits = settings.limits || {};
     const mfa = settings.mfa || {};
+    const policiesPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Scan policies</h2><span class="spacer"></span>' +
+      '<button class="btn btn-sm btn-primary" id="add-policy">Add policy</button></div><div class="panel-body">' +
+      '<p class="muted small" style="margin-top:0">Reusable option presets applied when a scan is created; per-scan options override the policy. The default policy (if set) applies when a scan chooses none. Built-in policies are read-only.</p>' +
+      policyRows + '</div></section>';
     const notificationsPanel = '<section class="panel settings-wide"><div class="panel-head"><h2>Email and notifications</h2></div><div class="panel-body">' +
       '<p class="muted small" style="margin-top:0">SMTP credentials and default notification targets. Schedule-specific addresses override these defaults. The SMTP password is encrypted at rest and is never returned by the API.</p>' +
       '<div class="form-grid">' +
@@ -3234,6 +3332,7 @@
         '</div></section>' +
         notificationsPanel +
         guardrailsPanel +
+        policiesPanel +
         '<section class="panel settings-wide"><div class="panel-head"><h2>Target credentials</h2><span class="spacer"></span>' +
           '<button class="btn btn-sm btn-primary" data-action="add-credential">Add credential</button></div><div class="panel-body">' +
           '<p class="muted small" style="margin-top:0">Accounts used by authenticated network scans (SSH for Linux, WinRM for Windows). ' +
@@ -3775,6 +3874,7 @@
         } catch (error) { toast(errorText(error), 'error'); }
       });
     });
+    $('#add-policy').addEventListener('click', function () { policyModal(null); });
     view.addEventListener('click', function (event) {
       const add = event.target.closest('[data-action="add-credential"]');
       if (add) { event.preventDefault(); credentialModal(null, customers); return; }
@@ -3795,6 +3895,41 @@
           del('/credentials/' + id).then(function () { toast('Credential deleted'); router(); })
             .catch(function (error) { toast(errorText(error), 'error'); });
         });
+      }
+      const editPolicy = event.target.closest('[data-action="edit-policy"]');
+      if (editPolicy) {
+        event.preventDefault();
+        const id = Number(editPolicy.getAttribute('data-policy'));
+        const policy = policies.find(function (item) { return Number(item.id) === id; });
+        if (policy) policyModal(policy);
+        return;
+      }
+      const deletePolicy = event.target.closest('[data-action="delete-policy"]');
+      if (deletePolicy) {
+        event.preventDefault();
+        const id = Number(deletePolicy.getAttribute('data-policy'));
+        confirmAction('Delete policy “' + deletePolicy.getAttribute('data-name') + '”?', 'Delete policy').then(function (ok) {
+          if (!ok) return;
+          del('/policies/' + id).then(function () { toast('Policy deleted'); router(); })
+            .catch(function (error) { toast(errorText(error), 'error'); });
+        });
+        return;
+      }
+      const defaultPolicy = event.target.closest('[data-action="policy-default"]');
+      if (defaultPolicy) {
+        event.preventDefault();
+        post('/policies/default', { policy_id: Number(defaultPolicy.getAttribute('data-policy')) })
+          .then(function () { toast('Default policy set'); router(); })
+          .catch(function (error) { toast(errorText(error), 'error'); });
+        return;
+      }
+      const clearDefaultPolicy = event.target.closest('[data-action="policy-default-clear"]');
+      if (clearDefaultPolicy) {
+        event.preventDefault();
+        post('/policies/default', { policy_id: null })
+          .then(function () { toast('Default policy cleared'); router(); })
+          .catch(function (error) { toast(errorText(error), 'error'); });
+        return;
       }
       const certUpload = event.target.closest('[data-action="cert-upload-web"]');
       if (certUpload) { event.preventDefault(); openCertUploadModal('web'); return; }

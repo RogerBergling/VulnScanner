@@ -161,6 +161,8 @@ class ScanCreate(BaseModel):
     # .txt/.csv, so this is intentionally larger than a single hostname.
     target: str = Field(default="", max_length=100_000)
     options: dict[str, Any] = Field(default_factory=dict)
+    # Optional scan policy to apply; explicit options override the policy.
+    policy_id: int | None = None
     # Per-scan credential overrides keyed by "linux"/"windows". The values are
     # encrypted into the per-scan credential table and never returned.
     credentials: dict[CredentialOS, ScanCredentialInput] | None = None
@@ -558,3 +560,17 @@ class ADImportRequest(BaseModel):
         if has_json == has_xml:
             raise ValueError("Provide exactly one of 'report' (JSON object) or 'xml' (PingCastle report)")
         return self
+
+
+class PolicyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    scan_type: Literal["web", "network", "domain"]
+    description: str = Field(default="", max_length=2000)
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class PolicyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    scan_type: Literal["web", "network", "domain"] | None = None
+    description: str | None = Field(default=None, max_length=2000)
+    options: dict[str, Any] | None = None

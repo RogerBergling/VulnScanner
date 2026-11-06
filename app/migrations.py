@@ -16,7 +16,7 @@ from typing import Callable
 # Version 3 is the last schema that existed before the migration ledger was
 # introduced.  Keep this in sync with the historical SCHEMA_VERSION.
 BASELINE_VERSION = 3
-LATEST_VERSION = 6
+LATEST_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -163,10 +163,30 @@ def _migration_6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_7(conn: sqlite3.Connection) -> None:
+    """Reusable scan policies (Nessus-like configuration presets)."""
+    _run_sql(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS scan_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            scan_type TEXT NOT NULL DEFAULT 'network',
+            builtin INTEGER NOT NULL DEFAULT 0,
+            options TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """,
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "session authentication and audit log", _migration_4),
     Migration(5, "notification history and finding-history index", _migration_5),
     Migration(6, "NVD and EPSS caches", _migration_6),
+    Migration(7, "scan policies", _migration_7),
 )
 
 
