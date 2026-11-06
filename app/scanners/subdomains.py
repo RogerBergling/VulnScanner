@@ -292,6 +292,39 @@ def _bruteforce(ctx: ScanContext, domain: str) -> tuple[set[str], dict[str, list
     }
 
 
+def discover_subdomains(
+    ctx: ScanContext,
+    domain: str,
+    *,
+    use_subfinder: bool = True,
+    use_wordlist: bool = True,
+    max_hosts: int = 1000,
+) -> set[str]:
+    """Enumerate subdomains of ``domain`` for wildcard scan expansion.
+
+    Combines passive Subfinder enumeration and the local wordlist pass used by
+    the Domain scan type, bounded by ``max_hosts``. Returns hostnames only.
+    """
+    found: set[str] = set()
+    if use_subfinder:
+        try:
+            found.update(_run_subfinder(ctx, domain))
+        except ScanCancelled:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            ctx.log(f"Passive enumeration failed for {domain}: {exc}", "warning")
+    if use_wordlist:
+        hosts, _addresses, _info = _bruteforce(ctx, domain)
+        found.update(hosts)
+    if len(found) > max_hosts:
+        ctx.log(
+            f"Wildcard expansion limited to {max_hosts} of {len(found)} discovered host(s)",
+            "warning",
+        )
+        found = set(sorted(found)[:max_hosts])
+    return found
+
+
 def scan_subdomains(ctx: ScanContext) -> ScanResult:
     result = ScanResult()
     domain = normalize_domain(ctx.target)

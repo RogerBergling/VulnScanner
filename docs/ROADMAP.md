@@ -111,7 +111,15 @@ Nessus-class vulnerability scanner with:
 
 ## 5. Open inputs needed from the operator
 
-- Sample PingCastle XML and Purple Knight report files (Phase 3).
+- Sample PingCastle XML and Purple Knight report files (Phase 3). **PingCastle
+  received and implemented; Purple Knight skipped per operator decision.**
 - Confirmation of which Phase 1 items to build first if scope must be cut.
 - Whether `sqlmap` should ship in the UI as a per-scan toggle plus a global
-  "dangerous tools" settings gate (recommended).
+  "dangerous tools" settings gate (recommended). **Implemented.**
+
+## 6. Wildcard domain targets
+
+**Done.** `*.example.com` in a network scan job now runs subdomain discovery
+(Subfinder passive + SecLists wordlist) and scans every discovered host
+automatically in the same job. Bounded by `max_wildcard_hosts` (default 1000)
+and the server host limit; expansion metadata is recorded on the scan.

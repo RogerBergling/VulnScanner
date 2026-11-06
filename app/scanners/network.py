@@ -702,10 +702,56 @@ def _run_cve_matching(
     return total_added
 
 
+def _expand_wildcards(
+    ctx: ScanContext, entries: list[str]
+) -> tuple[list[str], list[str], dict[str, list[str]]]:
+    """Split wildcard targets (``*.example.com``) from plain targets.
+
+    Wildcards are expanded with subdomain discovery (Subfinder + wordlist) and
+    the discovered hostnames are returned to be scanned in the same job.
+    """
+    plain: list[str] = []
+    discovered: list[str] = []
+    metadata: dict[str, list[str]] = {}
+    wildcard_domains = [entry[2:] for entry in entries if entry.startswith("*.")]
+    for entry in entries:
+        if not entry.startswith("*."):
+            plain.append(entry)
+    if not wildcard_domains:
+        return plain, discovered, metadata
+    from .subdomains import discover_subdomains, normalize_domain
+
+    try:
+        max_hosts = int(ctx.option("max_wildcard_hosts", 1000))
+    except (TypeError, ValueError):
+        max_hosts = 1000
+    max_hosts = max(1, min(10_000, max_hosts))
+    for domain in wildcard_domains:
+        try:
+            domain = normalize_domain(domain)
+        except ValueError as exc:
+            raise ValueError(f"Invalid wildcard target: {exc}") from exc
+        ctx.log(
+            f"Wildcard target *.{domain}: running subdomain discovery "
+            f"(Subfinder passive + wordlist), then scanning discovered hosts"
+        )
+        hosts = discover_subdomains(ctx, domain, max_hosts=max_hosts)
+        ctx.log(f"Wildcard *.{domain} resolved to {len(hosts)} host(s)")
+        discovered.extend(sorted(hosts))
+        metadata[domain] = sorted(hosts)[:200]
+    return plain, discovered, metadata
+
+
 def scan(ctx: ScanContext) -> ScanResult:
     result = ScanResult()
     ports = parse_ports(ctx.option("ports"), ctx.option("profile", "common"))
-    hosts = _expand_hosts(ctx.target)
+    entries = parse_target_list(ctx.target)
+    plain_entries, discovered_hosts, wildcard_meta = _expand_wildcards(ctx, entries)
+    if discovered_hosts:
+        target = "\n".join(plain_entries + discovered_hosts)
+    else:
+        target = ctx.target
+    hosts = _expand_hosts(target)
     timeout = float(ctx.option("connect_timeout", 0.45))
     timeout = max(0.1, min(timeout, 3.0))
     workers = _bounded_int(
@@ -746,6 +792,8 @@ def scan(ctx: ScanContext) -> ScanResult:
             for item in all_open[:1000]
         ],
     }
+    if wildcard_meta:
+        result.metadata["wildcard_expansion"] = wildcard_meta
     _add_port_findings(result, all_open, ctx)
 
     # Active service security probes: SMB signing, unauthenticated

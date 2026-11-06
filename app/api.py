@@ -920,6 +920,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             ("auth_timeout", 3, 90),
             ("max_web_hosts", 1, 200),
             ("max_testssl_hosts", 0, 50),
+            ("max_wildcard_hosts", 1, 10_000),
             ("ssh_port", 1, 65535),
             ("winrm_port", 1, 65535),
         ):

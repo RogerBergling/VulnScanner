@@ -1095,6 +1095,9 @@
           '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
         '<label class="field"><span>Custom ports <span class="muted">(optional)</span></span>' +
           '<input class="input" id="opt-ports" placeholder="22,80,443 or 1-1024"></label>' +
+        '<label class="field"><span>Max hosts from wildcard discovery</span>' +
+          '<input class="input" id="opt-max-wildcard" type="number" min="1" max="10000" value="1000">' +
+          '<span class="hint">Cap on subdomains scanned when the target is <span class="mono">*.example.com</span>. The server host limit still applies.</span></label></div>' +
         '<label class="field"><span>Max pages to crawl per web service</span>' +
           '<input class="input" id="opt-max-web-pages" type="number" min="0" max="50" value="10">' +
           '<span class="hint">Same-origin HTML links followed after an HTTP/HTTPS service is found. 0 disables crawling.</span></label>' +
@@ -1279,6 +1282,8 @@
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
                 const ports = ($('#opt-ports', ctx.overlay) || {}).value || '';
                 if (ports.trim()) payload.options.ports = ports.trim();
+                const wildcardHosts = (($('#opt-max-wildcard', ctx.overlay) || {}).value || '').trim();
+                if (wildcardHosts) payload.options.max_wildcard_hosts = Number(wildcardHosts);
                 const agentId = ($('#opt-agent', ctx.overlay) || {}).value || '';
                 if (agentId) payload.agent_id = agentId;
                 const authenticated = !!($('#opt-auth', ctx.overlay) || {}).checked;
@@ -1428,7 +1433,7 @@
               (type === 'ad' ? 'The JSON report must already exist on the server.' :
                 (type === 'domain' ? 'Enter a bare domain such as example.com. Discovered subdomains are reported, not scanned automatically.' :
                   (type === 'network'
-                    ? 'One host, IP or CIDR per line. Import a .txt or .csv with one target per row (the first CSV column is used).'
+                    ? 'One host, IP or CIDR per line, or a wildcard such as *.bergling.net to discover its subdomains and scan them automatically. Import a .txt or .csv with one target per row (the first CSV column is used).'
                     : 'Only scan systems you own or have written permission to test.'))));
           $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type, agentOptionsHtml());
           const agentSelect = $('#opt-agent', overlay);

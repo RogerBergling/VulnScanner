@@ -406,6 +406,10 @@ Targets:
 
 - Hostname or IP: `web01.example.com`, `192.0.2.10`
 - CIDR: `192.0.2.0/30` (up to `VS_MAX_CIDR_HOSTS`, default 256 addresses)
+- Wildcard domain: `*.example.com` — runs subdomain discovery (Subfinder
+  passive enumeration plus the SecLists wordlist) and then scans every
+  discovered host automatically in the same job. Bounded by **Max hosts
+  from wildcard discovery** (default 1000) and the server host limit.
 - Multiple hosts/CIDRs: enter one per line, or use **Import .txt / .csv**.
   Imported files use one target per row; for CSV the first column is used and
   common header rows (`ip`, `host`, `target`, …) are ignored. Duplicate targets
