@@ -6,9 +6,11 @@ import ipaddress
 import json
 import os
 import platform as os_platform
+import re
 import shlex
 import shutil
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -118,6 +120,7 @@ from .schemas import (
     WordlistUpdate,
 )
 from .scanners.kev import KevSyncError, sync_kev
+from .scanners.nuclei import TAG_RE, update_templates
 from .scanners.pingcastle import parse_pingcastle_xml
 from .scanners.subdomains import (
     download_seclists_wordlist,
@@ -832,6 +835,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "ignore_tls_errors",
             "allow_http_fallback",
             "cve_lookup",
+            "nuclei",
         ],
         "network": [
             "external_tools",
@@ -846,6 +850,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "scan_unresponsive_hosts",
             "cve_lookup",
             "service_probes",
+            "nuclei",
         ],
         "repo": [
             "include_secrets",
@@ -932,6 +937,14 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
             clean[key] = max(low, min(high, value))
+    if scan_type in {"web", "network"} and "nuclei_tags" in options:
+        tags = str(options["nuclei_tags"] or "").strip()
+        if not re.fullmatch(TAG_RE, tags):
+            raise HTTPException(
+                status_code=400,
+                detail="nuclei_tags may contain only letters, digits, commas and dashes",
+            )
+        clean["nuclei_tags"] = tags
     if scan_type == "domain":
         for key, low, high in (
             ("max_words", 1, 50_000),
@@ -2078,6 +2091,10 @@ def get_settings() -> dict[str, Any]:
         "version": __version__,
         "allow_external_apis": get_setting("allow_external_apis", "true") == "true",
         "nuclei_enabled": get_setting("nuclei_enabled", "true") == "true",
+        "nuclei_default_tags": get_setting("nuclei_default_tags", "cve,misconfiguration,exposure"),
+        "nuclei_templates_updated_at": get_setting("nuclei_templates_updated_at", ""),
+        "nuclei_templates_status": get_setting("nuclei_templates_status", ""),
+        "nuclei_templates_detail": get_setting("nuclei_templates_detail", ""),
         "nmap_enabled": get_setting("nmap_enabled", "true") == "true",
         "testssl_enabled": get_setting("testssl_enabled", "true") == "true",
         "trivy_enabled": get_setting("trivy_enabled", "true") == "true",
@@ -2214,6 +2231,15 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         set_setting("notify_webhook_default", webhook)
 
+    if "nuclei_default_tags" in updates and updates["nuclei_default_tags"] is not None:
+        tags = str(updates["nuclei_default_tags"]).strip()
+        if tags and not re.fullmatch(TAG_RE, tags):
+            raise HTTPException(
+                status_code=400,
+                detail="Nuclei template tags may contain only letters, digits, commas and dashes",
+            )
+        set_setting("nuclei_default_tags", tags)
+
     # SMTP passwords are secrets, not ordinary preferences. Encrypt them with
     # the same Fernet key used for target credentials. An empty value clears the
     # stored password.
@@ -2257,6 +2283,28 @@ def sync_kev_catalog() -> dict[str, Any]:
         return sync_kev()
     except KevSyncError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/settings/nuclei/update-templates")
+def update_nuclei_templates() -> dict[str, Any]:
+    """Start a Nuclei template update in the background."""
+    if get_setting("nuclei_enabled", "true") != "true":
+        raise HTTPException(status_code=400, detail="Nuclei integration is disabled in Settings")
+    if not ENABLE_EXTERNAL_APIS or get_setting("allow_external_apis", "true") != "true":
+        raise HTTPException(
+            status_code=400,
+            detail="External APIs are disabled. Enable them in Settings or set VS_ENABLE_EXTERNAL_APIS=true.",
+        )
+
+    def _run() -> None:
+        try:
+            update_templates()
+        except Exception:
+            # The updater stores its own status; never crash the thread.
+            pass
+
+    threading.Thread(target=_run, name="nuclei-template-update", daemon=True).start()
+    return {"started": True, "updated_at": get_setting("nuclei_templates_updated_at", "")}
 
 
 @router.post("/ad/import", status_code=201)

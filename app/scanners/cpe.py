@@ -23,7 +23,7 @@ from typing import Any, Callable
 import requests
 
 from ..config import ENABLE_EXTERNAL_APIS
-from ..database import get_db, get_setting, json_dump, utcnow
+from ..database import get_db, json_dump, setting_or_default, utcnow
 from .base import Finding, ScanResult
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -483,7 +483,7 @@ def lookup_cves(match: ProductMatch, log: Callable[[str], None] | None = None) -
     """Resolve applicable CVEs for a fingerprinted product version."""
     if not match.vendor or not match.product or not match.version:
         return []
-    if not ENABLE_EXTERNAL_APIS or get_setting("allow_external_apis", "true") != "true":
+    if not ENABLE_EXTERNAL_APIS or setting_or_default("allow_external_apis", "true") != "true":
         return []
     attempts: list[tuple[str, str]] = [(match.vendor, match.product)]
     for fallback in FINGERPRINTS:
@@ -565,7 +565,7 @@ def _epss_store(rows: dict[str, dict[str, Any]]) -> None:
 
 def lookup_epss(cve_ids: list[str], log: Callable[[str], None] | None = None) -> dict[str, dict[str, Any]]:
     """Return {cve_id: {score, percentile}} for the given CVEs."""
-    if not cve_ids or not ENABLE_EXTERNAL_APIS or get_setting("allow_external_apis", "true") != "true":
+    if not cve_ids or not ENABLE_EXTERNAL_APIS or setting_or_default("allow_external_apis", "true") != "true":
         return {}
     found, missing = _epss_cached(cve_ids)
     if not missing:

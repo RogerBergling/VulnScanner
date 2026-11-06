@@ -37,7 +37,7 @@ hardening requirements.
 | CISA KEV | Built-in catalogue sync + local lookup | Manual **Sync** in Settings | Known-exploited and ransomware annotations |
 | `osv-scanner` | Optional CLI | Repository scan with **External tools**, external APIs enabled | Supplemental dependency analysis |
 | Nmap | Optional CLI | Network scan with **External tools**, Nmap enabled in Settings | Service/version detection and optional NSE CVEs |
-| Nuclei | Optional CLI | Web scan with **External tools**, Nuclei enabled in Settings, external APIs enabled | Additional web templates |
+| Nuclei | Optional CLI | Web/network scans by default (**Nuclei signature engine** on); Nuclei enabled in Settings | Signature-based CVE, misconfiguration and exposure detection |
 | testssl.sh | Optional CLI | Web or network scan with **External tools** and **Use testssl.sh**, testssl enabled in Settings | Deep TLS protocol, cipher and certificate review |
 | Trivy | Optional CLI | Repository scan with **External tools** and **Use Trivy**, Trivy enabled in Settings | Supplemental dependency, IaC and secret coverage |
 | Subfinder | Optional CLI | Domain scan with **Passive enumeration**, Subfinder enabled in Settings, external APIs enabled | Passive subdomain enumeration |
@@ -49,17 +49,22 @@ hardening requirements.
 
 The two main gates are:
 
-1. The scan's **External tools** option. Nmap, Nuclei, testssl.sh, Trivy and
-   Subfinder also have a Settings enable switch, which can disable them but
-   does not turn them on by itself.
+1. The scan's **External tools** option. Nmap, testssl.sh, Trivy, Subfinder,
+   Gitleaks, Semgrep and `osv-scanner` run only when it is enabled. Nuclei is
+   different: it is the default-on **Nuclei signature engine** option
+   (`nuclei`, per-scan opt-out). All of them also have a Settings enable
+   switch where one exists, which can disable them but does not turn them on
+   by itself.
 2. `VS_ENABLE_EXTERNAL_APIS` plus the **Allow external APIs** setting. This
-   controls OSV.dev, KEV sync, GitHub-related outbound calls, Nuclei, Semgrep,
-   `osv-scanner`, Subfinder and Trivy database updates.
+   controls OSV.dev, NVD, EPSS, KEV sync, GitHub-related outbound calls,
+   Nuclei template updates, Semgrep, `osv-scanner`, Subfinder and Trivy
+   database updates.
 
-Gitleaks, testssl.sh, local Git operations, Nmap and the built-in scanners do
-not require `VS_ENABLE_EXTERNAL_APIS`. Gitleaks, Semgrep and `osv-scanner` have
-no separate Settings toggle; the scan's **External tools** option is their only
-gate. Wordlist DNS discovery is local and does not require external APIs.
+Gitleaks, testssl.sh, local Git operations, Nmap, Nuclei scans and the
+built-in scanners do not require `VS_ENABLE_EXTERNAL_APIS` (only Nuclei
+template *updates* do). Gitleaks, Semgrep and `osv-scanner` have no separate
+Settings toggle; the scan's **External tools** option is their only gate.
+Wordlist DNS discovery is local and does not require external APIs.
 
 Tool paths are resolved in this order:
 
@@ -217,17 +222,32 @@ configuration; the scanner builds the argument list itself.
 
 ### 4.3 Nuclei
 
-Nuclei adds template-driven web checks.
+Nuclei is the **default vulnerability-signature engine** for web scans and
+for the HTTP services discovered during network scans. It provides
+template-driven CVE, misconfiguration and exposure detection.
 
-- Run only for web scans with **External tools** enabled.
-- Requires **Nuclei** enabled in Settings and external APIs enabled.
+- **On by default.** Every web scan runs it, and every network scan runs it
+  against discovered web services, unless the scan unchecks **Nuclei
+  signature engine** (`nuclei=false`).
+- Requires **Nuclei** enabled in Settings.
+- **Template updates** run automatically every day at 03:30 UTC and on demand
+  via **Settings → Scanning integrations → Update templates now**; both
+  require external APIs. The last update time and status are shown in
+  Settings.
+- Template selection is tunable per scan and globally:
+  - The per-scan **Nuclei template tags** field (for example
+    `cve,tech,oast`) restricts the run; empty uses the Settings default,
+    `all` runs every template.
+  - The Settings **Default template tags** (`nuclei_default_tags`, default
+    `cve,misconfiguration,exposure`) applies when a scan leaves the field
+    empty.
 - The integration runs non-interactively with no OAST/interactsh callbacks and
   no automatic update check:
 
   ```text
   nuclei -u <url> -jsonl -silent -no-interactsh \
     -disable-update-check -severity critical,high,medium \
-    -timeout 10 -retries 1
+    [-tags <tags>] -timeout 10 -retries 1
   ```
 
 - Only critical/high/medium templates are requested.
@@ -235,8 +255,6 @@ Nuclei adds template-driven web checks.
   URL, CVE/CWE, CVSS, tags and remediation are retained when present.
 - Findings are keyed by template and matcher so repeated matches deduplicate.
 - A missing binary or failed run is logged; built-in web checks continue.
-- Templates are not updated by VulnScanner. Update them through your normal
-  tool-management process and review the template source.
 - Set `VS_NUCLEI_PATH` to pin a version.
 
 Nuclei templates can be intrusive and change over time. Use them only against

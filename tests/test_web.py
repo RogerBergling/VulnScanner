@@ -187,7 +187,7 @@ def test_injection_checks_can_be_disabled():
 
 
 def test_nuclei_json_is_imported(monkeypatch):
-    from app.scanners import web
+    from app.scanners import nuclei
 
     class Proc:
         returncode = 0
@@ -200,26 +200,54 @@ def test_nuclei_json_is_imported(monkeypatch):
         )
         stderr = ""
 
-    monkeypatch.setattr(web, "tool_path", lambda name: "/usr/bin/nuclei")
-    monkeypatch.setattr(web, "run_tool", lambda *_args, **_kwargs: Proc())
-    monkeypatch.setattr(web, "get_setting", lambda *_args, **_kwargs: "true")
-    monkeypatch.setattr(web, "ENABLE_EXTERNAL_APIS", True)
+    monkeypatch.setattr(nuclei, "tool_path", lambda name: "/usr/bin/nuclei")
+    monkeypatch.setattr(nuclei, "run_tool", lambda *_args, **_kwargs: Proc())
+    monkeypatch.setattr(nuclei, "setting_or_default", lambda *_args, **_kwargs: "true")
     result = ScanResult()
-    _run_nuclei(result, "https://example.test/", DummyContext({"external_tools": True}))
+    # Nuclei is the default-on signature engine: no external_tools needed.
+    _run_nuclei(result, "https://example.test/", DummyContext())
     finding = result.normalized()[0]
     assert finding["title"] == "Example issue"
     assert finding["severity"] == "high"
     assert finding["cve"] == "CVE-2026-0001"
     assert finding["cvss"] == 8.1
     assert finding["raw"]["template_id"] == "CVE-2026-0001"
+    assert finding["raw"]["engine"] == "nuclei"
 
 
-def test_optional_tools_are_skipped_by_default():
+def test_nuclei_skipped_without_binary(monkeypatch):
+    from app.scanners import nuclei
+
+    monkeypatch.setattr(nuclei, "setting_or_default", lambda *_args, **_kwargs: "true")
     result = ScanResult()
     ctx = DummyContext()
     _run_nuclei(result, "https://example.test/", ctx)
     assert result.findings == []
+    assert any("not installed" in message for _level, message in ctx.logs)
+
+
+def test_nuclei_opt_out():
+    result = ScanResult()
+    ctx = DummyContext({"nuclei": False})
+    _run_nuclei(result, "https://example.test/", ctx)
+    assert result.findings == []
     assert ctx.logs == []
+
+
+def test_nuclei_respects_integration_toggle(monkeypatch):
+    from app.scanners import nuclei
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(nuclei, "tool_path", lambda name: "/usr/bin/nuclei")
+    monkeypatch.setattr(nuclei, "run_tool", lambda *_args, **_kwargs: Proc())
+    monkeypatch.setattr(nuclei, "setting_or_default", lambda *_args, **_kwargs: "false")
+    result = ScanResult()
+    _run_nuclei(result, "https://example.test/", DummyContext())
+    assert result.findings == []
 
 
 def test_get_does_not_follow_cross_host_redirects():

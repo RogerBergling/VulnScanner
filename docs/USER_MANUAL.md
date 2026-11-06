@@ -371,7 +371,8 @@ Options:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | Active checks | on | Send a small number of non-destructive test requests. Disable for a purely passive review. |
-| External tools | off | Run Nuclei if installed and allowed in Settings. |
+| Nuclei signature engine | on | Run CVE, misconfiguration and exposure templates when nuclei is installed. Tag filter tunable per scan or via Settings. |
+| External tools | off | Enables testssl.sh (which also needs its own option). |
 | Match software versions against CVEs | on | Fingerprint the web stack (Server header, X-Powered-By, generator meta) and match it against the NVD CVE database with EPSS enrichment. Requires external APIs. |
 | Use testssl.sh | off | Run deep TLS checks when testssl.sh is installed and enabled in Settings. |
 | Ignore TLS certificate errors | off | Disable certificate verification for self-signed/lab targets. The scan event log records that verification was disabled. |
@@ -462,6 +463,7 @@ Options:
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
 | Web vulnerability checks | on | Detect HTTP/HTTPS, then crawl, check headers/exposed files, run injection probes and optional Nuclei. |
+| Nuclei signature engine | on | Run CVE/misconfiguration/exposure templates against discovered web services when nuclei is installed. Tag filter tunable per scan or via Settings. |
 | Service security probes | on | Read-only active probes: SMB signing and SMBv1, default SNMP communities over UDP 161, unauthenticated Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana, RDP NLA support and VNC authentication (server scans only). |
 | Match service versions against CVEs | on | Fingerprint detected services (banners, Server headers, Nmap results) and match them against the NVD CVE database with EPSS enrichment. Requires external APIs. |
 | Max pages to crawl per web service | 10 | Same-origin HTML pages followed per discovered web service (0-50). |

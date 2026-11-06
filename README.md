@@ -270,8 +270,8 @@ persisted in SQLite.
 
 | Type | Target | Main checks |
 | --- | --- | --- |
-| Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, optional Nuclei and testssl.sh |
-| Network | Hostname, IP address, CIDR (`/30` to `/24` by default), or a newline/comma-separated target list imported from `.txt`/`.csv` | TCP ports, dangerous services, banners, HTTP/HTTPS discovery with deep web checks (same-origin crawl, headers, exposed files, injection probes) on discovered web services, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
+| Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, Nuclei signature engine (default on), NVD CVE matching and optional testssl.sh |
+| Network | Hostname, IP address, CIDR (`/30` to `/24` by default), or a newline/comma-separated target list imported from `.txt`/`.csv` | TCP ports, dangerous services, banners, HTTP/HTTPS discovery with deep web checks (same-origin crawl, headers, exposed files, injection probes), service security probes (SMB signing, SNMP defaults, unauthenticated data services, RDP NLA, VNC), Nuclei signature engine on discovered web services, NVD CVE matching, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
 | Local repository | Absolute path on the server | Secrets, dependency manifests/OSV, source review, optional Gitleaks/Semgrep/osv-scanner and Trivy |
 | GitHub repository | `https://github.com/owner/repo` or `owner/repo` | Clone plus the same repository checks; private repositories can use a scan-only token |
 | Domain | `example.com` | Passive Subfinder enumeration plus local DNS wordlist discovery from an editable SecLists list; discovered hosts are reported, not scanned |

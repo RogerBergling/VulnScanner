@@ -194,9 +194,33 @@ def start_scheduler() -> None:
         id="agent_job_expiry_tick",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _nuclei_update_tick,
+        trigger="cron",
+        hour=3,
+        minute=30,
+        id="nuclei_template_update",
+        replace_existing=True,
+    )
     _scheduler = scheduler
     scheduler.start()
     logger.info("Scan scheduler started")
+
+
+def _nuclei_update_tick() -> None:
+    """Daily Nuclei template update, when the integration is enabled."""
+    try:
+        if get_setting("nuclei_enabled", "true") != "true":
+            return
+        from .scanners.nuclei import update_templates
+
+        result = update_templates()
+        if result.get("status") not in {"ok", "disabled", "blocked", "missing"}:
+            logger.warning("Nuclei template update: %s", result.get("detail"))
+        else:
+            logger.info("Nuclei template update: %s", result.get("status"))
+    except Exception as exc:  # pragma: no cover - defensive scheduler boundary
+        logger.error("Nuclei template update tick failed: %s", exc)
 
 
 def _scheduled_scan_tick() -> None:

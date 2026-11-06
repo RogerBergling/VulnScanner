@@ -1068,14 +1068,18 @@
     if (type === 'web') {
       return '<div class="form-section"><h3>Web scan options</h3><div class="checkbox-row">' +
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
-        '<label class="check"><input type="checkbox" id="opt-external"><span><strong>Use Nuclei</strong> — run the optional Nuclei templates if installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE, misconfiguration and exposure templates when nuclei is installed (default tag set from Settings).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match software versions against CVEs</strong> — fingerprint the web stack (Server header, X-Powered-By, generator meta) and compare it with the NVD database. Requires external APIs.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-external"><span><strong>External tools</strong> — allows testssl.sh below.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab targets only. This disables certificate verification and is recorded in the scan event log.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry over plain HTTP if HTTPS fails. Use only for authorised lab targets; recorded in the scan event log.</span></label>' +
         '</div><div class="form-grid" style="margin-top:12px">' +
         '<label class="field"><span>Max pages to crawl</span><input class="input" id="opt-max-web-pages" type="number" min="0" max="50" value="10">' +
           '<span class="hint">Same-origin HTML pages linked from the target. Set 0 to disable crawling.</span></label>' +
+        '<label class="field"><span>Nuclei template tags <span class="muted">(optional)</span></span>' +
+          '<input class="input" id="opt-nuclei-tags" placeholder="cve,misconfiguration,exposure">' +
+          '<span class="hint">Comma-separated tags such as <span class="mono">cve,tech,oast</span>. Empty uses the default from Settings; "all" runs every template.</span></label>' +
         '</div><div class="modal-note" style="margin-top:8px">Only scan applications you are authorized to test. Active checks send real attack payloads. TLS verification is on by default.</div></div>';
     }
     if (type === 'network') {
@@ -1090,11 +1094,15 @@
           '<input class="input" id="opt-ports" placeholder="22,80,443 or 1-1024"></label>' +
         '<label class="field"><span>Max pages to crawl per web service</span>' +
           '<input class="input" id="opt-max-web-pages" type="number" min="0" max="50" value="10">' +
-          '<span class="hint">Same-origin HTML links followed after an HTTP/HTTPS service is found. 0 disables crawling.</span></label></div>' +
+          '<span class="hint">Same-origin HTML links followed after an HTTP/HTTPS service is found. 0 disables crawling.</span></label>' +
+        '<label class="field"><span>Nuclei template tags <span class="muted">(optional)</span></span>' +
+          '<input class="input" id="opt-nuclei-tags" placeholder="cve,misconfiguration,exposure">' +
+          '<span class="hint">Comma-separated tags; empty uses the default from Settings, "all" runs every template.</span></label></div>' +
         '<div class="checkbox-row" style="margin-top:12px">' +
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — detect HTTP/HTTPS on discovered ports, then crawl, check headers, exposed files, injection and Nuclei.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE/misconfiguration/exposure templates against discovered web services when nuclei is installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match service versions against CVEs</strong> — fingerprint detected services (banners, Server headers, Nmap results) and compare them with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-service-probes" checked><span><strong>Service security probes</strong> — test SMB signing, SNMP default communities, unauthenticated Redis/MongoDB/Elasticsearch/Docker, RDP NLA and VNC authentication. Read-only probes.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-scan-unresponsive" checked><span><strong>Scan hosts even if they do not answer ping</strong> — include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only).</span></label>' +
@@ -1229,9 +1237,12 @@
                 payload.options.active = !!($('#opt-active', ctx.overlay) || {}).checked;
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
+                payload.options.nuclei = !!($('#opt-nuclei', ctx.overlay) || {}).checked;
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
+                const nucleiTags = (($('#opt-nuclei-tags', ctx.overlay) || {}).value || '').trim();
+                if (nucleiTags) payload.options.nuclei_tags = nucleiTags;
                 const webPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = webPagesValue === undefined || webPagesValue === '' ? 10 : Number(webPagesValue);
               } else if (type === 'network') {
@@ -1242,6 +1253,9 @@
                 payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
                 payload.options.service_probes = !!($('#opt-service-probes', ctx.overlay) || {}).checked;
                 payload.options.scan_unresponsive_hosts = !!($('#opt-scan-unresponsive', ctx.overlay) || {}).checked;
+                payload.options.nuclei = !!($('#opt-nuclei', ctx.overlay) || {}).checked;
+                const nucleiTags = (($('#opt-nuclei-tags', ctx.overlay) || {}).value || '').trim();
+                if (nucleiTags) payload.options.nuclei_tags = nucleiTags;
                 const networkPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = networkPagesValue === undefined || networkPagesValue === '' ? 10 : Number(networkPagesValue);
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
@@ -3179,7 +3193,7 @@
           switchRow('set-external', 'Allow outbound API calls',
             'OSV.dev package lookups, CISA KEV catalogue and GitHub clones. Disable for an air-gapped environment.', settings.allow_external_apis) +
           switchRow('set-nuclei', 'Enable Nuclei integration',
-            'Run Nuclei templates during web scans when the nuclei binary is installed.', settings.nuclei_enabled) +
+            'Run the Nuclei signature engine during web scans and on discovered web services in network scans when the nuclei binary is installed.', settings.nuclei_enabled) +
           switchRow('set-nmap', 'Enable Nmap integration',
             'Use Nmap for service detection during network scans when the nmap binary is installed.', settings.nmap_enabled) +
           switchRow('set-testssl', 'Enable testssl.sh integration',
@@ -3188,6 +3202,16 @@
             'Run Trivy dependency, IaC and secret checks during repository scans when installed.', settings.trivy_enabled) +
           switchRow('set-subfinder', 'Enable Subfinder integration',
             'Use passive subdomain enumeration during domain scans when installed.', settings.subfinder_enabled) +
+          '<div class="form-section"><h3>Nuclei signature engine</h3>' +
+          '<p class="muted small" style="margin-top:0">Nuclei is the default vulnerability-signature engine (CVE, misconfiguration and exposure templates). Template updates run daily at 03:30 UTC and require external APIs.</p>' +
+          '<div class="kv"><span>Last template update</span><span>' +
+            (settings.nuclei_templates_updated_at ? fmtDate(settings.nuclei_templates_updated_at) : 'never') +
+            (settings.nuclei_templates_status ? ' · ' + esc(settings.nuclei_templates_status) : '') + '</span></div>' +
+          '<div class="form-grid" style="margin-top:10px">' +
+          '<label class="field"><span>Default template tags</span><input class="input" id="set-nuclei-tags" value="' + esc(settings.nuclei_default_tags || '') + '" placeholder="cve,misconfiguration,exposure">' +
+            '<span class="hint">Comma-separated Nuclei tags used when a scan does not specify its own. Empty or "all" runs every tag.</span></label>' +
+          '<label class="field"><span>Template updates</span><button class="btn" id="update-nuclei-templates">Update templates now</button></label>' +
+          '</div></div>' +
           '<div style="display:flex;align-items:center;gap:10px;margin-top:16px"><button class="btn btn-primary" id="save-settings">Save settings</button>' +
           '<span class="muted small">Environment-level external API access: ' + (settings.external_apis_available ? 'enabled' : 'disabled') + '</span></div>' +
         '</div></section>' +
@@ -3306,10 +3330,19 @@
             nmap_enabled: $('#set-nmap').checked,
             testssl_enabled: $('#set-testssl').checked,
             trivy_enabled: $('#set-trivy').checked,
-            subfinder_enabled: $('#set-subfinder').checked
+            subfinder_enabled: $('#set-subfinder').checked,
+            nuclei_default_tags: $('#set-nuclei-tags').value.trim()
           });
           toast('Settings saved');
           router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
+    $('#update-nuclei-templates').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          await post('/settings/nuclei/update-templates', {});
+          toast('Template update started; it runs in the background');
         } catch (error) { toast(errorText(error), 'error'); }
       });
     });

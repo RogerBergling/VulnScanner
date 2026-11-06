@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -173,7 +174,7 @@ def get_limit(name: str, default: int) -> int:
             from .database import get_setting
 
             value = int(get_setting(name, str(default)))
-    except (ImportError, OSError, TypeError, ValueError):
+    except (ImportError, OSError, TypeError, ValueError, sqlite3.OperationalError, sqlite3.DatabaseError):
         value = default
     _LIMIT_CACHE[key] = (now, value)
     return value

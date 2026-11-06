@@ -7,7 +7,6 @@ reflected-XSS canaries.  Nuclei is used in addition when installed and enabled.
 
 from __future__ import annotations
 
-import json
 import random
 import re
 import socket
@@ -21,13 +20,10 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import requests
 from requests.packages import urllib3
 
-from ..config import ENABLE_EXTERNAL_APIS
-from ..database import get_setting
 from ..utils import normalize_target_url, redact_url, truncate
 from .base import Finding, ScanCancelled, ScanContext, ScanResult
 from .cpe import add_cve_findings, fingerprint_text, lookup_cves, lookup_epss
 from .testssl import run_testssl
-from .tools import run_tool, tool_path
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -824,76 +820,10 @@ def _tls_findings(result: ScanResult, host: str, port: int, ctx: ScanContext) ->
 
 
 def _run_nuclei(result: ScanResult, url: str, ctx: ScanContext) -> None:
-    if not ctx.option_bool("external_tools", False):
-        return
-    if not ENABLE_EXTERNAL_APIS or get_setting("nuclei_enabled", "true") != "true":
-        return
-    path = tool_path("nuclei")
-    if not path:
-        ctx.log("Nuclei not installed; using built-in checks only", "warning")
-        return
-    ctx.log("Running Nuclei templates (non-interactive, critical/high/medium)")
-    command = [
-        path,
-        "-u",
-        url,
-        "-jsonl",
-        "-silent",
-        "-no-interactsh",
-        "-disable-update-check",
-        "-severity",
-        "critical,high,medium",
-        "-timeout",
-        "10",
-        "-retries",
-        "1",
-    ]
-    try:
-        proc = run_tool(command, timeout=600)
-    except Exception as exc:
-        ctx.log(f"Nuclei failed to run: {exc}", "warning")
-        return
-    if proc.returncode not in (0, 1):
-        ctx.log(f"Nuclei exited with code {proc.returncode}", "warning")
-    count = 0
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            item = json.loads(line)
-        except ValueError:
-            continue
-        info = item.get("info") or {}
-        classification = info.get("classification") or {}
-        cve = classification.get("cve-id") or ""
-        cwe = classification.get("cwe-id") or ""
-        if isinstance(cve, list):
-            cve = ",".join(str(x) for x in cve)
-        if isinstance(cwe, list):
-            cwe = ",".join(str(x) for x in cwe)
-        matched = item.get("matched-at") or item.get("host") or url
-        result.add(
-            Finding(
-                severity=str(info.get("severity") or "medium"),
-                title=str(info.get("name") or item.get("template-id") or "Nuclei finding"),
-                category="web",
-                description=str(info.get("description") or "") + (
-                    f"\n\nTags: {', '.join(info.get('tags') or [])}" if info.get("tags") else ""
-                ),
-                evidence=f"Template: {item.get('template-id', '')}\nMatcher: {item.get('matcher-name', '')}\nMatched at: {matched}",
-                remediation=str(info.get("remediation") or "Review the Nuclei template and vendor guidance."),
-                cve=str(cve),
-                cwe=str(cwe),
-                cvss=classification.get("cvss-score"),
-                location=matched,
-                resource=f"nuclei:{item.get('template-id', '')}",
-                key=f"nuclei:{item.get('template-id', '')}:{item.get('matcher-name', '')}",
-                raw={"template_id": item.get("template-id", ""), "tags": info.get("tags", [])},
-            )
-        )
-        count += 1
-    ctx.log(f"Nuclei reported {count} finding(s)")
+    """Backwards-compatible shim for the Nuclei signature engine."""
+    from .nuclei import run_nuclei
+
+    run_nuclei(result, url, ctx)
 
 
 GENERATOR_META_RE = re.compile(
@@ -1021,7 +951,7 @@ def scan(ctx: ScanContext) -> ScanResult:
             except Exception as exc:
                 ctx.log(f"testssl.sh integration failed: {exc}", "warning")
 
-        ctx.progress(82, "Running Nuclei (optional)")
+        ctx.progress(82, "Running Nuclei signature engine")
         _run_nuclei(result, url, ctx)
         if ctx.option_bool("cve_lookup", True):
             ctx.progress(88, "Matching web stack versions against CVE data")

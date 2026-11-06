@@ -432,6 +432,16 @@ def get_setting(key: str, default: str = "") -> str:
     return row["value"] if row else default
 
 
+def setting_or_default(key: str, default: str = "") -> str:
+    """Return a setting, falling back to ``default`` when the database is not
+    yet initialised. Scanner engines use this so a unit-test or first-run
+    context without a prepared schema degrades instead of raising."""
+    try:
+        return get_setting(key, default)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return default
+
+
 def get_setting_optional(key: str) -> str | None:
     """Return a setting value, or ``None`` when the key has never been stored."""
     with get_db() as conn:

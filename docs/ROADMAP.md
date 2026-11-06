@@ -32,7 +32,10 @@ Nessus-class vulnerability scanner with:
 
 ### Phase 1 — Real vulnerability results (addresses "it looks like a port scan")
 
-1. **Nuclei as a default-on engine.** (open)
+1. **Nuclei as a default-on engine.** — **done** (`app/scanners/nuclei.py`:
+   default-on per scan with an opt-out option, tag selection per scan and a
+   Settings default, daily 03:30 UTC template auto-update plus a Settings
+   "update now" action, last-update status in the GUI).
 2. **Banner/CPE → CVE matching.** — **done** (`app/scanners/cpe.py`: fingerprint
    registry for SSH/web/database banners and headers, NVD API 2.0 client with
    SQLite cache and self-throttling, CPE range evaluation, EPSS enrichment,
