@@ -171,6 +171,10 @@ class ScanCreate(BaseModel):
     # Optional execution agent for network scans. When set, the job is queued
     # for that agent and runs from its network position.
     agent_id: str | None = Field(default=None, max_length=80)
+    # Optional executor selection: "server" forces local execution, "auto"
+    # (default) routes to a satellite whose advertised subnets overlap the
+    # target, or a satellite id forces that satellite.
+    executor: str | None = Field(default=None, max_length=80)
 
     @model_validator(mode="after")
     def check_target(self) -> "ScanCreate":
@@ -574,3 +578,24 @@ class PolicyUpdate(BaseModel):
     scan_type: Literal["web", "network", "domain"] | None = None
     description: str | None = Field(default=None, max_length=2000)
     options: dict[str, Any] | None = None
+
+
+class SatellitePairRequest(BaseModel):
+    pairing_code: str = Field(min_length=10, max_length=300)
+    name: str = Field(default="", max_length=160)
+    hostname: str = Field(default="", max_length=200)
+    platform: str = Field(default="", max_length=120)
+    version: str = Field(default="", max_length=60)
+    subnets: list[str] = Field(default_factory=list)
+
+
+class SatelliteHeartbeatRequest(BaseModel):
+    platform: str = Field(default="", max_length=120)
+    version: str = Field(default="", max_length=60)
+    subnets: list[str] = Field(default_factory=list)
+
+
+class SatelliteJobResultRequest(BaseModel):
+    status: Literal["completed", "failed"] = "completed"
+    results: dict[str, Any] = Field(default_factory=dict)
+    error: str = Field(default="", max_length=4000)

@@ -246,6 +246,36 @@ CREATE TABLE IF NOT EXISTS scan_policies (
     updated_at TEXT NOT NULL
 );
 
+-- Satellite VulnScanner servers: outbound-polling scanner nodes used for
+-- DMZ/segmented networks. Results live on the master.
+CREATE TABLE IF NOT EXISTS satellites (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL,
+    cert_fingerprint TEXT NOT NULL DEFAULT '',
+    subnets TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    online INTEGER NOT NULL DEFAULT 0,
+    last_seen TEXT NOT NULL DEFAULT '',
+    enrolled_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS satellite_jobs (
+    id TEXT PRIMARY KEY,
+    satellite_id TEXT REFERENCES satellites(id) ON DELETE CASCADE,
+    scan_id INTEGER REFERENCES scans(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'queued',
+    payload TEXT NOT NULL DEFAULT '{}',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    claimed_at TEXT,
+    completed_at TEXT
+);
+
 -- Scheduled scans define recurring targets that run on a schedule and may send
 -- notifications when completed.
 CREATE TABLE IF NOT EXISTS scan_schedules (

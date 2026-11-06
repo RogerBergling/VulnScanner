@@ -723,6 +723,33 @@ Provider-specific collectors such as PingCastle or Purple Knight can be adapted
 to the documented JSON shape. VulnScanner does not modify AD objects and does
 not perform LDAP writes.
 
+### 5.8 Satellites (server-to-server scanning)
+
+A **satellite** is a second VulnScanner server that scans from its own network
+position — typically a DMZ — while only server-to-server traffic is permitted.
+The master owns all results and shows them in one GUI.
+
+1. Open **Satellites → Pair satellite**. The dialog shows a one-time pairing
+   command to run on the second server:
+   ```bash
+   python -m app.satellite enroll --server https://scanner.example.com \
+     --code vs_pair_... --name dmz-1 --subnets 10.30.0.0/16
+   ```
+   The satellite downloads a client certificate signed by the internal CA and
+   stores its token locally.
+2. Run `python -m app.satellite run` on the satellite (install it as a service
+   for permanent use). It polls the master over outbound HTTPS; no inbound
+   firewall rule is needed.
+3. Advertise the subnets the satellite can reach (at pairing or via
+   **Edit**). A network scan whose target CIDR overlaps an online satellite's
+   advertised subnets runs there automatically (`executor=auto`). The scan
+   dialog's **Executor** dropdown overrides this per scan: server, auto, or a
+   specific satellite.
+
+Satellite findings flow through the same persistence path as local scans:
+deduplication, KEV/ATT&CK/EPSS enrichment, inventory and history. Revoking a
+satellite invalidates its token and cancels its queued jobs.
+
 ## 6. Findings
 
 Each finding contains:

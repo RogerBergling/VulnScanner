@@ -65,16 +65,20 @@ Nessus-class vulnerability scanner with:
 
 ### Phase 2 — Master / satellite architecture (DMZ scanning)
 
-1. Satellite enrolment with one-time pairing code + mTLS (internal CA).
+1. Satellite enrolment with one-time pairing code + mTLS (internal CA). —
+   **done** (pairing codes, CA-signed client certs with pinned fingerprints,
+   hashed bearer tokens, revocation).
 2. Satellites advertise network position (subnets they can reach) and poll
-   the master for jobs; results stream back to the master DB.
-3. **Automatic executor selection:** a network scan whose target CIDR
-   overlaps a registered satellite's advertised subnet runs on that satellite
-   automatically; the GUI shows the chosen executor and allows overriding it
-   (server or any satellite/agent).
+   the master for jobs; results stream back to the master DB. — **done**
+   (`app/satellite.py` runner: enroll/run, outbound polling over HTTPS,
+   database-free local execution of web/network engines).
+3. **Automatic executor selection** — **done** (CIDR overlap between target
+   and advertised subnets routes to the satellite; per-scan Executor
+   dropdown: auto / server / specific satellite).
 4. Satellite health, offline queueing, job timeout, revocation and key
-   rotation from the master GUI.
-5. Multi-hop support later (satellite → satellite) if needed.
+   rotation from the master GUI. — health/offline/revocation/timeout done;
+   token rotation from the GUI remains open.
+5. Multi-hop support later (satellite → satellite) if needed. (open)
 
 ### Phase 3 — AD report import and intelligence
 

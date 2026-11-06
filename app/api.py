@@ -85,7 +85,13 @@ from .database import (
     utcnow,
 )
 from .envfile import env_safe, upsert_env_entries
-from .jobs import submit_ad_import, submit_agent_result, submit_pingcastle_import, submit_scan
+from .jobs import (
+    submit_ad_import,
+    submit_agent_result,
+    submit_pingcastle_import,
+    submit_satellite_result,
+    submit_scan,
+)
 from .net_guard import UnsafeURLError, validate_outbound_url
 from .reporting import build_csv, build_html, build_json
 from .schemas import (
@@ -114,6 +120,9 @@ from .schemas import (
     PolicyUpdate,
     ScanCreate,
     RuntimeSettingsUpdate,
+    SatelliteHeartbeatRequest,
+    SatelliteJobResultRequest,
+    SatellitePairRequest,
     ScheduleCreate,
     ScheduleUpdate,
     SettingsUpdate,
@@ -124,6 +133,20 @@ from .schemas import (
 from .scanners.kev import KevSyncError, sync_kev
 from .scanners.nuclei import TAG_RE, update_templates
 from .scanners.pingcastle import parse_pingcastle_xml
+from .satellites import (
+    authenticate_satellite,
+    claim_next_job as claim_satellite_job,
+    complete_job as complete_satellite_job,
+    create_pairing,
+    get_satellite,
+    heartbeat as satellite_heartbeat_update,
+    list_satellites,
+    matching_satellite,
+    queue_satellite_job,
+    register_satellite,
+    revoke_satellite,
+    update_satellite,
+)
 from .policies import (
     create_policy,
     default_policy_id,
@@ -1245,15 +1268,53 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
         agent = _network_agent(payload.agent_id, payload.customer_id, effective_group_id)
         if payload.group_id is None and payload.asset_id is None:
             payload.group_id = agent["group_id"]
+
+    # Satellite routing: "server" forces local execution; "auto" (default)
+    # picks a satellite whose advertised subnets overlap the target CIDRs;
+    # anything else is treated as an explicit satellite id.
+    satellite_id: str | None = None
+    executor = (payload.executor or "").strip() or "auto"
+    if not agent:
+        if payload.scan_type in {"network", "web"}:
+            if executor == "auto":
+                satellite_id = matching_satellite(normalized_target)
+            elif executor != "server":
+                if get_satellite(executor) is None:
+                    raise HTTPException(status_code=404, detail="Satellite not found")
+                satellite_id = executor
+        elif executor not in {"auto", "server"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Satellite execution is only available for network and web scans",
+            )
+    if satellite_id and credential_entries:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Per-scan credentials cannot be sent to a satellite. "
+                "Run the authenticated scan from the VulnScanner server instead."
+            ),
+        )
     scan_id = _create_scan_record(
         payload,
         normalized_target,
         options,
-        status="waiting_agent" if agent else "queued",
-        stage="Waiting for agent" if agent else "Queued",
+        status="waiting_satellite" if satellite_id else ("waiting_agent" if agent else "queued"),
+        stage="Waiting for satellite" if satellite_id else ("Waiting for agent" if agent else "Queued"),
         requested_by=payload.requested_by or "local",
         agent_id=agent["id"] if agent else None,
     )
+    if satellite_id:
+        queue_satellite_job(
+            satellite_id,
+            scan_id,
+            {
+                "scan_type": payload.scan_type,
+                "target": normalized_target,
+                "options": options,
+            },
+        )
+        return _scan_detail(scan_id)
     if agent:
         queue_network_scan_job(agent, scan_id, normalized_target, options)
     else:
@@ -1285,7 +1346,7 @@ def cancel_scan(scan_id: int) -> dict[str, Any]:
         if row["status"] in {"completed", "failed", "cancelled"}:
             raise HTTPException(status_code=409, detail=f"Scan is already {row['status']}")
         conn.execute("UPDATE scans SET cancelled = 1 WHERE id = ?", (scan_id,))
-        if row["status"] in {"queued", "waiting_agent"}:
+        if row["status"] in {"queued", "waiting_agent", "waiting_satellite"}:
             conn.execute(
                 "UPDATE scans SET status = 'cancelled', stage = 'Cancelled', progress = 100, "
                 "completed_at = ?, error = 'Scan cancelled by user' WHERE id = ?",
@@ -1293,6 +1354,11 @@ def cancel_scan(scan_id: int) -> dict[str, Any]:
             )
             conn.execute(
                 "UPDATE agent_jobs SET status = 'cancelled', completed_at = ? "
+                "WHERE scan_id = ? AND status IN ('queued','running')",
+                (utcnow(), scan_id),
+            )
+            conn.execute(
+                "UPDATE satellite_jobs SET status = 'cancelled', completed_at = ? "
                 "WHERE scan_id = ? AND status IN ('queued','running')",
                 (utcnow(), scan_id),
             )
@@ -2461,6 +2527,121 @@ def set_default_scan_policy(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         set_default_policy(None)
     return {"default_policy_id": default_policy_id()}
+
+
+# ---------------------------------------------------------------------------
+# Satellites (distributed scanning)
+# ---------------------------------------------------------------------------
+
+def _satellite_from_header(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    satellite = authenticate_satellite(token)
+    if not satellite:
+        raise HTTPException(status_code=401, detail="Invalid or revoked satellite token")
+    return satellite
+
+
+@router.post("/satellites/pairing")
+def create_satellite_pairing() -> dict[str, Any]:
+    return create_pairing()
+
+
+@router.get("/satellites")
+def satellites_list() -> list[dict[str, Any]]:
+    return list_satellites()
+
+
+@router.patch("/satellites/{satellite_id}")
+def satellites_update(satellite_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    updated = update_satellite(
+        satellite_id,
+        name=payload.get("name") if "name" in payload else None,
+        subnets=payload.get("subnets") if "subnets" in payload else None,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Satellite not found")
+    return updated
+
+
+@router.delete("/satellites/{satellite_id}")
+def satellites_revoke(satellite_id: str) -> dict[str, Any]:
+    if get_satellite(satellite_id) is None:
+        raise HTTPException(status_code=404, detail="Satellite not found")
+    revoke_satellite(satellite_id)
+    return {"revoked": True}
+
+
+# Satellite-facing endpoints. The satellite polls over outbound HTTPS, so no
+# inbound firewall rule is needed on the master side of a DMZ deployment.
+
+@router.post("/satellite/pair")
+def satellite_pair(payload: SatellitePairRequest) -> dict[str, Any]:
+    registration = register_satellite(
+        payload.pairing_code,
+        payload.name,
+        payload.hostname,
+        platform=payload.platform,
+        version=payload.version,
+        subnets=payload.subnets,
+    )
+    if not registration:
+        raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
+    return registration
+
+
+@router.post("/satellite/heartbeat")
+def satellite_heartbeat(
+    payload: SatelliteHeartbeatRequest,
+    satellite: dict[str, Any] = Depends(_satellite_from_header),
+) -> dict[str, Any]:
+    satellite_heartbeat_update(satellite["id"], payload.platform, payload.version, payload.subnets)
+    return {"ok": True, "server_time": utcnow()}
+
+
+@router.post("/satellite/jobs/next")
+def satellite_jobs_next(
+    satellite: dict[str, Any] = Depends(_satellite_from_header),
+) -> dict[str, Any]:
+    job = claim_satellite_job(satellite["id"])
+    return {"job": job} if job else {"job": None}
+
+
+@router.post("/satellite/jobs/{job_id}/result")
+def satellite_job_result(
+    job_id: str,
+    payload: SatelliteJobResultRequest,
+    satellite: dict[str, Any] = Depends(_satellite_from_header),
+) -> dict[str, Any]:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM satellite_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Satellite job not found")
+    if row["satellite_id"] != satellite["id"]:
+        raise HTTPException(status_code=403, detail="Job belongs to another satellite")
+    if row["status"] in {"completed", "cancelled"}:
+        # Idempotent acknowledgement so a retried upload does not duplicate.
+        return {"accepted": True, "duplicate": True}
+    if payload.status == "failed":
+        complete_satellite_job(job_id, "failed", payload.error[:4000])
+        from .database import update_scan
+
+        update_scan(
+            int(row["scan_id"]),
+            status="failed",
+            progress=100,
+            stage="Failed",
+            completed_at=utcnow(),
+            error=payload.error[:1500],
+        )
+        return {"accepted": True}
+    submit_satellite_result(int(row["scan_id"]), job_id, payload.results)
+    return {"accepted": True}
 
 
 @router.get("/meta")

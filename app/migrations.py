@@ -16,7 +16,7 @@ from typing import Callable
 # Version 3 is the last schema that existed before the migration ledger was
 # introduced.  Keep this in sync with the historical SCHEMA_VERSION.
 BASELINE_VERSION = 3
-LATEST_VERSION = 7
+LATEST_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -182,11 +182,51 @@ def _migration_7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_8(conn: sqlite3.Connection) -> None:
+    """Distributed scanning: satellites and their job queue."""
+    _run_sql(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS satellites (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
+            hostname TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT '',
+            version TEXT NOT NULL DEFAULT '',
+            token_hash TEXT NOT NULL,
+            cert_fingerprint TEXT NOT NULL DEFAULT '',
+            subnets TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'active',
+            online INTEGER NOT NULL DEFAULT 0,
+            last_seen TEXT NOT NULL DEFAULT '',
+            enrolled_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_satellites_status ON satellites(status);
+
+        CREATE TABLE IF NOT EXISTS satellite_jobs (
+            id TEXT PRIMARY KEY,
+            satellite_id TEXT REFERENCES satellites(id) ON DELETE CASCADE,
+            scan_id INTEGER REFERENCES scans(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'queued',
+            payload TEXT NOT NULL DEFAULT '{}',
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            claimed_at TEXT,
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_satellite_jobs_satellite
+            ON satellite_jobs(satellite_id, status);
+        """,
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "session authentication and audit log", _migration_4),
     Migration(5, "notification history and finding-history index", _migration_5),
     Migration(6, "NVD and EPSS caches", _migration_6),
     Migration(7, "scan policies", _migration_7),
+    Migration(8, "satellites and satellite jobs", _migration_8),
 )
 
 

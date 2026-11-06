@@ -442,6 +442,84 @@ def execute_agent_result(
                 conn.commit()
 
 
+def execute_satellite_result(
+    scan_id: int, job_id: str, payload: dict[str, Any]
+) -> None:
+    """Persist findings uploaded by a satellite scanner server."""
+    scan = _fetch_scan(scan_id)
+    if not scan:
+        return
+    if scan["status"] in {"completed", "failed", "cancelled"}:
+        return
+    options = json_load(scan.get("options"), {})
+    ctx = ScanContext(scan_id, scan["target"], options)
+    update_scan(
+        scan_id,
+        status="running",
+        progress=10,
+        stage="Processing satellite report",
+        started_at=scan.get("started_at") or utcnow(),
+    )
+    log_event(scan_id, "Satellite result received")
+    try:
+        result = ScanResult()
+        raw_findings = payload.get("findings") if isinstance(payload, dict) else None
+        if not isinstance(raw_findings, list):
+            raise ValueError("Satellite payload has no findings list")
+        for finding in raw_findings[:10_000]:
+            if isinstance(finding, dict):
+                result.add(finding)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        result.metadata = metadata
+        result.metadata["execution"] = "satellite"
+        if ctx.cancelled() or scan_cancelled(scan_id):
+            update_scan(
+                scan_id,
+                status="cancelled",
+                progress=100,
+                stage="Cancelled",
+                completed_at=utcnow(),
+                error="Scan cancelled by user",
+            )
+            log_event(scan_id, "Satellite report discarded because the scan was cancelled", "warning")
+            from .satellites import complete_job
+
+            complete_job(job_id, "cancelled", "Scan cancelled by user")
+            return
+        ctx.progress(98, "Saving findings")
+        summary = persist_result(scan_id, result)
+        update_scan(
+            scan_id,
+            status="completed",
+            progress=100,
+            stage="Completed",
+            completed_at=utcnow(),
+            summary=summary,
+        )
+        log_event(
+            scan_id,
+            f"Satellite scan completed with {summary.get('total', 0)} finding(s) "
+            f"(risk score {summary.get('risk_score', 0)})",
+        )
+        from .satellites import complete_job
+
+        complete_job(job_id, "completed")
+    except Exception as exc:
+        message = truncate(f"{exc.__class__.__name__}: {exc}", 1500)
+        update_scan(
+            scan_id,
+            status="failed",
+            progress=100,
+            stage="Failed",
+            completed_at=utcnow(),
+            error=message,
+        )
+        log_event(scan_id, f"Could not process satellite report: {message}", "error")
+        from .satellites import complete_job
+
+        complete_job(job_id, "failed", message)
+
+
 def recover_interrupted_scans() -> None:
     """Mark scans that were running when the server stopped as failed."""
     with get_db() as conn:

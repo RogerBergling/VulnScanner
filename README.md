@@ -317,6 +317,23 @@ Typical use:
 
 See [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md).
 
+## Satellite servers (server-to-server scanning)
+
+Pair additional VulnScanner servers as **satellites** to scan networks the
+master cannot reach — for example a DMZ — while only VulnScanner-server to
+VulnScanner-server traffic is permitted. A satellite polls the master over
+outbound HTTPS (no inbound rules), executes web/network scans from its own
+position and uploads findings; the master owns all results in one GUI.
+
+- Open **Satellites → Pair satellite** and run the shown one-time command on
+  the second server: `python -m app.satellite enroll ...`, then
+  `python -m app.satellite run` (or install it as a service).
+- Pairing issues a client certificate signed by the internal CA plus a
+  hashed bearer token.
+- Network scans auto-route to an online satellite whose advertised subnets
+  overlap the target CIDR; the scan dialog's **Executor** dropdown overrides
+  this per scan.
+
 ## Configuration
 
 `run.sh` and `run.bat` create `.env` from `.env.example` if it is missing and

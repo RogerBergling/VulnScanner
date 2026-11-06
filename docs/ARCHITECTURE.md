@@ -56,17 +56,18 @@ VulnScanner is deliberately small and local-first:
 └───────────────┬─────────────────────────────┬────────────────────┘
                 │                             │
       SQLite (WAL)                     outbound requests/subprocess
-      data/vulnscanner.db              OSV.dev, CISA, GitHub,
+      data/vulnscanner.db              OSV.dev, NVD, EPSS, CISA, GitHub,
                                        Nmap, Nuclei, testssl.sh,
                                        Trivy, Subfinder, SecLists,
-                                       Gitleaks, Semgrep,
+                                       Gitleaks, Semgrep, sqlmap,
                                        osv-scanner, Git
                                                 ▲
-                                                │ outbound poll only
-                                     ┌──────────┴──────────┐
-                                     │ Linux/Windows agent │
-                                     │ standard library    │
-                                     └─────────────────────┘
+                         outbound poll only   │
+                ┌──────────────────┬──────────┴──────────┐
+                │ Linux/Windows    │  satellite          │
+                │ agent            │  (2nd VulnScanner   │
+                │ (stdlib/PS)      │   server, e.g. DMZ) │
+                └──────────────────┴─────────────────────┘
 ```
 
 ## 3. Runtime components
@@ -91,6 +92,8 @@ files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
 | `app/tool_policy.py` | Optional CLI tool minimum-version policy and scan enforcement. |
 | `app/jobs.py` | Small `ThreadPoolExecutor` that runs scan, AD import and agent-result tasks off the request thread. The pool size is `VS_SCAN_WORKERS` (default 4, range 1-32). |
 | `app/agents.py` | Creates agents and their assets, processes heartbeats and jobs, creates agent scans, renames/moves agents, rotates tokens and handles revocation. |
+| `app/satellites.py` | Satellite pairing (one-time codes, CA-signed client certificates, hashed tokens), heartbeat/job/result handling, subnet-overlap routing, revocation and job expiry. |
+| `app/satellite.py` | The satellite runner (`python -m app.satellite enroll|run`): polls the master outbound, executes scan engines locally with a database-free context and uploads findings. |
 | `app/security.py` | Generates enrolment/agent tokens, stores only SHA-256 hashes and authenticates agent requests. |
 | `app/credentials.py` | Fernet-encrypted credential profiles, asset bindings, per-scan credentials and resolution order. |
 | `app/scanners/` | Independent scan engines and shared finding types. |
@@ -305,6 +308,39 @@ for Windows client and server editions and does not require Python.
 Linux/macOS and existing Windows deployments. Both use the same enrolment,
 heartbeat, job and result contract. See [AGENT_GUIDE.md](AGENT_GUIDE.md).
 
+## 7b. Satellite (server-to-server) architecture
+
+A **satellite** is a second VulnScanner installation that polls the master
+over outbound HTTPS, exactly like an endpoint agent, but runs full scan
+engines (network/web) from its own network position. This is how a DMZ is
+scanned while only VulnScanner-server → VulnScanner-server traffic is
+permitted; the master never opens an inbound connection to a satellite.
+
+Flow:
+
+1. The operator creates a one-time pairing code (Settings-free; Satellites
+   page). The satellite enrolls with `python -m app.satellite enroll`, and
+   the master issues a client certificate signed by the internal CA plus a
+   long-lived bearer token (stored SHA-256-hashed) and pins the certificate
+   fingerprint.
+2. The satellite polls `POST /api/satellite/heartbeat`,
+   `/api/satellite/jobs/next` and `/api/satellite/jobs/{id}/result` with the
+   bearer token. When `VS_SSL_CLIENT_CA` is configured, the listener also
+   verifies presented client certificates at the TLS layer (mTLS).
+3. A network/web scan with `executor=auto` is routed to the first online
+   satellite whose advertised subnets overlap the target CIDR; `server`
+   forces local execution and an explicit satellite id forces that node.
+   Routed scans become `waiting_satellite` scans backed by a
+   `satellite_jobs` row.
+4. The satellite executes the job locally with a database-free
+   `SatelliteContext`, uploads normalized findings plus metadata, and the
+   master persists them through the same `persist_result` path as local
+   scans (dedup, KEV/ATT&CK/EPSS enrichment, inventory, history).
+
+Satellite jobs are bounded by the agent job timeout guardrail, satellites can
+be revoked from the GUI (queued jobs are cancelled), and results are always
+stored on the master — satellites are disposable executors.
+
 ## 8. Active Directory path
 
 Two paths produce the same finding model:
@@ -387,7 +423,8 @@ keeps installation simple. Consequences:
   post-exploitation. Authenticated host scans make a single login attempt per
   host and never enumerate passwords.
 - No arbitrary distributed scanning, horizontal worker scaling or external job
-  queue. Network scans can be delegated to enrolled agents, but there is no
+  queue. Network and web scans can be delegated to enrolled agents or to
+  paired satellite servers (which poll the master outbound), but there is no
   central pool of scan workers beyond `VS_SCAN_WORKERS`.
 - No automatic remediation.
 - Built-in checks are conservative and may miss issues that a dedicated,

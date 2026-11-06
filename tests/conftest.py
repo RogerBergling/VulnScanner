@@ -80,6 +80,7 @@ def api_client(client, monkeypatch):
     monkeypatch.setattr(api, "submit_scan", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(api, "submit_agent_result", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(api, "submit_ad_import", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api, "submit_satellite_result", lambda *_args, **_kwargs: None)
     return client
 
 

@@ -29,7 +29,7 @@
     web: 'web', github: 'github', repo: 'repo', host: 'network', domain: 'domain',
     agent: 'network', other: 'network'
   };
-  const ACTIVE_STATUSES = ['queued', 'running', 'waiting_agent'];
+  const ACTIVE_STATUSES = ['queued', 'running', 'waiting_agent', 'waiting_satellite'];
   const state = {
     pollTimer: null, activeTimer: null, manualCache: null, meta: null,
     scanDetailClick: null, scanDetailChange: null
@@ -444,6 +444,7 @@
       else if (page === 'scans') await renderScans(view);
       else if (page === 'agents' && id) await renderAgentDetail(view, id);
       else if (page === 'agents') await renderAgents(view);
+      else if (page === 'satellites') await renderSatellites(view);
       else if (page === 'ad') await renderAd(view);
       else if (page === 'server') await renderServer(view);
       else if (page === 'settings') await renderSettings(view);
@@ -1064,9 +1065,14 @@
   // ---------------------------------------------------------------------------
   // New scan dialog
   // ---------------------------------------------------------------------------
-  function scanTypeOptionsHtml(type, agentOptionsHtml) {
+   function scanTypeOptionsHtml(type, agentOptionsHtml, satelliteOptionsHtml) {
     if (type === 'web') {
-      return '<div class="form-section"><h3>Web scan options</h3><div class="checkbox-row">' +
+      return '<div class="form-section"><h3>Web scan options</h3><div class="form-grid">' +
+        '<label class="field full"><span>Executor</span><select class="select" id="opt-executor">' +
+          '<option value="auto">Auto (server or satellite)</option>' +
+          '<option value="server">VulnScanner server (this machine)</option>' + (satelliteOptionsHtml || '') + '</select>' +
+          '<span class="hint">Satellites execute the scan from their network position and upload findings to this server.</span></label></div>' +
+        '<div class="checkbox-row" style="margin-top:12px">' +
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE, misconfiguration and exposure templates when nuclei is installed (default tag set from Settings).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-sqlmap"><span><strong>sqlmap (dangerous)</strong> — send real SQL injection payloads to discovered parameters. Requires the Settings dangerous-tools switch AND this option; authorised penetration tests only.</span></label>' +
@@ -1090,6 +1096,10 @@
         '<label class="field full"><span>Run from</span><select class="select" id="opt-agent">' +
           '<option value="">VulnScanner server (local network)</option>' + (agentOptionsHtml || '') + '</select>' +
           '<span class="hint">Choose an enrolled agent to scan from its network position. Authenticated checks only run from the VulnScanner server.</span></label>' +
+        '<label class="field full"><span>Executor</span><select class="select" id="opt-executor">' +
+          '<option value="auto">Auto (server or satellite by subnet)</option>' +
+          '<option value="server">VulnScanner server (this machine)</option>' + (satelliteOptionsHtml || '') + '</select>' +
+          '<span class="hint">A satellite whose advertised subnets overlap the target CIDR is used automatically. Explicit agents and satellites conflict; choose one.</span></label>' +
         '<label class="field"><span>Port profile</span><select class="select" id="opt-profile">' +
           '<option value="common">Common services</option><option value="web">Web ports</option>' +
           '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
@@ -1244,6 +1254,8 @@
               };
               const policyValue = ($('#scan-policy', ctx.overlay) || {}).value || '';
               if (policyValue) payload.policy_id = Number(policyValue);
+              const executorValue = ($('#opt-executor', ctx.overlay) || {}).value || 'auto';
+              if (executorValue !== 'auto') payload.executor = executorValue;
               if (groupValue) payload.group_id = Number(groupValue);
               if (assetValue) payload.asset_id = Number(assetValue);
               if (type === 'web') {
@@ -1286,6 +1298,10 @@
                 if (wildcardHosts) payload.options.max_wildcard_hosts = Number(wildcardHosts);
                 const agentId = ($('#opt-agent', ctx.overlay) || {}).value || '';
                 if (agentId) payload.agent_id = agentId;
+                const executorValue = ($('#opt-executor', ctx.overlay) || {}).value || 'auto';
+                if (executorValue !== 'auto' && executorValue !== 'server' && agentId) {
+                  throw new Error('Choose either an agent or a satellite executor, not both.');
+                }
                 const authenticated = !!($('#opt-auth', ctx.overlay) || {}).checked;
                 if (authenticated && agentId) {
                   throw new Error('Authenticated checks run from the VulnScanner server. Choose the server as “Run from”, or disable authenticated checks.');
@@ -1361,12 +1377,29 @@
         let detail = null;
         let agentCache = null;
         let policyCache = null;
+        let satelliteCache = null;
 
         async function loadPolicies(force) {
           if (policyCache && !force) return policyCache;
           try { policyCache = await get('/policies'); }
           catch (ignore) { policyCache = []; }
           return policyCache;
+        }
+
+        async function loadSatellites(force) {
+          if (satelliteCache && !force) return satelliteCache;
+          try { satelliteCache = await get('/satellites'); }
+          catch (ignore) { satelliteCache = []; }
+          return satelliteCache;
+        }
+
+        function satelliteOptionsHtml() {
+          return (satelliteCache || []).filter(function (satellite) {
+            return satellite.status !== 'revoked';
+          }).map(function (satellite) {
+            return '<option value="' + esc(satellite.id) + '">Satellite: ' + esc(satellite.name || satellite.hostname || satellite.id) +
+              (satellite.online ? ' (online)' : ' (offline)') + '</option>';
+          }).join('');
         }
 
         function renderPolicySelect(type) {
@@ -1435,7 +1468,7 @@
                   (type === 'network'
                     ? 'One host, IP or CIDR per line, or a wildcard such as *.bergling.net to discover its subdomains and scan them automatically. Import a .txt or .csv with one target per row (the first CSV column is used).'
                     : 'Only scan systems you own or have written permission to test.'))));
-          $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type, agentOptionsHtml());
+          $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type, agentOptionsHtml(), satelliteOptionsHtml());
           const agentSelect = $('#opt-agent', overlay);
           if (agentSelect && previousAgent) {
             const exists = Array.prototype.some.call(agentSelect.options, function (option) { return option.value === previousAgent; });
@@ -1557,6 +1590,7 @@
         assetSelect.addEventListener('change', function () { applyAsset(true); });
         loadAgents().then(function () { if (typeSelect.value === 'network') renderType(); });
         loadPolicies().then(function () { renderPolicySelect(typeSelect.value); });
+        loadSatellites().then(function () { renderType(); });
 
         if (initial.type && SCAN_TYPES[initial.type]) typeSelect.value = initial.type;
         if (initial.customerId) customerSelect.value = String(initial.customerId);
@@ -1590,7 +1624,7 @@
             '<option value="agent">Agent scan</option></select>' +
           '<select class="select select-sm filter-select" id="scan-status-filter" aria-label="Status">' +
             '<option value="">All statuses</option><option value="queued">Queued</option><option value="running">Running</option>' +
-            '<option value="waiting_agent">Waiting for agent</option><option value="completed">Completed</option>' +
+            '<option value="waiting_agent">Waiting for agent</option><option value="waiting_satellite">Waiting for satellite</option><option value="completed">Completed</option>' +
             '<option value="failed">Failed</option><option value="cancelled">Cancelled</option></select>' +
           '<span class="spacer"></span><span class="muted small" id="scan-count">Loading…</span>' +
         '</div>' +
@@ -2640,6 +2674,102 @@
           });
         });
         syncNetworkMode();
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Satellites page
+  // ---------------------------------------------------------------------------
+  async function renderSatellites(view) {
+    let satellites;
+    try { satellites = await get('/satellites'); }
+    catch (error) {
+      view.innerHTML = emptyHtml('Could not load satellites', errorText(error));
+      return;
+    }
+    const rows = satellites.length ? satellites.map(function (satellite) {
+      const subnets = (satellite.subnets || []).map(function (net) {
+        return '<span class="tag mono">' + esc(net) + '</span>';
+      }).join('') || '<span class="muted small">—</span>';
+      return '<tr><td><div class="agent-name"><span class="agent-dot' + (satellite.online ? ' online' : ' offline') + '"></span>' +
+        esc(satellite.name || satellite.hostname || satellite.id) + '</div>' +
+        '<div class="cell-sub mono">' + esc(satellite.id) + '</div></td>' +
+        '<td>' + esc(satellite.hostname || '—') + '</td>' +
+        '<td>' + (satellite.online
+          ? '<span class="status-pill status-completed"><span class="dot"></span>online</span>'
+          : '<span class="status-pill status-cancelled"><span class="dot"></span>offline</span>') +
+          '<div class="cell-sub">' + (satellite.last_seen ? esc(fmtShort(satellite.last_seen)) : 'never') + '</div></td>' +
+        '<td><div class="cap-list">' + subnets + '</div></td>' +
+        '<td>' + esc(satellite.version || '—') + '</td>' +
+        '<td class="actions"><div class="row-actions">' +
+          '<button class="btn btn-sm" data-satellite-edit="' + esc(satellite.id) + '">Edit</button>' +
+          '<button class="btn btn-sm btn-subtle danger-text" data-satellite-revoke="' + esc(satellite.id) + '" data-name="' + esc(satellite.name || satellite.hostname || satellite.id) + '">Revoke</button>' +
+        '</div></td></tr>';
+    }).join('') : '<tr><td colspan="6"><p class="muted small" style="margin:0">No satellites paired yet. Pair a second VulnScanner server to scan DMZ or segmented networks; only server-to-server traffic is needed.</p></td></tr>';
+    view.innerHTML =
+      '<div class="page-head"><div class="page-head-main"><h1 class="page-title">Satellites</h1>' +
+        '<div class="page-sub">Satellite VulnScanner servers poll this master over outbound HTTPS and execute scans from their own network position. Results are stored on the master.</div></div>' +
+        '<div class="page-actions"><button class="btn btn-primary" id="pair-satellite">Pair satellite</button></div></div>' +
+      '<div class="panel"><div class="panel-body" style="overflow-x:auto"><table class="table">' +
+        '<thead><tr><th>Name</th><th>Hostname</th><th>Status</th><th>Advertised subnets</th><th>Version</th><th></th></tr></thead>' +
+        '<tbody>' + rows + '</tbody></table></div></div>' +
+      '<div class="info-banner" style="margin-top:14px"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5" stroke-linecap="round"/></svg>' +
+        '<div><strong>Auto-routing:</strong> a network scan whose target CIDR overlaps an online satellite\'s advertised subnets runs on that satellite automatically. Override per scan with the Executor dropdown.</div></div>';
+
+    $('#pair-satellite').addEventListener('click', async function () {
+      try {
+        const pairing = await post('/satellites/pairing', {});
+        openModal({
+          title: 'Pair satellite',
+          size: 'wide',
+          content: '<p style="margin:0 0 12px" class="muted">Run this command on the second VulnScanner server (the code expires in one hour):</p>' +
+            '<pre class="evidence-block mono">python -m app.satellite enroll --server ' + esc(location.origin) + ' --code ' + esc(pairing.code) + ' --name dmz-1 --subnets 10.30.0.0/16</pre>' +
+            '<p style="margin:12px 0 0" class="muted small">The satellite downloads a client certificate signed by the internal CA, stores it locally and starts polling. Advertise the subnets it can reach so scans are routed automatically, then run <span class="mono">python -m app.satellite run</span> (or install it as a service).</p>',
+          actions: [{ label: 'Close', onClick: function (ctx) { ctx.close(); router(); } }]
+        });
+      } catch (error) { toast(errorText(error), 'error'); }
+    });
+    view.addEventListener('click', function (event) {
+      const edit = event.target.closest('[data-satellite-edit]');
+      if (edit) {
+        const id = edit.getAttribute('data-satellite-edit');
+        const satellite = satellites.find(function (item) { return item.id === id; });
+        if (!satellite) return;
+        openModal({
+          title: 'Edit satellite',
+          size: 'wide',
+          content: '<form id="satellite-edit-form"><div class="form-grid">' +
+            '<label class="field"><span>Name</span><input class="input" id="satellite-name" value="' + esc(satellite.name) + '" maxlength="160"></label>' +
+            '<label class="field full"><span>Advertised subnets (one per line)</span><textarea class="textarea mono" id="satellite-subnets" rows="5" spellcheck="false">' + esc((satellite.subnets || []).join('\n')) + '</textarea>' +
+            '<span class="hint">CIDR ranges this satellite can reach. Network scans targeting overlapping ranges run here automatically.</span></label>' +
+            '</div><div class="form-error"></div></form>',
+          actions: [
+            { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+            { label: 'Save', class: 'btn-primary', onClick: function (ctx) {
+              runWithButton(ctx.button, async function () {
+                try {
+                  const subnets = $('#satellite-subnets', ctx.overlay).value.split('\n')
+                    .map(function (line) { return line.trim(); }).filter(Boolean);
+                  await patch('/satellites/' + encodeURIComponent(id), {
+                    name: $('#satellite-name', ctx.overlay).value.trim(),
+                    subnets: subnets
+                  });
+                  ctx.close(); toast('Satellite updated'); router();
+                } catch (error) { formError(ctx.overlay, errorText(error)); }
+              });
+            } }
+          ]
+        });
+      }
+      const revoke = event.target.closest('[data-satellite-revoke]');
+      if (revoke) {
+        const id = revoke.getAttribute('data-satellite-revoke');
+        confirmAction('Revoke satellite “' + revoke.getAttribute('data-name') + '”? Its token is invalidated and queued jobs are cancelled.', 'Revoke satellite').then(function (ok) {
+          if (!ok) return;
+          del('/satellites/' + encodeURIComponent(id)).then(function () { toast('Satellite revoked'); router(); })
+            .catch(function (error) { toast(errorText(error), 'error'); });
+        });
       }
     });
   }

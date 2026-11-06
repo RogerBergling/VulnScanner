@@ -9,6 +9,7 @@ from .scans import (
     execute_ad_import,
     execute_agent_result,
     execute_pingcastle_import,
+    execute_satellite_result,
     execute_scan,
 )
 
@@ -34,6 +35,10 @@ def submit_ad_import(scan_id: int, report: dict) -> None:
 
 def submit_pingcastle_import(scan_id: int, xml_text: str) -> None:
     _executor.submit(execute_pingcastle_import, scan_id, xml_text)
+
+
+def submit_satellite_result(scan_id: int, job_id: str, payload: dict) -> None:
+    _executor.submit(execute_satellite_result, scan_id, job_id, payload)
 
 
 def shutdown(wait: bool = False) -> None:
