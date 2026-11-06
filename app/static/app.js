@@ -1069,6 +1069,7 @@
       return '<div class="form-section"><h3>Web scan options</h3><div class="checkbox-row">' +
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE, misconfiguration and exposure templates when nuclei is installed (default tag set from Settings).</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-sqlmap"><span><strong>sqlmap (dangerous)</strong> — send real SQL injection payloads to discovered parameters. Requires the Settings dangerous-tools switch AND this option; authorised penetration tests only.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match software versions against CVEs</strong> — fingerprint the web stack (Server header, X-Powered-By, generator meta) and compare it with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-external"><span><strong>External tools</strong> — allows testssl.sh below.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
@@ -1080,6 +1081,8 @@
         '<label class="field"><span>Nuclei template tags <span class="muted">(optional)</span></span>' +
           '<input class="input" id="opt-nuclei-tags" placeholder="cve,misconfiguration,exposure">' +
           '<span class="hint">Comma-separated tags such as <span class="mono">cve,tech,oast</span>. Empty uses the default from Settings; "all" runs every template.</span></label>' +
+        '<label class="field"><span>Max sqlmap targets</span><input class="input" id="opt-max-sqlmap" type="number" min="1" max="20" value="5">' +
+          '<span class="hint">Parameterized URLs tested with sqlmap when the dangerous option is enabled.</span></label>' +
         '</div><div class="modal-note" style="margin-top:8px">Only scan applications you are authorized to test. Active checks send real attack payloads. TLS verification is on by default.</div></div>';
     }
     if (type === 'network') {
@@ -1097,12 +1100,15 @@
           '<span class="hint">Same-origin HTML links followed after an HTTP/HTTPS service is found. 0 disables crawling.</span></label>' +
         '<label class="field"><span>Nuclei template tags <span class="muted">(optional)</span></span>' +
           '<input class="input" id="opt-nuclei-tags" placeholder="cve,misconfiguration,exposure">' +
-          '<span class="hint">Comma-separated tags; empty uses the default from Settings, "all" runs every template.</span></label></div>' +
+          '<span class="hint">Comma-separated tags; empty uses the default from Settings, "all" runs every template.</span></label>' +
+        '<label class="field"><span>Max sqlmap targets</span><input class="input" id="opt-max-sqlmap" type="number" min="1" max="20" value="5">' +
+          '<span class="hint">Parameterized URLs of discovered web services tested with sqlmap when enabled.</span></label></div>' +
         '<div class="checkbox-row" style="margin-top:12px">' +
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — detect HTTP/HTTPS on discovered ports, then crawl, check headers, exposed files, injection and Nuclei.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE/misconfiguration/exposure templates against discovered web services when nuclei is installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-sqlmap"><span><strong>sqlmap (dangerous)</strong> — send real SQL injection payloads to parameters of discovered web services. Requires the Settings dangerous-tools switch AND this option.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match service versions against CVEs</strong> — fingerprint detected services (banners, Server headers, Nmap results) and compare them with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-service-probes" checked><span><strong>Service security probes</strong> — test SMB signing, SNMP default communities, unauthenticated Redis/MongoDB/Elasticsearch/Docker, RDP NLA and VNC authentication. Read-only probes.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-scan-unresponsive" checked><span><strong>Scan hosts even if they do not answer ping</strong> — include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only).</span></label>' +
@@ -1238,11 +1244,14 @@
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
                 payload.options.nuclei = !!($('#opt-nuclei', ctx.overlay) || {}).checked;
+                payload.options.sqlmap = !!($('#opt-sqlmap', ctx.overlay) || {}).checked;
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
                 const nucleiTags = (($('#opt-nuclei-tags', ctx.overlay) || {}).value || '').trim();
                 if (nucleiTags) payload.options.nuclei_tags = nucleiTags;
+                const sqlmapTargets = (($('#opt-max-sqlmap', ctx.overlay) || {}).value || '').trim();
+                if (sqlmapTargets) payload.options.max_sqlmap_targets = Number(sqlmapTargets);
                 const webPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = webPagesValue === undefined || webPagesValue === '' ? 10 : Number(webPagesValue);
               } else if (type === 'network') {
@@ -1256,6 +1265,9 @@
                 payload.options.nuclei = !!($('#opt-nuclei', ctx.overlay) || {}).checked;
                 const nucleiTags = (($('#opt-nuclei-tags', ctx.overlay) || {}).value || '').trim();
                 if (nucleiTags) payload.options.nuclei_tags = nucleiTags;
+                payload.options.sqlmap = !!($('#opt-sqlmap', ctx.overlay) || {}).checked;
+                const sqlmapTargets = (($('#opt-max-sqlmap', ctx.overlay) || {}).value || '').trim();
+                if (sqlmapTargets) payload.options.max_sqlmap_targets = Number(sqlmapTargets);
                 const networkPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = networkPagesValue === undefined || networkPagesValue === '' ? 10 : Number(networkPagesValue);
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
@@ -3202,6 +3214,11 @@
             'Run Trivy dependency, IaC and secret checks during repository scans when installed.', settings.trivy_enabled) +
           switchRow('set-subfinder', 'Enable Subfinder integration',
             'Use passive subdomain enumeration during domain scans when installed.', settings.subfinder_enabled) +
+          '<div class="form-section"><h3>Dangerous tools</h3>' +
+          '<p class="muted small" style="margin-top:0">Dangerous tools send real attack payloads. A per-scan option is also required before anything runs.</p>' +
+          switchRow('set-dangerous', 'Allow sqlmap (SQL injection payloads)',
+            'sqlmap sends real SQL injection attack payloads against discovered parameters. Only enable for authorised penetration tests. Default off.', settings.dangerous_tools_enabled) +
+          '<p class="modal-note" style="margin-top:8px">sqlmap is GPL-2.0 and runs as a separate process; install it from sqlmap.org (pre-installed on Kali) and set VS_SQLMAP_PATH if needed.</p></div>' +
           '<div class="form-section"><h3>Nuclei signature engine</h3>' +
           '<p class="muted small" style="margin-top:0">Nuclei is the default vulnerability-signature engine (CVE, misconfiguration and exposure templates). Template updates run daily at 03:30 UTC and require external APIs.</p>' +
           '<div class="kv"><span>Last template update</span><span>' +
@@ -3331,7 +3348,8 @@
             testssl_enabled: $('#set-testssl').checked,
             trivy_enabled: $('#set-trivy').checked,
             subfinder_enabled: $('#set-subfinder').checked,
-            nuclei_default_tags: $('#set-nuclei-tags').value.trim()
+            nuclei_default_tags: $('#set-nuclei-tags').value.trim(),
+            dangerous_tools_enabled: $('#set-dangerous').checked
           });
           toast('Settings saved');
           router();

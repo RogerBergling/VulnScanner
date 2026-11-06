@@ -836,6 +836,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "allow_http_fallback",
             "cve_lookup",
             "nuclei",
+            "sqlmap",
         ],
         "network": [
             "external_tools",
@@ -851,6 +852,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "cve_lookup",
             "service_probes",
             "nuclei",
+            "sqlmap",
         ],
         "repo": [
             "include_secrets",
@@ -937,6 +939,14 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
             clean[key] = max(low, min(high, value))
+    if scan_type in {"web", "network"} and "max_sqlmap_targets" in options:
+        try:
+            value = int(options["max_sqlmap_targets"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="max_sqlmap_targets must be an integer"
+            ) from exc
+        clean["max_sqlmap_targets"] = max(1, min(20, value))
     if scan_type in {"web", "network"} and "nuclei_tags" in options:
         tags = str(options["nuclei_tags"] or "").strip()
         if not re.fullmatch(TAG_RE, tags):
@@ -2110,6 +2120,7 @@ def get_settings() -> dict[str, Any]:
         "trust_proxy": os.getenv("VS_TRUST_PROXY", "false").strip().lower()
         in {"1", "true", "yes", "on"},
         "allow_private_outbound": get_setting("allow_private_outbound", "false") == "true",
+        "dangerous_tools_enabled": get_setting("dangerous_tools_enabled", "false") == "true",
         "tool_policy": get_policy(),
         "bind_host": configured_bind_host,
         "bind_port": configured_bind_port,
@@ -2195,6 +2206,12 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
         value = updates.get(key)
         if value is not None:
             set_setting(key, "true" if value else "false")
+
+    if "dangerous_tools_enabled" in updates and updates["dangerous_tools_enabled"] is not None:
+        set_setting(
+            "dangerous_tools_enabled",
+            "true" if updates["dangerous_tools_enabled"] else "false",
+        )
 
     if "allow_private_outbound" in updates and updates["allow_private_outbound"] is not None:
         set_setting(

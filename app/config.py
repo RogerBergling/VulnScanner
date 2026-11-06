@@ -272,6 +272,7 @@ TOOL_ENV_VARS = {
     "osv-scanner": "VS_OSV_SCANNER_PATH",
     "gitleaks": "VS_GITLEAKS_PATH",
     "semgrep": "VS_SEMGREP_PATH",
+    "sqlmap": "VS_SQLMAP_PATH",
     "git": "VS_GIT_PATH",
 }
 TOOL_PATHS = {

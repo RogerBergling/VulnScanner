@@ -46,8 +46,8 @@ no separate database server and no Node.js build step.
 - Do not expose the default listener to an untrusted network. See
   [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md).
 - Optional tools such as Nmap, Nuclei, testssl.sh, Trivy, Subfinder, Gitleaks,
-  Semgrep and osv-scanner can be added later. Built-in checks still run without
-  them.
+  Semgrep, sqlmap and osv-scanner can be added later. Built-in checks still run
+  without them. Nuclei templates, once installed, update automatically.
 - Back up the data directory before using real customer data.
 
 **Next:** [First scan](#first-scan) ·
@@ -346,6 +346,7 @@ deployment-level values that remain outside the GUI.
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Process-level master switch for OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. Editable in Settings → Advanced runtime; restart required. |
 | `VS_NVD_API_KEY` | empty | Optional NVD API key for CVE matching (raises the rate limit from 5 to 50 requests per 30 seconds). Not stored in the GUI; keep it in `.env`. |
+| `VS_SQLMAP_PATH` | empty | Path for the optional sqlmap binary (dangerous tool; double-gated via Settings + per-scan option). |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
 | `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings → Advanced runtime; files outside the data directory are read-only in the editor. |
 | `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list**. Editable in Settings → Advanced runtime. |

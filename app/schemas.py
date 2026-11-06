@@ -275,6 +275,7 @@ class SettingsUpdate(BaseModel):
     max_cves_per_service: int | None = Field(default=None, ge=1, le=500)
     max_cves_per_scan: int | None = Field(default=None, ge=1, le=5_000)
     nuclei_default_tags: str | None = Field(default=None, max_length=200)
+    dangerous_tools_enabled: bool | None = None
 
     @field_validator("smtp_port")
     @classmethod

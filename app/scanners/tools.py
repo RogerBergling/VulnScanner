@@ -67,6 +67,7 @@ TOOL_NAMES = (
     "osv-scanner",
     "gitleaks",
     "semgrep",
+    "sqlmap",
     "git",
 )
 # Commands that may be installed under a different name than the integration.
@@ -77,6 +78,7 @@ VERSION_ARGS = {
     "nuclei": ("-version",),
     "subfinder": ("-version",),
     "testssl": ("--version",),
+    "sqlmap": ("--version",),
 }
 
 

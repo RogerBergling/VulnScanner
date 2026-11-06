@@ -46,7 +46,11 @@ Nessus-class vulnerability scanner with:
    detection, RDP NLA negotiation parsing and VNC security-type handshake;
    read-only; per-scan toggle in the network scan dialog).
 4. **Scan policies** (GUI-defined, reusable). (open)
-5. **sqlmap integration.** (open)
+5. **sqlmap integration.** — **done** (`app/scanners/sqlmap.py`, double-gated:
+   Settings → Dangerous tools switch plus a per-scan option; runs against
+   parameterized URLs discovered by the built-in injection probes, bounded by
+   `max_sqlmap_targets`; GPL tool invoked as a separate process, never
+   linked/bundled).
 6. **Risk scoring upgrade.** EPSS enrichment — **done**; KEV-weighted risk
    score and MITRE ATT&CK tags remain open.
 

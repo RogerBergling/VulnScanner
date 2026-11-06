@@ -43,6 +43,7 @@ hardening requirements.
 | Subfinder | Optional CLI | Domain scan with **Passive enumeration**, Subfinder enabled in Settings, external APIs enabled | Passive subdomain enumeration |
 | SecLists wordlist | Local file (optional download) | Domain scan with **Wordlist DNS discovery** | Local DNS brute-force names |
 | Gitleaks | Optional CLI | Repository scan with **External tools** | Supplemental secret detection |
+| sqlmap | Optional CLI (dangerous) | **Settings → Dangerous tools** AND per-scan **sqlmap (dangerous)** | Deep SQL injection testing of discovered parameters |
 | Semgrep | Optional CLI | Repository scan with **External tools**, external APIs enabled | Additional SAST rules |
 | Git | Required for GitHub scans | GitHub scan | Repository cloning |
 | PingCastle / Purple Knight / `ad_audit.ps1` | External collector + JSON import | AD import or Windows agent `ad` module | Read-only Active Directory assessment |
@@ -259,6 +260,39 @@ template-driven CVE, misconfiguration and exposure detection.
 
 Nuclei templates can be intrusive and change over time. Use them only against
 authorised targets and with an agreed rate and time window.
+
+### 4.3b sqlmap (dangerous, double-gated)
+
+sqlmap performs deep SQL injection testing. It sends real attack payloads,
+so it is the only integration that requires **two** switches:
+
+1. **Settings → Dangerous tools → Allow sqlmap** (`dangerous_tools_enabled`,
+   default off).
+2. The per-scan **sqlmap (dangerous)** option (default off).
+
+Both must be enabled before any payload is sent.
+
+- Runs against parameterized URLs discovered by the built-in injection
+  probes (up to **Max sqlmap targets**, default 5, maximum 20).
+- Command used (per target, argument list, never a shell):
+
+  ```text
+  sqlmap -u <url> --batch --smart --level 2 --risk 2 \
+    --threads 4 --timeout 15 --retries 1 --disable-coloring
+  ```
+
+- Console output is parsed for the `Parameter:` / `Type:` / `Payload:`
+  confirmation blocks; confirmed parameters become `critical` findings with
+  CWE-89 and the detected technique.
+- Does not require external APIs.
+- sqlmap is GPL-2.0 and runs as a separate process; it is never linked or
+  bundled. It is pre-installed on Kali; on other systems install it from
+  https://sqlmap.org and set `VS_SQLMAP_PATH`.
+- A missing binary, a disabled gate or a failed run is logged.
+
+sqlmap probes can modify data in injectable applications. Use it only with
+explicit authorisation, ideally against a staging copy, and agree the scope,
+timing and parameter list with the target owner first.
 
 ### 4.4 Gitleaks
 
@@ -553,6 +587,7 @@ Settings shows whether the binary is visible and which version it reports.
 | `VS_OSV_SCANNER_PATH` | osv-scanner | Absolute path or empty to use `PATH`. |
 | `VS_GITLEAKS_PATH` | Gitleaks | Absolute path or empty to use `PATH`. |
 | `VS_SEMGREP_PATH` | Semgrep | Absolute path or empty to use `PATH`. |
+| `VS_SQLMAP_PATH` | sqlmap | Absolute path or empty to use `PATH` (pre-installed on Kali). |
 | `VS_GIT_PATH` | Git/GitHub | Absolute path or empty to use `PATH`. |
 | `VS_MAX_REPO_BYTES` | Git/GitHub and repository scans | Clone size limit. |
 | `VS_MAX_SOURCE_FILE_BYTES` | Semgrep/built-in source review | File read limit. |

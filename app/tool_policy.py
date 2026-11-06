@@ -23,14 +23,15 @@ DEFAULT_MINIMUMS: dict[str, str] = {
     "osv-scanner": "1.6.0",
     "gitleaks": "8.18.0",
     "semgrep": "1.50.0",
+    "sqlmap": "1.7.0",
     "git": "2.30.0",
 }
 
 # Which optional tools a scan type can use.  The scan options still decide
 # whether the tool is actually invoked.
 SCAN_TOOLS: dict[str, tuple[str, ...]] = {
-    "web": ("nuclei",),
-    "network": ("nmap", "testssl"),
+    "web": ("nuclei", "sqlmap"),
+    "network": ("nmap", "testssl", "sqlmap"),
     "repo": ("git", "gitleaks", "semgrep", "osv-scanner"),
     "github": ("git", "gitleaks", "semgrep", "osv-scanner"),
     "domain": ("subfinder",),

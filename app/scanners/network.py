@@ -867,6 +867,17 @@ def scan(ctx: ScanContext) -> ScanResult:
         except Exception as exc:
             ctx.log(f"CVE matching failed: {exc}", "warning")
 
+    if ctx.option_bool("sqlmap", False):
+        ctx.progress(87, "Running sqlmap (dangerous tools)")
+        try:
+            from .sqlmap import run_sqlmap
+
+            run_sqlmap(result, result.metadata.get("param_urls", []), ctx)
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"sqlmap stage failed: {exc}", "warning")
+
     # Authenticated inventory/CVE checks use one credential per target OS.
     if ctx.option_bool("authenticated", False):
         ctx.progress(88, "Running authenticated host checks")

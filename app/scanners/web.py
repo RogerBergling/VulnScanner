@@ -641,6 +641,10 @@ def _injection_checks(
         return
     if len(params) > 8:
         params = params[:8]
+    # Remember parameterized URLs so an enabled sqlmap pass can revisit them.
+    param_urls = result.metadata.setdefault("param_urls", [])
+    if isinstance(param_urls, list) and url not in param_urls and len(param_urls) < 20:
+        param_urls.append(url)
     # SQL injection: append a quote and look for database error output.
     for name, value in params:
         ctx.check_cancel()
@@ -961,6 +965,16 @@ def scan(ctx: ScanContext) -> ScanResult:
                 raise
             except Exception as exc:
                 ctx.log(f"CVE matching failed: {exc}", "warning")
+        if ctx.option_bool("sqlmap", False):
+            ctx.progress(92, "Running sqlmap (dangerous tools)")
+            try:
+                from .sqlmap import run_sqlmap
+
+                run_sqlmap(result, result.metadata.get("param_urls", []), ctx)
+            except ScanCancelled:
+                raise
+            except Exception as exc:
+                ctx.log(f"sqlmap stage failed: {exc}", "warning")
         ctx.progress(95, "Finalizing web results")
         return result
     finally:
