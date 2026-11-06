@@ -498,11 +498,13 @@ scanning a production network.
 
 ## Version and build metadata
 
-The dashboard header shows the release version, build number, commit and build
-date/time. The same values are available from `GET /api/health`,
-`GET /api/dashboard`, `GET /api/meta` and the Server page. Source checkouts
-derive them from Git; packaged releases should set `VS_BUILD_NUMBER`,
-`VS_BUILD_TIME` and `VS_BUILD_COMMIT` in the build environment.
+The sidebar shows the release version and build number. The dashboard header
+adds the commit and build date/time, and the Server page shows the full build
+record. All UI timestamps use a 24-hour clock. The same values are available
+from `GET /api/health`, `GET /api/dashboard`, `GET /api/meta` and the Server
+page. Source checkouts derive them from Git; packaged releases should set
+`VS_BUILD_NUMBER`, `VS_BUILD_TIME` and `VS_BUILD_COMMIT` in the build
+environment.
 
 ## Documentation
 

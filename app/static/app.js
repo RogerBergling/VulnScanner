@@ -49,14 +49,15 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleString(undefined, {
-      year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit'
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
     });
   }
   function fmtShort(value) {
     if (!value) return '—';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
-    return date.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    return date.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   }
   function fmtHostPort(host, port) {
     const label = String(host || '');
@@ -412,6 +413,8 @@
       const health = await get('/health');
       const version = $('#app-version');
       if (version && health.version) version.textContent = health.version;
+      const build = $('#app-build');
+      if (build && health.build && health.build.number) build.textContent = health.build.number;
     } catch (ignore) { /* non-fatal */ }
     try { state.meta = await get('/meta'); } catch (ignore) { state.meta = null; }
     await router();

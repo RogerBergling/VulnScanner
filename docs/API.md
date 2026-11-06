@@ -163,9 +163,9 @@ Public health check.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "build": {
-    "version": "1.1.2",
+    "version": "1.1.3",
     "number": "42",
     "commit": "abc1234",
     "time": "2026-11-01T11:14:00+00:00",
@@ -185,7 +185,7 @@ Lists scan types and agent modules.
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "build": {
     "number": "42",
     "commit": "abc1234",
@@ -934,7 +934,7 @@ enrolment token.
   "enrollment_token": "vs_enroll_...",
   "name": "web01",
   "platform": "Linux",
-  "version": "1.1.2",
+  "version": "1.1.0",
   "hostname": "web01",
   "capabilities": ["system", "packages", "ports"],
   "ip": ""
@@ -951,7 +951,7 @@ Requires `X-Agent-Token` or a Bearer agent token.
 ```json
 {
   "platform": "Linux",
-  "version": "1.1.2",
+  "version": "1.1.0",
   "hostname": "web01",
   "capabilities": ["system"],
   "ip": ""
@@ -1164,7 +1164,7 @@ be downloaded as a diagnostics snapshot.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "started_at": "2026-01-02T03:04:05+00:00",
   "uptime_seconds": 3600,
   "uptime_human": "1h",
@@ -1365,7 +1365,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "allow_external_apis": true,
   "nuclei_enabled": true,
   "nmap_enabled": true,
