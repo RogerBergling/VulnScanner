@@ -31,6 +31,7 @@ from ..utils import (
 from .authenticated import authenticated_scan
 from .base import Finding, ScanCancelled, ScanContext, ScanResult
 from .cpe import add_cve_findings, fingerprint_text, lookup_cves, lookup_epss
+from .services import run_service_probes
 from .testssl import run_testssl
 from .tools import run_tool, tool_path
 from .web import (
@@ -620,6 +621,7 @@ def _run_cve_matching(
     all_open: list[PortResult],
     web_headers: dict[tuple[str, int], dict[str, str]],
     nmap_hints: list[tuple[str, str]],
+    extra_banners: dict[tuple[str, int], str] | None = None,
 ) -> int:
     """Fingerprint detected services and match their versions against NVD CVEs."""
     max_lookups = _bounded_int(
@@ -636,11 +638,15 @@ def _run_cve_matching(
 
     candidates: list[tuple[Any, str, str]] = []
     seen: set[tuple[str, str]] = set()
+    extra_banners = extra_banners or {}
     for item in all_open:
         location = f"{item.host}:{item.port}"
         texts: list[tuple[str, str]] = []
         if item.banner:
             texts.append((item.banner, "banner"))
+        probe_banner = extra_banners.get((item.host, item.port))
+        if probe_banner:
+            texts.append((probe_banner, "active-probe"))
         headers = web_headers.get((item.host, item.port)) or {}
         if headers.get("server"):
             texts.append((headers["server"], "http-server-header"))
@@ -742,6 +748,19 @@ def scan(ctx: ScanContext) -> ScanResult:
     }
     _add_port_findings(result, all_open, ctx)
 
+    # Active service security probes: SMB signing, unauthenticated
+    # Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana, default SNMP
+    # communities, RDP NLA and VNC authentication.
+    service_banners: dict[tuple[str, int], str] = {}
+    if ctx.option_bool("service_probes", True):
+        ctx.progress(80, "Running service security probes")
+        try:
+            service_banners = run_service_probes(result, ctx, open_by_host)
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"Service probes failed: {exc}", "warning")
+
     # Web/TLS checks for detected and likely HTTP/HTTPS services.
     web_checks = ctx.option_bool("web_checks", True)
     web_budget = _bounded_int(
@@ -840,7 +859,9 @@ def scan(ctx: ScanContext) -> ScanResult:
     if ctx.option_bool("cve_lookup", True):
         ctx.progress(86, "Matching service versions against CVE data")
         try:
-            _run_cve_matching(result, ctx, all_open, web_headers, nmap_hints)
+            _run_cve_matching(
+                result, ctx, all_open, web_headers, nmap_hints, service_banners
+            )
         except ScanCancelled:
             raise
         except Exception as exc:

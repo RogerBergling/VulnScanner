@@ -462,6 +462,7 @@ Options:
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
 | Web vulnerability checks | on | Detect HTTP/HTTPS, then crawl, check headers/exposed files, run injection probes and optional Nuclei. |
+| Service security probes | on | Read-only active probes: SMB signing and SMBv1, default SNMP communities over UDP 161, unauthenticated Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana, RDP NLA support and VNC authentication (server scans only). |
 | Match service versions against CVEs | on | Fingerprint detected services (banners, Server headers, Nmap results) and match them against the NVD CVE database with EPSS enrichment. Requires external APIs. |
 | Max pages to crawl per web service | 10 | Same-origin HTML pages followed per discovered web service (0-50). |
 | Scan hosts even if they do not answer ping | on | Include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only). If ping is unavailable, all hosts are still scanned. |

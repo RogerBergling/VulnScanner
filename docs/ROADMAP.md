@@ -37,7 +37,11 @@ Nessus-class vulnerability scanner with:
    registry for SSH/web/database banners and headers, NVD API 2.0 client with
    SQLite cache and self-throttling, CPE range evaluation, EPSS enrichment,
    per-scan toggle and Settings guardrails; live-verified against NVD/EPSS).
-3. **Network service probes.** (open)
+3. **Network service probes.** — **done** (`app/scanners/services.py`: raw-socket
+   SMB2 signing negotiation, SNMPv1/v2 default-community detection over UDP,
+   unauthenticated Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana
+   detection, RDP NLA negotiation parsing and VNC security-type handshake;
+   read-only; per-scan toggle in the network scan dialog).
 4. **Scan policies** (GUI-defined, reusable). (open)
 5. **sqlmap integration.** (open)
 6. **Risk scoring upgrade.** EPSS enrichment — **done**; KEV-weighted risk

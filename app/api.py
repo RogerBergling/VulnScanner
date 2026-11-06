@@ -845,6 +845,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "allow_http_fallback",
             "scan_unresponsive_hosts",
             "cve_lookup",
+            "service_probes",
         ],
         "repo": [
             "include_secrets",

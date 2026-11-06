@@ -1096,6 +1096,7 @@
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — detect HTTP/HTTPS on discovered ports, then crawl, check headers, exposed files, injection and Nuclei.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match service versions against CVEs</strong> — fingerprint detected services (banners, Server headers, Nmap results) and compare them with the NVD database. Requires external APIs.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-service-probes" checked><span><strong>Service security probes</strong> — test SMB signing, SNMP default communities, unauthenticated Redis/MongoDB/Elasticsearch/Docker, RDP NLA and VNC authentication. Read-only probes.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-scan-unresponsive" checked><span><strong>Scan hosts even if they do not answer ping</strong> — include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab services only; recorded in the scan event log.</span></label>' +
@@ -1239,6 +1240,7 @@
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
                 payload.options.web_checks = !!($('#opt-web-checks', ctx.overlay) || {}).checked;
                 payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
+                payload.options.service_probes = !!($('#opt-service-probes', ctx.overlay) || {}).checked;
                 payload.options.scan_unresponsive_hosts = !!($('#opt-scan-unresponsive', ctx.overlay) || {}).checked;
                 const networkPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = networkPagesValue === undefined || networkPagesValue === '' ? 10 : Number(networkPagesValue);
