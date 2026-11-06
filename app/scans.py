@@ -21,6 +21,7 @@ from .scanners.base import ScanCancelled, ScanContext, ScanResult
 from .scanners.kev import enrich_finding
 from .scanners.network import process_agent_network_payload, scan as scan_network
 from .scanners.osv import kev_lookup
+from .scanners.pingcastle import parse_pingcastle_xml, scan_pingcastle_report
 from .scanners.repository import scan_repository
 from .scanners.subdomains import scan_subdomains
 from .scanners.web import scan as scan_web
@@ -154,7 +155,10 @@ def _dispatch(scan: dict[str, Any], ctx: ScanContext, runtime_options: dict[str,
     if scan_type == "domain":
         return scan_subdomains(ctx)
     if scan_type == "ad":
-        return scan_ad_report(ctx, scan["target"])
+        target = (scan["target"] or "").strip()
+        if target.lower().endswith(".xml"):
+            return scan_pingcastle_report(ctx, target)
+        return scan_ad_report(ctx, target)
     raise ValueError(f"Unsupported scan type: {scan_type}")
 
 
@@ -303,6 +307,50 @@ def execute_ad_import(scan_id: int, report: dict[str, Any]) -> None:
             error=message,
         )
         log_event(scan_id, f"AD import failed: {message}", "error")
+
+
+def execute_pingcastle_import(scan_id: int, xml_text: str) -> None:
+    scan = _fetch_scan(scan_id)
+    if not scan or scan["status"] not in {"queued", "running"}:
+        return
+    options = json_load(scan.get("options"), {})
+    ctx = ScanContext(scan_id, scan["target"], options)
+    update_scan(
+        scan_id,
+        status="running",
+        progress=10,
+        stage="Parsing PingCastle report",
+        started_at=utcnow(),
+    )
+    log_event(scan_id, "PingCastle report import started")
+    try:
+        result = parse_pingcastle_xml(xml_text)
+        ctx.progress(90, "Saving PingCastle findings")
+        summary = persist_result(scan_id, result)
+        update_scan(
+            scan_id,
+            status="completed",
+            progress=100,
+            stage="Completed",
+            completed_at=utcnow(),
+            summary=summary,
+        )
+        log_event(
+            scan_id,
+            f"PingCastle report imported with {summary.get('total', 0)} finding(s) "
+            f"(risk score {summary.get('risk_score', 0)})",
+        )
+    except Exception as exc:
+        message = truncate(f"{exc.__class__.__name__}: {exc}", 1500)
+        update_scan(
+            scan_id,
+            status="failed",
+            progress=100,
+            stage="Failed",
+            completed_at=utcnow(),
+            error=message,
+        )
+        log_event(scan_id, f"PingCastle import failed: {message}", "error")
 
 
 def execute_agent_result(

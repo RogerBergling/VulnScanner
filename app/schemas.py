@@ -271,6 +271,9 @@ class SettingsUpdate(BaseModel):
     max_scan_files: int | None = Field(default=None, ge=1, le=1_000_000)
     max_cidr_hosts: int | None = Field(default=None, ge=1, le=65_536)
     agent_job_timeout: int | None = Field(default=None, ge=60, le=86_400)
+    max_cve_lookups: int | None = Field(default=None, ge=0, le=200)
+    max_cves_per_service: int | None = Field(default=None, ge=1, le=500)
+    max_cves_per_scan: int | None = Field(default=None, ge=1, le=5_000)
 
     @field_validator("smtp_port")
     @classmethod
@@ -541,4 +544,15 @@ class ADImportRequest(BaseModel):
     customer_id: int
     group_id: int | None = None
     asset_id: int | None = None
-    report: dict[str, Any]
+    report: dict[str, Any] | None = None
+    # PingCastle HealthcheckData XML, uploaded as text. Exactly one of
+    # `report` or `xml` must be supplied.
+    xml: str | None = Field(default=None, max_length=25_000_000)
+
+    @model_validator(mode="after")
+    def check_payload(self) -> "ADImportRequest":
+        has_json = self.report is not None
+        has_xml = bool((self.xml or "").strip())
+        if has_json == has_xml:
+            raise ValueError("Provide exactly one of 'report' (JSON object) or 'xml' (PingCastle report)")
+        return self

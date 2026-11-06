@@ -83,7 +83,7 @@ from .database import (
     utcnow,
 )
 from .envfile import env_safe, upsert_env_entries
-from .jobs import submit_ad_import, submit_agent_result, submit_scan
+from .jobs import submit_ad_import, submit_agent_result, submit_pingcastle_import, submit_scan
 from .net_guard import UnsafeURLError, validate_outbound_url
 from .reporting import build_csv, build_html, build_json
 from .schemas import (
@@ -118,6 +118,7 @@ from .schemas import (
     WordlistUpdate,
 )
 from .scanners.kev import KevSyncError, sync_kev
+from .scanners.pingcastle import parse_pingcastle_xml
 from .scanners.subdomains import (
     download_seclists_wordlist,
     normalize_domain,
@@ -830,6 +831,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "testssl",
             "ignore_tls_errors",
             "allow_http_fallback",
+            "cve_lookup",
         ],
         "network": [
             "external_tools",
@@ -842,6 +844,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "ignore_tls_errors",
             "allow_http_fallback",
             "scan_unresponsive_hosts",
+            "cve_lookup",
         ],
         "repo": [
             "include_secrets",
@@ -915,6 +918,19 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
                 status_code=400, detail="max_web_pages must be an integer"
             ) from exc
         clean["max_web_pages"] = max(0, min(50, value))
+    if scan_type in {"web", "network"}:
+        for key, low, high in (
+            ("max_cve_lookups", 0, 200),
+            ("max_cves_per_service", 1, 500),
+            ("max_cves_per_scan", 1, 5_000),
+        ):
+            if key not in options:
+                continue
+            try:
+                value = int(options[key])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+            clean[key] = max(low, min(high, value))
     if scan_type == "domain":
         for key, low, high in (
             ("max_words", 1, 50_000),
@@ -2137,6 +2153,10 @@ def get_settings() -> dict[str, Any]:
         "max_scan_files": int(get_setting("max_scan_files", "20000")),
         "max_cidr_hosts": int(get_setting("max_cidr_hosts", "256")),
         "agent_job_timeout": int(get_setting("agent_job_timeout", str(60*60))),
+        "max_cve_lookups": int(get_setting("max_cve_lookups", "25")),
+        "max_cves_per_service": int(get_setting("max_cves_per_service", "50")),
+        "max_cves_per_scan": int(get_setting("max_cves_per_scan", "500")),
+        "nvd_api_key_configured": bool(os.getenv("VS_NVD_API_KEY", "").strip()),
     }
 
 
@@ -2213,6 +2233,9 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
         "max_scan_files",
         "max_cidr_hosts",
         "agent_job_timeout",
+        "max_cve_lookups",
+        "max_cves_per_service",
+        "max_cves_per_scan",
     ):
         value = updates.get(key)
         if value is not None:
@@ -2246,6 +2269,37 @@ def import_ad_report(payload: ADImportRequest) -> dict[str, Any]:
         asset = _fetch_asset(payload.asset_id)
         if asset["customer_id"] != payload.customer_id:
             raise HTTPException(status_code=400, detail="Asset does not belong to the selected customer")
+
+    is_xml = bool((payload.xml or "").strip())
+    if is_xml:
+        xml_text = payload.xml or ""
+        if len(xml_text.encode("utf-8", errors="replace")) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="AD report exceeds the 20 MiB limit")
+        try:
+            parsed = parse_pingcastle_xml(xml_text)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Could not parse PingCastle report: {exc}") from exc
+        domain_name = parsed.metadata.get("domain") or "PingCastle report"
+        scan_payload = ScanCreate(
+            customer_id=payload.customer_id,
+            group_id=payload.group_id,
+            asset_id=payload.asset_id,
+            scan_type="ad",
+            target=f"AD audit: {domain_name}",
+            options={"imported": True, "format": "pingcastle_xml"},
+            requested_by="ad-import",
+        )
+        scan_id = _create_scan_record(
+            scan_payload,
+            scan_payload.target,
+            {"imported": True, "format": "pingcastle_xml"},
+            status="queued",
+            stage="Queued PingCastle import",
+            requested_by="ad-import",
+        )
+        submit_pingcastle_import(scan_id, xml_text)
+        return _scan_detail(scan_id)
+
     if not isinstance(payload.report, dict):
         raise HTTPException(status_code=400, detail="AD report must be a JSON object")
     if len(json.dumps(payload.report, default=str)) > 20 * 1024 * 1024:

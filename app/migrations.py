@@ -16,7 +16,7 @@ from typing import Callable
 # Version 3 is the last schema that existed before the migration ledger was
 # introduced.  Keep this in sync with the historical SCHEMA_VERSION.
 BASELINE_VERSION = 3
-LATEST_VERSION = 5
+LATEST_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -140,9 +140,33 @@ def _migration_5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_6(conn: sqlite3.Connection) -> None:
+    """CVE lookups: NVD response cache and EPSS score cache."""
+    _run_sql(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS nvd_cache (
+            cache_key TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_nvd_cache_expiry ON nvd_cache(expires_at);
+
+        CREATE TABLE IF NOT EXISTS epss_cache (
+            cve_id TEXT PRIMARY KEY,
+            score REAL NOT NULL DEFAULT 0,
+            percentile REAL NOT NULL DEFAULT 0,
+            fetched_at TEXT NOT NULL
+        );
+        """,
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "session authentication and audit log", _migration_4),
     Migration(5, "notification history and finding-history index", _migration_5),
+    Migration(6, "NVD and EPSS caches", _migration_6),
 )
 
 

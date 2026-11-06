@@ -5,7 +5,12 @@ from __future__ import annotations
 import concurrent.futures
 
 from .config import SCAN_WORKERS
-from .scans import execute_ad_import, execute_agent_result, execute_scan
+from .scans import (
+    execute_ad_import,
+    execute_agent_result,
+    execute_pingcastle_import,
+    execute_scan,
+)
 
 # One slot per independent server-side scan. SQLite WAL mode lets these workers
 # persist results concurrently. Delegated agent scans are not submitted here;
@@ -25,6 +30,10 @@ def submit_agent_result(scan_id: int, payload: dict, job_id: str | None = None) 
 
 def submit_ad_import(scan_id: int, report: dict) -> None:
     _executor.submit(execute_ad_import, scan_id, report)
+
+
+def submit_pingcastle_import(scan_id: int, xml_text: str) -> None:
+    _executor.submit(execute_pingcastle_import, scan_id, xml_text)
 
 
 def shutdown(wait: bool = False) -> None:

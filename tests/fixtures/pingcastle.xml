@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<HealthcheckData xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <EngineVersion>2.9.2.0</EngineVersion>
+  <GenerationDate>2021-04-23T08:52:04.3975197+02:00</GenerationDate>
+  <Level>Normal</Level>
+  <MaturityLevel>1</MaturityLevel>
+  <DomainFQDN>mastec.local</DomainFQDN>
+  <NetBIOSName>MASTEC</NetBIOSName>
+  <ForestFQDN>mastec.local</ForestFQDN>
+  <DomainFunctionalLevel>2</DomainFunctionalLevel>
+  <ForestFunctionalLevel>2</ForestFunctionalLevel>
+  <IsRecycleBinEnabled>false</IsRecycleBinEnabled>
+  <NumberOfDC>2</NumberOfDC>
+  <GlobalScore>100</GlobalScore>
+  <StaleObjectsScore>100</StaleObjectsScore>
+  <PrivilegiedGroupScore>100</PrivilegiedGroupScore>
+  <TrustScore>0</TrustScore>
+  <AnomalyScore>100</AnomalyScore>
+  <Trusts />
+  <DomainControllers>
+    <HealthcheckDomainController>
+      <DCName>DC01</DCName>
+      <OperatingSystem>Windows 2008</OperatingSystem>
+      <HasNullSession>false</HasNullSession>
+      <SupportSMB1>true</SupportSMB1>
+      <SMB1SecurityMode>None</SMB1SecurityMode>
+      <SupportSMB2OrSMB3>true</SupportSMB2OrSMB3>
+      <SMB2SecurityMode>SmbSigningEnabled SmbSigningRequired</SMB2SecurityMode>
+      <RemoteSpoolerDetected>true</RemoteSpoolerDetected>
+      <IP><string>10.30.50.134</string></IP>
+      <FSMO><string>PDC</string></FSMO>
+      <LDAPSProtocols><string>Tls</string></LDAPSProtocols>
+      <RODC>false</RODC>
+      <SYSVOLOverwrite>false</SYSVOLOverwrite>
+    </HealthcheckDomainController>
+    <HealthcheckDomainController>
+      <DCName>DC02</DCName>
+      <OperatingSystem>Windows 2016</OperatingSystem>
+      <HasNullSession>false</HasNullSession>
+      <SupportSMB1>false</SupportSMB1>
+      <SMB1SecurityMode>NotTested</SMB1SecurityMode>
+      <SupportSMB2OrSMB3>true</SupportSMB2OrSMB3>
+      <SMB2SecurityMode>SmbSigningEnabled</SMB2SecurityMode>
+      <RemoteSpoolerDetected>false</RemoteSpoolerDetected>
+      <IP><string>10.30.50.118</string></IP>
+      <FSMO><string>Schema master</string></FSMO>
+      <LDAPSProtocols><string>Tls12</string></LDAPSProtocols>
+      <RODC>false</RODC>
+      <SYSVOLOverwrite>false</SYSVOLOverwrite>
+    </HealthcheckDomainController>
+  </DomainControllers>
+  <Sites>
+    <HealthcheckSite>
+      <SiteName>Default</SiteName>
+      <Networks><string>10.30.50.0/24</string></Networks>
+    </HealthcheckSite>
+  </Sites>
+  <PreWindows2000AnonymousAccess>true</PreWindows2000AnonymousAccess>
+  <PreWindows2000NoDefault>true</PreWindows2000NoDefault>
+  <UsingNTFRSForSYSVOL>true</UsingNTFRSForSYSVOL>
+  <RiskRules>
+    <HealthcheckRiskRule>
+      <Points>50</Points>
+      <Category>Anomalies</Category>
+      <Model>GoldenTicket</Model>
+      <RiskId>A-Krbtgt</RiskId>
+      <Rationale>Last change of the Kerberos password: 6677 day(s) ago</Rationale>
+    </HealthcheckRiskRule>
+    <HealthcheckRiskRule>
+      <Points>20</Points>
+      <Category>PrivilegedAccounts</Category>
+      <Model>AccountTakeOver</Model>
+      <RiskId>P-Delegated</RiskId>
+      <Rationale>Presence of Admin accounts which have not the flag "this account is sensitive and cannot be delegated"</Rationale>
+    </HealthcheckRiskRule>
+    <HealthcheckRiskRule>
+      <Points>15</Points>
+      <Category>Anomalies</Category>
+      <Model>PassTheCredential</Model>
+      <RiskId>A-LAPS-Not-Installed</RiskId>
+      <Rationale>LAPS doesn't seem to be installed</Rationale>
+    </HealthcheckRiskRule>
+    <HealthcheckRiskRule>
+      <Points>5</Points>
+      <Category>PrivilegedAccounts</Category>
+      <Model>AccountTakeOver</Model>
+      <RiskId>P-Kerberoasting</RiskId>
+      <Rationale>At least one member of an admin group is vulnerable to the kerberoast attack.</Rationale>
+    </HealthcheckRiskRule>
+    <HealthcheckRiskRule>
+      <Points>15</Points>
+      <Category>FutureCategory</Category>
+      <Model>FutureModel</Model>
+      <RiskId>X-FutureRule</RiskId>
+      <Rationale>A rule introduced by a newer PingCastle version.</Rationale>
+    </HealthcheckRiskRule>
+  </RiskRules>
+  <UserAccountData>
+    <Number>449</Number>
+    <NumberEnabled>377</NumberEnabled>
+    <NumberDisabled>72</NumberDisabled>
+    <NumberActive>266</NumberActive>
+    <NumberInactive>111</NumberInactive>
+    <NumberLocked>0</NumberLocked>
+    <NumberPwdNeverExpires>207</NumberPwdNeverExpires>
+    <NumberPwdNotRequired>23</NumberPwdNotRequired>
+    <NumberDesEnabled>0</NumberDesEnabled>
+    <NumberTrustedToAuthenticateForDelegation>3</NumberTrustedToAuthenticateForDelegation>
+    <NumberNoPreAuth>2</NumberNoPreAuth>
+  </UserAccountData>
+  <ComputerAccountData>
+    <Number>636</Number>
+    <NumberEnabled>598</NumberEnabled>
+    <NumberDisabled>38</NumberDisabled>
+    <NumberActive>276</NumberActive>
+    <NumberInactive>322</NumberInactive>
+    <NumberLocked>0</NumberLocked>
+  </ComputerAccountData>
+  <OperatingSystem>
+    <HealthcheckOSData>
+      <OperatingSystem>Windows 7</OperatingSystem>
+      <NumberOfOccurence>68</NumberOfOccurence>
+      <data><Number>234</Number><NumberEnabled>219</NumberEnabled><NumberDisabled>15</NumberDisabled><NumberActive>68</NumberActive><NumberInactive>151</NumberInactive><NumberLocked>0</NumberLocked></data>
+    </HealthcheckOSData>
+    <HealthcheckOSData>
+      <OperatingSystem>Windows 10</OperatingSystem>
+      <NumberOfOccurence>118</NumberOfOccurence>
+      <data><Number>137</Number><NumberEnabled>136</NumberEnabled><NumberDisabled>1</NumberDisabled><NumberActive>118</NumberActive><NumberInactive>18</NumberInactive><NumberLocked>0</NumberLocked></data>
+    </HealthcheckOSData>
+  </OperatingSystem>
+</HealthcheckData>

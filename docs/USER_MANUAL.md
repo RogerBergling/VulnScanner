@@ -372,6 +372,7 @@ Options:
 | --- | --- | --- |
 | Active checks | on | Send a small number of non-destructive test requests. Disable for a purely passive review. |
 | External tools | off | Run Nuclei if installed and allowed in Settings. |
+| Match software versions against CVEs | on | Fingerprint the web stack (Server header, X-Powered-By, generator meta) and match it against the NVD CVE database with EPSS enrichment. Requires external APIs. |
 | Use testssl.sh | off | Run deep TLS checks when testssl.sh is installed and enabled in Settings. |
 | Ignore TLS certificate errors | off | Disable certificate verification for self-signed/lab targets. The scan event log records that verification was disabled. |
 | Allow HTTPS → HTTP fallback | off | Retry a failed HTTPS request over plain HTTP. The scan event log records the downgrade. |
@@ -392,6 +393,56 @@ Targets:
   are removed. The combined list is bounded by the same host limit.
 - IPv6 literals are accepted where the network stack supports them.
 
+#### Target file formats
+
+**Import .txt / .csv** accepts one or more files (each up to 5 MB) and merges
+them with any targets already typed in the field. In every format:
+
+- One target per line. A target may be a hostname, an IP address or a CIDR
+  range such as `192.0.2.0/28`.
+- Everything after a `#` on a line is ignored, so comments are allowed.
+- Blank lines and duplicate targets are skipped (case-insensitive).
+- A line whose first cell is one of the common header words `ip`, `ip address`,
+  `ip_address`, `host`, `hosts`, `hostname`, `target`, `targets`, `address` or
+  `addresses` is skipped, so files exported from other tools can be imported
+  unchanged.
+
+**Plain text file (`targets.txt`) — one target per line:**
+
+```text
+# Customer web tier
+web01.bergling.net
+web02.bergling.net
+192.0.2.10
+192.0.2.0/29
+
+# Internal database segment
+10.0.4.5
+10.0.4.6
+```
+
+**CSV file (`targets.csv`) — the first column is the target:**
+
+```csv
+host
+web01.bergling.net
+db01.bergling.net
+192.0.2.0/28
+10.10.0.5
+```
+
+Extra columns are ignored, so a spreadsheet export with more data works:
+
+```csv
+ip,hostname,owner,comment
+192.0.2.10,web01,IT,public web server
+192.0.2.11,mail01,IT,mail relay
+```
+
+Comma, semicolon or tab may be used as the separator. The same list, when
+pasted directly into the target field, may be separated by commas, semicolons
+or newlines.
+
 The built-in engine performs TCP connect checks against a configured port list
 and reads service banners. It flags risky exposed services such as Redis,
 MongoDB, Elasticsearch, SMB, RDP, Telnet, VNC, unauthenticated Docker API and
@@ -411,6 +462,7 @@ Options:
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
 | Web vulnerability checks | on | Detect HTTP/HTTPS, then crawl, check headers/exposed files, run injection probes and optional Nuclei. |
+| Match service versions against CVEs | on | Fingerprint detected services (banners, Server headers, Nmap results) and match them against the NVD CVE database with EPSS enrichment. Requires external APIs. |
 | Max pages to crawl per web service | 10 | Same-origin HTML pages followed per discovered web service (0-50). |
 | Scan hosts even if they do not answer ping | on | Include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only). If ping is unavailable, all hosts are still scanned. |
 | Ignore TLS certificate errors | off | Disable certificate verification for discovered HTTPS services. Recorded in the scan event log. |
@@ -610,11 +662,17 @@ before adding it as an asset or scanning it.
 
 ### 5.7 Active Directory scan/import
 
-Two supported paths:
+Three supported paths:
 
 1. Run `ad_audit.ps1` on a domain-joined Windows management host with RSAT, then
    import the JSON on the **Active Directory** page.
-2. Run an **ad** module scan from a Windows agent, or import a report through
+2. Import a native **PingCastle** `HealthcheckData` XML report (`.xml` file or
+   pasted XML) on the same page. All PingCastle risk rules are mapped to
+   findings with the rule's own rationale as evidence; per-domain-controller
+   issues (spooler, SMB signing, SMBv1, LDAPS) and structural problems
+   (anonymous Pre-Windows 2000 access, NTFRS SYSVOL, legacy functional level)
+   are reported as well.
+3. Run an **ad** module scan from a Windows agent, or import a report through
    the API.
 
 The report is read-only. Checks include:

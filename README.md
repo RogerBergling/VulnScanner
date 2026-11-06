@@ -345,6 +345,7 @@ deployment-level values that remain outside the GUI.
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Editable in Settings → Advanced runtime → Storage location. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Process-level master switch for OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. Editable in Settings → Advanced runtime; restart required. |
+| `VS_NVD_API_KEY` | empty | Optional NVD API key for CVE matching (raises the rate limit from 5 to 50 requests per 30 seconds). Not stored in the GUI; keep it in `.env`. |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
 | `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings → Advanced runtime; files outside the data directory are read-only in the editor. |
 | `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list**. Editable in Settings → Advanced runtime. |
@@ -513,6 +514,7 @@ environment.
 - [Agent guide](docs/AGENT_GUIDE.md)
 - [API reference](docs/API.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Roadmap](docs/ROADMAP.md)
 - [Dependency and supply-chain policy](docs/DEPENDENCIES.md)
 - [Upgrading safely](docs/UPGRADING.md)
 - [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md)

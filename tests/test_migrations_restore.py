@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from app.database import SCHEMA, get_db, init_db
+from app.migrations import LATEST_VERSION
 
 
 def test_fresh_database_has_migration_ledger(data_dir):
@@ -12,8 +13,8 @@ def test_fresh_database_has_migration_ledger(data_dir):
         versions = [
             row[0] for row in conn.execute("SELECT version FROM schema_migrations")
         ]
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
-    assert versions == [1, 2, 3, 4, 5]
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION
+    assert versions == list(range(1, LATEST_VERSION + 1))
 
 
 def test_existing_v3_database_is_adopted(tmp_path, monkeypatch):
@@ -28,7 +29,7 @@ def test_existing_v3_database_is_adopted(tmp_path, monkeypatch):
     monkeypatch.setenv("VS_DATABASE", str(database))
     init_db()
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert check.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION
         tables = {
             row[0]
             for row in check.execute(

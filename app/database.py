@@ -217,6 +217,22 @@ CREATE TABLE IF NOT EXISTS kev_catalog (
     synced_at TEXT NOT NULL
 );
 
+-- NVD product-level CVE responses and EPSS scores for banner/CPE matching.
+-- Kept in SQLite so rescans and offline periods can reuse downloaded data.
+CREATE TABLE IF NOT EXISTS nvd_cache (
+    cache_key TEXT PRIMARY KEY,
+    response TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS epss_cache (
+    cve_id TEXT PRIMARY KEY,
+    score REAL NOT NULL DEFAULT 0,
+    percentile REAL NOT NULL DEFAULT 0,
+    fetched_at TEXT NOT NULL
+);
+
 -- Scheduled scans define recurring targets that run on a schedule and may send
 -- notifications when completed.
 CREATE TABLE IF NOT EXISTS scan_schedules (

@@ -30,6 +30,7 @@ from ..utils import (
 )
 from .authenticated import authenticated_scan
 from .base import Finding, ScanCancelled, ScanContext, ScanResult
+from .cpe import add_cve_findings, fingerprint_text, lookup_cves, lookup_epss
 from .testssl import run_testssl
 from .tools import run_tool, tool_path
 from .web import (
@@ -364,7 +365,14 @@ def _http_service(
         )
     )
     result.metadata.setdefault("web_services", []).append(
-        {"host": host, "port": port, "url": f"{used_scheme}://{host}:{port}/", "title": title}
+        {
+            "host": host,
+            "port": port,
+            "url": f"{used_scheme}://{host}:{port}/",
+            "title": title,
+            "server": truncate(response.headers.get("server", ""), 200),
+            "powered_by": truncate(response.headers.get("x-powered-by", ""), 200),
+        }
     )
     if used_scheme == "https" or port in TLS_PORTS:
         _tls_findings(result, host, port, ctx)
@@ -574,15 +582,15 @@ def _run_nmap(
     host: str,
     open_ports: list[int],
     ctx: ScanContext,
-) -> None:
+) -> list[dict[str, Any]]:
     if not ctx.option_bool("external_tools", False) or not open_ports:
-        return
+        return []
     if get_setting("nmap_enabled", "true") != "true":
-        return
+        return []
     path = tool_path("nmap")
     if not path:
         ctx.log("Nmap is not installed; using built-in TCP service detection", "warning")
-        return
+        return []
     port_arg = ",".join(str(port) for port in open_ports[:500])
     command = [path, "-sV", "--version-light", "-T4", "-p", port_arg, "-oX", "-"]
     if ctx.option_bool("scan_unresponsive_hosts", True):
@@ -595,14 +603,97 @@ def _run_nmap(
         proc = run_tool(command, timeout=600)
     except Exception as exc:
         ctx.log(f"Nmap failed: {exc}", "warning")
-        return
+        return []
     if proc.returncode != 0 and not proc.stdout:
         ctx.log(f"Nmap exited with code {proc.returncode}: {truncate(proc.stderr, 300)}", "warning")
-        return
+        return []
     parsed = parse_nmap_xml(proc.stdout or "")
     for item in parsed:
         result.add(item)
     ctx.log(f"Nmap returned {len(parsed)} service/CVE record(s)")
+    return parsed
+
+
+def _run_cve_matching(
+    result: ScanResult,
+    ctx: ScanContext,
+    all_open: list[PortResult],
+    web_headers: dict[tuple[str, int], dict[str, str]],
+    nmap_hints: list[tuple[str, str]],
+) -> int:
+    """Fingerprint detected services and match their versions against NVD CVEs."""
+    max_lookups = _bounded_int(
+        ctx.option("max_cve_lookups", get_limit("max_cve_lookups", 25)), 25, 0, 200
+    )
+    if max_lookups == 0:
+        return 0
+    max_per_service = _bounded_int(
+        ctx.option("max_cves_per_service", get_limit("max_cves_per_service", 50)), 50, 1, 500
+    )
+    max_per_scan = _bounded_int(
+        ctx.option("max_cves_per_scan", get_limit("max_cves_per_scan", 500)), 500, 1, 5_000
+    )
+
+    candidates: list[tuple[Any, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in all_open:
+        location = f"{item.host}:{item.port}"
+        texts: list[tuple[str, str]] = []
+        if item.banner:
+            texts.append((item.banner, "banner"))
+        headers = web_headers.get((item.host, item.port)) or {}
+        if headers.get("server"):
+            texts.append((headers["server"], "http-server-header"))
+        if headers.get("powered_by"):
+            texts.append((headers["powered_by"], "http-x-powered-by"))
+        for text, source in texts:
+            for match in fingerprint_text(text, source):
+                key = (location, match.cpe)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append((match, location, "network"))
+    for location, text in nmap_hints:
+        for match in fingerprint_text(text, "nmap"):
+            key = (location, match.cpe)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((match, location, "network"))
+
+    if not candidates:
+        ctx.log("CVE matching: no service versions could be fingerprinted", "info")
+        return 0
+
+    total_added = 0
+    for match, location, category in candidates[:max_lookups]:
+        ctx.check_cancel()
+        cves = lookup_cves(match, ctx.log)
+        if not cves:
+            continue
+        ctx.log(
+            f"CVE matching: {match.product} {match.version} on {location} "
+            f"matches {len(cves)} known CVE(s)"
+        )
+        cve_ids = [record["id"] for record in cves if record.get("id")]
+        epss = lookup_epss(cve_ids, ctx.log)
+        total_added += add_cve_findings(
+            result,
+            match,
+            location,
+            cves,
+            category,
+            epss=epss,
+            max_findings=min(max_per_service, max_per_scan - total_added),
+        )
+        if total_added >= max_per_scan:
+            ctx.log(
+                f"CVE matching stopped at the per-scan cap of {max_per_scan} finding(s)",
+                "warning",
+            )
+            break
+    ctx.log(f"CVE matching produced {total_added} finding(s)")
+    return total_added
 
 
 def scan(ctx: ScanContext) -> ScanResult:
@@ -724,10 +815,36 @@ def scan(ctx: ScanContext) -> ScanResult:
                 )
 
     # Nmap is optional and only used to enrich hosts with open services.
+    nmap_hints: list[tuple[str, str]] = []
     if ctx.option_bool("external_tools", False):
         for host, items in open_by_host.items():
             if items and not ctx.cancelled():
-                _run_nmap(result, host, sorted({p.port for p in items}), ctx)
+                parsed = _run_nmap(result, host, sorted({p.port for p in items}), ctx)
+                for item in parsed:
+                    raw = item.get("raw") or {}
+                    product = str(raw.get("product") or "").strip()
+                    version = str(raw.get("version") or "").strip()
+                    if product or version:
+                        nmap_hints.append((item.get("location") or host, f"{product} {version}".strip()))
+
+    # CVE matching: fingerprint detected services and compare versions with
+    # the NVD database. This is what turns a port scan into a vulnerability
+    # scan for unauthenticated network targets.
+    web_headers: dict[tuple[str, int], dict[str, str]] = {}
+    for service_meta in result.metadata.get("web_services", []):
+        key = (str(service_meta.get("host") or ""), int(service_meta.get("port") or 0))
+        web_headers[key] = {
+            "server": str(service_meta.get("server") or ""),
+            "powered_by": str(service_meta.get("powered_by") or ""),
+        }
+    if ctx.option_bool("cve_lookup", True):
+        ctx.progress(86, "Matching service versions against CVE data")
+        try:
+            _run_cve_matching(result, ctx, all_open, web_headers, nmap_hints)
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"CVE matching failed: {exc}", "warning")
 
     # Authenticated inventory/CVE checks use one credential per target OS.
     if ctx.option_bool("authenticated", False):

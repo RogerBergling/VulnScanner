@@ -8,6 +8,7 @@ failing tool never aborts a scan.
 This document covers:
 
 - OSV.dev (built-in HTTP integration)
+- NVD CVE API and EPSS (built-in CVE matching for service banners)
 - CISA Known Exploited Vulnerabilities (KEV)
 - `osv-scanner`
 - Nmap
@@ -31,6 +32,8 @@ hardening requirements.
 | Integration | Type | Activated by | Needed for |
 | --- | --- | --- | --- |
 | OSV.dev | Built-in HTTP API | Dependency scan, external APIs enabled | Known vulnerabilities in package versions |
+| NVD CVE API 2.0 | Built-in HTTP API | Web/network scan, external APIs enabled, **Match software versions against CVEs** (on by default) | Known vulnerabilities in fingerprinted service versions |
+| EPSS (FIRST) | Built-in HTTP API | CVE matching, external APIs enabled | Exploitation likelihood for matched CVEs |
 | CISA KEV | Built-in catalogue sync + local lookup | Manual **Sync** in Settings | Known-exploited and ransomware annotations |
 | `osv-scanner` | Optional CLI | Repository scan with **External tools**, external APIs enabled | Supplemental dependency analysis |
 | Nmap | Optional CLI | Network scan with **External tools**, Nmap enabled in Settings | Service/version detection and optional NSE CVEs |
@@ -419,10 +422,34 @@ them directly. It provides:
 - `agent/ad_audit.ps1`, a read-only PowerShell collector.
 - The Windows agent's `ad` module, which embeds equivalent read-only collection.
 - `POST /api/ad/import` and the **Active Directory -> Import report** page for
-  external JSON reports.
+  external JSON reports **and native PingCastle XML reports**.
 
-PingCastle and Purple Knight outputs can be mapped into the documented report
-shape or supplied as custom findings. The important properties are:
+### 5.1 Native PingCastle XML import
+
+A PingCastle `HealthcheckData` XML export (produced by
+`pingcastle.exe --healthcheck --xml` or the standard health check) can be
+uploaded directly. The GUI accepts `.xml` files, or the XML text can be sent
+as the `xml` field of `POST /api/ad/import`. `app/scanners/pingcastle.py`
+parses the report and turns it into findings:
+
+- All `RiskRules` entries are mapped by their stable `RiskId` (for example
+  `A-Krbtgt`, `P-Delegated`, `S-SMB-v1`) to severities, titles, remediation
+  guidance and CWE references. The rule's own rationale is preserved as
+  evidence. Risk rules from newer PingCastle versions that are not yet
+  modelled still produce a points-based finding.
+- Structural data becomes additional findings: anonymous Pre-Windows 2000
+  access, disabled Recycle Bin, NTFRS SYSVOL replication, legacy functional
+  level, accounts without Kerberos pre-authentication, unconstrained
+  delegation, DES-enabled accounts, and per-domain-controller checks (remote
+  spooler, SMB signing requirement, SMBv1, LDAPS TLS versions).
+- Scan metadata records the domain, forest, PingCastle engine version,
+  generation date, maturity level, PingCastle scores, domain controllers,
+  sites and the OS distribution.
+
+### 5.2 JSON reports
+
+PingCastle and Purple Knight outputs can also be mapped into the documented
+report shape or supplied as custom findings. The important properties are:
 
 - Collection must be read-only. Do not use write-capable cmdlets or remediation
   actions in a collector that feeds VulnScanner.
@@ -434,9 +461,39 @@ shape or supplied as custom findings. The important properties are:
 - Keep account names and evidence within the agreed data-handling scope.
 - Respect the collector's licence and the target owner's authorisation.
 
-The report is evaluated locally by `app/scanners/ad.py`. No AD write or LDAP
-connection is made by the server. See [AGENT_GUIDE.md](AGENT_GUIDE.md) for the
-minimal JSON shape and collector parameters.
+The report is evaluated locally by `app/scanners/ad.py` (JSON) or
+`app/scanners/pingcastle.py` (XML). No AD write or LDAP connection is made by
+the server. See [AGENT_GUIDE.md](AGENT_GUIDE.md) for the minimal JSON shape
+and collector parameters.
+
+## 5.3 NVD CVE matching and EPSS (built-in)
+
+Web and network scans fingerprint detected software versions from banners,
+HTTP headers, HTML generator meta tags and Nmap results, then compare them
+with the NVD CVE database. This turns an unauthenticated port scan into a
+vulnerability report:
+
+- `app/scanners/cpe.py` matches banners (`SSH-2.0-OpenSSH_8.2p1`,
+  `Apache/2.4.41`, `nginx/1.18.0`, `MariaDB`, `WordPress`, …) to CPEs and
+  queries the NVD API 2.0 with the exact version. NVD evaluates CPE version
+  ranges server-side, so range-based advisories are included.
+- Responses are cached in SQLite for 24 hours, keyed by product and version,
+  so rescans reuse downloaded data.
+- NVD is rate limited (5 requests/30 seconds without a key, 50 with
+  `VS_NVD_API_KEY`); the client throttles itself and retries 429/5xx with
+  backoff.
+- Matched CVEs become findings with CVSS scores, CWE references, the NVD
+  reference URL and EPSS exploitation likelihood (score and percentile) from
+  api.first.org. Findings already carrying a CVE are enriched with CISA KEV
+  data at persistence time.
+- Caps are tunable in **Settings → Scan guardrails**: `max_cve_lookups`
+  (services compared, default 25, 0 disables matching), `max_cves_per_service`
+  (default 50) and `max_cves_per_scan` (default 500). The per-scan
+  **Match software versions against CVEs** option (on by default) disables
+  the stage for a single scan.
+
+If the NVD or EPSS API is unavailable, the scan logs the failure and keeps
+the remaining findings; cached NVD responses are reused where possible.
 
 ## 6. Failure and fallback behaviour
 
@@ -451,6 +508,7 @@ minimal JSON shape and collector parameters.
 | `osv-scanner` unsupported flags | Legacy command is attempted; failure is logged. |
 | GitHub clone fails | Scan fails with a redacted error and the temporary directory is removed. |
 | Nmap/Nuclei times out | Logged; the built-in result remains. |
+| NVD CVE matching unavailable | Logged; a 24-hour SQLite cache is reused when present; other findings remain. |
 | testssl.sh missing or fails | Logged; built-in TLS observations remain. |
 | Trivy database unavailable offline | Logged; built-in dependency/IaC/secret checks remain. |
 | Subfinder unavailable or external APIs off | Logged; wordlist DNS discovery still runs. |
@@ -465,7 +523,8 @@ Settings shows whether the binary is visible and which version it reports.
 
 | Variable | Integration | Notes |
 | --- | --- | --- |
-| `VS_ENABLE_EXTERNAL_APIS` | OSV, KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy DB, SecLists download | Process-level switch; disabled in air-gapped deployments. |
+| `VS_ENABLE_EXTERNAL_APIS` | OSV, KEV, NVD, EPSS, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy DB, SecLists download | Process-level switch; disabled in air-gapped deployments. |
+| `VS_NVD_API_KEY` | NVD CVE matching | Optional API key; raises the rate limit from 5 to 50 requests per 30 seconds. |
 | `VS_NMAP_PATH` | Nmap | Absolute path or empty to use `PATH`. |
 | `VS_NUCLEI_PATH` | Nuclei | Absolute path or empty to use `PATH`. |
 | `VS_TESTSSL_PATH` | testssl.sh | Absolute path or empty to use `PATH` (`testssl.sh` or `testssl`). |

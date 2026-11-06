@@ -1069,6 +1069,7 @@
       return '<div class="form-section"><h3>Web scan options</h3><div class="checkbox-row">' +
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-external"><span><strong>Use Nuclei</strong> — run the optional Nuclei templates if installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match software versions against CVEs</strong> — fingerprint the web stack (Server header, X-Powered-By, generator meta) and compare it with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab targets only. This disables certificate verification and is recorded in the scan event log.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry over plain HTTP if HTTPS fails. Use only for authorised lab targets; recorded in the scan event log.</span></label>' +
@@ -1094,6 +1095,7 @@
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — detect HTTP/HTTPS on discovered ports, then crawl, check headers, exposed files, injection and Nuclei.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match service versions against CVEs</strong> — fingerprint detected services (banners, Server headers, Nmap results) and compare them with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-scan-unresponsive" checked><span><strong>Scan hosts even if they do not answer ping</strong> — include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab services only; recorded in the scan event log.</span></label>' +
@@ -1225,6 +1227,7 @@
               if (type === 'web') {
                 payload.options.active = !!($('#opt-active', ctx.overlay) || {}).checked;
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
+                payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
@@ -1235,6 +1238,7 @@
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
                 payload.options.web_checks = !!($('#opt-web-checks', ctx.overlay) || {}).checked;
+                payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
                 payload.options.scan_unresponsive_hosts = !!($('#opt-scan-unresponsive', ctx.overlay) || {}).checked;
                 const networkPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = networkPagesValue === undefined || networkPagesValue === '' ? 10 : Number(networkPagesValue);
@@ -1897,9 +1901,9 @@
         '</select></label>' +
         '<label class="field"><span>Group</span><select class="select" id="ad-group"><option value="">Default group</option></select></label>' +
         '<label class="field"><span>Asset <span class="muted">(optional)</span></span><select class="select" id="ad-asset"><option value="">No specific asset</option></select></label>' +
-        '<label class="field"><span>Report file</span><input class="input" id="ad-file" type="file" accept="application/json,.json"></label>' +
-        '<label class="field full"><span>Report JSON</span><textarea class="textarea mono" id="ad-json" rows="12" placeholder="{ &quot;domain&quot;: { &quot;name&quot;: &quot;corp.example&quot; }, ... }"></textarea>' +
-          '<span class="hint">Paste the JSON produced by the VulnScanner AD collector, PingCastle, Purple Knight or a compatible report. Collection is read-only.</span></label>' +
+        '<label class="field"><span>Report file</span><input class="input" id="ad-file" type="file" accept="application/json,.json,application/xml,.xml,text/xml"></label>' +
+        '<label class="field full"><span>Report content</span><textarea class="textarea mono" id="ad-json" rows="12" placeholder="{ &quot;domain&quot;: { &quot;name&quot;: &quot;corp.example&quot; }, ... }"></textarea>' +
+          '<span class="hint">Paste the JSON produced by the VulnScanner AD collector, Purple Knight or a compatible report, or choose a PingCastle HealthcheckData XML file. Collection is read-only.</span></label>' +
         '</div><div class="form-error"></div></form>' +
         '<div class="info-banner" style="margin:14px 0 0"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5" stroke-linecap="round"/></svg>' +
         '<div><strong>Authorized use:</strong> only audit directories you own or are contracted to assess. The supplied collector never changes AD objects.</div></div>',
@@ -1910,14 +1914,19 @@
             clearFormError(ctx.overlay);
             try {
               const text = $('#ad-json', ctx.overlay).value.trim();
-              if (!text) throw new Error('Paste a JSON report or choose a file');
-              let report;
-              try { report = JSON.parse(text); } catch (parseError) { throw new Error('The report is not valid JSON: ' + parseError.message); }
-              if (!report || typeof report !== 'object' || Array.isArray(report)) throw new Error('The report must be a JSON object');
+              if (!text) throw new Error('Paste a report or choose a file');
               const payload = {
-                customer_id: Number($('#ad-customer', ctx.overlay).value),
-                report: report
+                customer_id: Number($('#ad-customer', ctx.overlay).value)
               };
+              const trimmed = text.replace(/^\uFEFF/, '').trim();
+              if (trimmed.charAt(0) === '<') {
+                payload.xml = text;
+              } else {
+                let report;
+                try { report = JSON.parse(text); } catch (parseError) { throw new Error('The report is not valid JSON: ' + parseError.message); }
+                if (!report || typeof report !== 'object' || Array.isArray(report)) throw new Error('The report must be a JSON object');
+                payload.report = report;
+              }
               const group = $('#ad-group', ctx.overlay).value;
               const asset = $('#ad-asset', ctx.overlay).value;
               if (group) payload.group_id = Number(group);
@@ -2580,7 +2589,7 @@
         '<button class="btn btn-primary" data-action="import-ad">Import report</button></div></div>' +
       '<div class="info-banner"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 4.8-3.2 8.8-8 10-4.8-1.2-8-5.2-8-10V7l8-4z"/></svg>' +
         '<div><strong>Authorization required.</strong> Use a domain account with read-only directory access. The collector reads LDAP/AD configuration and never changes objects. ' +
-        'Reports can be imported from the PowerShell collector, a Windows agent, PingCastle, Purple Knight or any compatible JSON document.</div></div>' +
+        'Reports can be imported from the PowerShell collector, a Windows agent, a native PingCastle XML report, Purple Knight or any compatible JSON document. Collection is read-only.</div></div>' +
       '<div class="dash-grid-2" style="margin-bottom:16px">' +
         '<section class="panel"><div class="panel-head"><h2>What is assessed</h2></div><div class="panel-body">' +
           '<div class="setting-copy" style="margin-bottom:12px"><strong>Kerberos and delegation</strong><span>Unconstrained delegation, Kerberoastable and AS-REP-roastable accounts, krbtgt age.</span></div>' +
@@ -3092,6 +3101,10 @@
         '<label class="field"><span>Max hosts per network scan</span><input class="input" id="guard-max-cidr" type="number" min="1" max="65536" value="' + num(settings.max_cidr_hosts) + '">' +
           '<span class="hint">Applies to a single CIDR and to the combined host count of an imported target list.</span></label>' +
         '<label class="field"><span>Agent job timeout (seconds)</span><input class="input" id="guard-agent-timeout" type="number" min="60" max="86400" value="' + num(settings.agent_job_timeout) + '"></label>' +
+        '<label class="field"><span>Max CVE lookups per scan</span><input class="input" id="guard-cve-lookups" type="number" min="0" max="200" value="' + num(settings.max_cve_lookups) + '">' +
+          '<span class="hint">How many detected services are compared with the NVD CVE database. 0 disables CVE matching entirely.</span></label>' +
+        '<label class="field"><span>Max CVEs per service</span><input class="input" id="guard-cves-service" type="number" min="1" max="500" value="' + num(settings.max_cves_per_service) + '"></label>' +
+        '<label class="field"><span>Max CVE findings per scan</span><input class="input" id="guard-cves-scan" type="number" min="1" max="5000" value="' + num(settings.max_cves_per_scan) + '"></label>' +
       '</div>' +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-guardrails">Save guardrails</button>' +
       '<span class="muted small">Changes apply to subsequent scans without a restart.</span></div>' +
@@ -3369,7 +3382,10 @@
             max_source_file_bytes: Math.round(sourceKib * 1024),
             max_scan_files: Number($('#guard-max-files').value),
             max_cidr_hosts: Number($('#guard-max-cidr').value),
-            agent_job_timeout: Number($('#guard-agent-timeout').value)
+            agent_job_timeout: Number($('#guard-agent-timeout').value),
+            max_cve_lookups: Number($('#guard-cve-lookups').value),
+            max_cves_per_service: Number($('#guard-cves-service').value),
+            max_cves_per_scan: Number($('#guard-cves-scan').value)
           });
           toast('Scan guardrails saved');
           router();

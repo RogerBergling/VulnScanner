@@ -24,7 +24,8 @@ from requests.packages import urllib3
 from ..config import ENABLE_EXTERNAL_APIS
 from ..database import get_setting
 from ..utils import normalize_target_url, redact_url, truncate
-from .base import Finding, ScanContext, ScanResult
+from .base import Finding, ScanCancelled, ScanContext, ScanResult
+from .cpe import add_cve_findings, fingerprint_text, lookup_cves, lookup_epss
 from .testssl import run_testssl
 from .tools import run_tool, tool_path
 
@@ -895,6 +896,78 @@ def _run_nuclei(result: ScanResult, url: str, ctx: ScanContext) -> None:
     ctx.log(f"Nuclei reported {count} finding(s)")
 
 
+GENERATOR_META_RE = re.compile(
+    r"""<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)["']""", re.I | re.S
+)
+
+
+def _run_cve_matching(result: ScanResult, ctx: ScanContext, url: str,
+                      response: requests.Response, body: str) -> int:
+    """Fingerprint the web stack and match versions against NVD CVEs."""
+    texts: list[tuple[str, str]] = []
+    server = response.headers.get("server", "")
+    powered = response.headers.get("x-powered-by", "")
+    if server:
+        texts.append((server, "http-server-header"))
+    if powered:
+        texts.append((powered, "http-x-powered-by"))
+    for match in GENERATOR_META_RE.finditer(body[:200_000]):
+        texts.append((match.group(1), "html-generator-meta"))
+    if not texts:
+        return 0
+    max_lookups = 5
+    try:
+        max_lookups = int(ctx.option("max_cve_lookups", 5))
+    except (TypeError, ValueError):
+        pass
+    max_lookups = max(0, min(200, max_lookups))
+    if max_lookups == 0:
+        return 0
+    try:
+        max_per_service = int(ctx.option("max_cves_per_service", 50))
+    except (TypeError, ValueError):
+        max_per_service = 50
+    max_per_service = max(1, min(500, max_per_service))
+    try:
+        max_per_scan = int(ctx.option("max_cves_per_scan", 500))
+    except (TypeError, ValueError):
+        max_per_scan = 500
+    max_per_scan = max(1, min(5_000, max_per_scan))
+    candidates: list[Any] = []
+    seen: set[str] = set()
+    for text, source in texts:
+        for match in fingerprint_text(text, source):
+            if match.cpe in seen:
+                continue
+            seen.add(match.cpe)
+            candidates.append(match)
+    total_added = 0
+    for match in candidates[:max_lookups]:
+        ctx.check_cancel()
+        cves = lookup_cves(match, ctx.log)
+        if not cves:
+            continue
+        ctx.log(
+            f"CVE matching: {match.product} {match.version} matches {len(cves)} known CVE(s)"
+        )
+        cve_ids = [record["id"] for record in cves if record.get("id")]
+        epss = lookup_epss(cve_ids, ctx.log)
+        total_added += add_cve_findings(
+            result,
+            match,
+            url,
+            cves,
+            "web",
+            epss=epss,
+            max_findings=min(max_per_service, max_per_scan - total_added),
+        )
+        if total_added >= max_per_scan:
+            break
+    if total_added:
+        ctx.log(f"CVE matching produced {total_added} finding(s)")
+    return total_added
+
+
 def scan(ctx: ScanContext) -> ScanResult:
     result = ScanResult()
     ignore_tls = ctx.option_bool("ignore_tls_errors", False)
@@ -950,6 +1023,14 @@ def scan(ctx: ScanContext) -> ScanResult:
 
         ctx.progress(82, "Running Nuclei (optional)")
         _run_nuclei(result, url, ctx)
+        if ctx.option_bool("cve_lookup", True):
+            ctx.progress(88, "Matching web stack versions against CVE data")
+            try:
+                _run_cve_matching(result, ctx, url, response, body)
+            except ScanCancelled:
+                raise
+            except Exception as exc:
+                ctx.log(f"CVE matching failed: {exc}", "warning")
         ctx.progress(95, "Finalizing web results")
         return result
     finally:
