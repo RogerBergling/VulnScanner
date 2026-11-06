@@ -487,6 +487,7 @@ Options:
 | Web vulnerability checks | on | Detect HTTP/HTTPS, then crawl, check headers/exposed files, run injection probes and optional Nuclei. |
 | Nuclei signature engine | on | Run CVE/misconfiguration/exposure templates against discovered web services when nuclei is installed. Tag filter tunable per scan or via Settings. |
 | sqlmap (dangerous) | off | Send real SQL injection payloads to parameters of discovered web services. Requires the Settings dangerous-tools switch AND this option. |
+| OpenVAS engine (external) | off | Run a Greenbone/OpenVAS task per host when the GVM stack is configured in Settings (also needs External tools). Slow; server scans only. |
 | Service security probes | on | Read-only active probes: SMB signing and SMBv1, default SNMP communities over UDP 161, unauthenticated Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana, RDP NLA support and VNC authentication (server scans only). |
 | Match service versions against CVEs | on | Fingerprint detected services (banners, Server headers, Nmap results) and match them against the NVD CVE database with EPSS enrichment. Requires external APIs. |
 | Max pages to crawl per web service | 10 | Same-origin HTML pages followed per discovered web service (0-50). |

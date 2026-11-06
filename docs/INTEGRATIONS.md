@@ -44,6 +44,7 @@ hardening requirements.
 | SecLists wordlist | Local file (optional download) | Domain scan with **Wordlist DNS discovery** | Local DNS brute-force names |
 | Gitleaks | Optional CLI | Repository scan with **External tools** | Supplemental secret detection |
 | sqlmap | Optional CLI (dangerous) | **Settings → Dangerous tools** AND per-scan **sqlmap (dangerous)** | Deep SQL injection testing of discovered parameters |
+| OpenVAS (gvm-cli) | Optional CLI + GVM stack | **Settings → OpenVAS** AND per-scan **OpenVAS engine** | Feed-based vulnerability results from Greenbone |
 | Semgrep | Optional CLI | Repository scan with **External tools**, external APIs enabled | Additional SAST rules |
 | Git | Required for GitHub scans | GitHub scan | Repository cloning |
 | PingCastle / Purple Knight / `ad_audit.ps1` | External collector + JSON import | AD import or Windows agent `ad` module | Read-only Active Directory assessment |
@@ -293,6 +294,30 @@ Both must be enabled before any payload is sent.
 sqlmap probes can modify data in injectable applications. Use it only with
 explicit authorisation, ideally against a staging copy, and agree the scope,
 timing and parameter list with the target owner first.
+
+### 4.3c OpenVAS / Greenbone (optional engine)
+
+The Greenbone Vulnerability Management stack can run as an optional external
+engine through `gvm-cli`, adding feed-based results to network scans.
+
+- **Off by default and double-gated**: **Settings → OpenVAS / Greenbone**
+  (`openvas_enabled`, default off) must be on, and the per-scan **OpenVAS
+  engine** option must be enabled (also needs **External tools**).
+- Requires a working GVM stack: PostgreSQL, gvmd, ospd-openvas and the
+  community feed. Set the gvm-cli socket path, GVM username and password in
+  Settings; the password is encrypted at rest and never returned by the API.
+- Per host with open ports, the integration creates a target, creates a task
+  (Full and fast config), starts it, polls until done, fetches the report and
+  converts `<result>` entries into findings with the GMP severity mapping.
+- Bounded by `max_openvas_hosts` (default 5, maximum 50) and 200 results per
+  report. Scan cancellation is honoured between GMP calls.
+- All GVM components are GPL and run as separate processes; nothing is
+  linked or bundled.
+- `VS_GVM_CLI_PATH` pins the binary; `gvm-cli` or `omp` is searched on
+  `PATH` otherwise.
+
+GMP task polling can take many minutes per host. Reserve the OpenVAS engine
+for targeted, authorised assessments.
 
 ### 4.4 Gitleaks
 
@@ -588,6 +613,7 @@ Settings shows whether the binary is visible and which version it reports.
 | `VS_GITLEAKS_PATH` | Gitleaks | Absolute path or empty to use `PATH`. |
 | `VS_SEMGREP_PATH` | Semgrep | Absolute path or empty to use `PATH`. |
 | `VS_SQLMAP_PATH` | sqlmap | Absolute path or empty to use `PATH` (pre-installed on Kali). |
+| `VS_GVM_CLI_PATH` | OpenVAS/GVM | Absolute path or empty to use `PATH` (`gvm-cli` or `omp`). |
 | `VS_GIT_PATH` | Git/GitHub | Absolute path or empty to use `PATH`. |
 | `VS_MAX_REPO_BYTES` | Git/GitHub and repository scans | Clone size limit. |
 | `VS_MAX_SOURCE_FILE_BYTES` | Semgrep/built-in source review | File read limit. |

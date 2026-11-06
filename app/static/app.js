@@ -1126,6 +1126,7 @@
         '<label class="check"><input type="checkbox" id="opt-service-probes" checked><span><strong>Service security probes</strong> — test SMB signing, SNMP default communities, unauthenticated Redis/MongoDB/Elasticsearch/Docker, RDP NLA and VNC authentication. Read-only probes.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-scan-unresponsive" checked><span><strong>Scan hosts even if they do not answer ping</strong> — include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-openvas"><span><strong>OpenVAS engine (external)</strong> — run a Greenbone/OpenVAS task per host when the GVM stack is configured in Settings. Slow; server scans only.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab services only; recorded in the scan event log.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry plain HTTP when HTTPS fails; recorded in the scan event log.</span></label></div>' +
         '<div class="form-section" id="network-auth-fields" style="margin-top:16px;border-top:1px solid var(--border);padding-top:14px">' +
@@ -1292,6 +1293,7 @@
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
+                payload.options.openvas = !!($('#opt-openvas', ctx.overlay) || {}).checked;
                 const ports = ($('#opt-ports', ctx.overlay) || {}).value || '';
                 if (ports.trim()) payload.options.ports = ports.trim();
                 const wildcardHosts = (($('#opt-max-wildcard', ctx.overlay) || {}).value || '').trim();
@@ -3527,6 +3529,15 @@
           switchRow('set-dangerous', 'Allow sqlmap (SQL injection payloads)',
             'sqlmap sends real SQL injection attack payloads against discovered parameters. Only enable for authorised penetration tests. Default off.', settings.dangerous_tools_enabled) +
           '<p class="modal-note" style="margin-top:8px">sqlmap is GPL-2.0 and runs as a separate process; install it from sqlmap.org (pre-installed on Kali) and set VS_SQLMAP_PATH if needed.</p></div>' +
+          '<div class="form-section"><h3>OpenVAS / Greenbone (optional engine)</h3>' +
+          '<p class="muted small" style="margin-top:0">Optional feed-based scan engine through gvm-cli. Requires a running GVM stack (PostgreSQL, gvmd, ospd-openvas and the community feed). GPL; invoked as a separate process.</p>' +
+          switchRow('set-openvas', 'Enable OpenVAS integration',
+            'Run a Greenbone task per host when a network scan enables the OpenVAS engine option.', settings.openvas_enabled) +
+          '<div class="form-grid" style="margin-top:10px">' +
+          '<label class="field"><span>gvm-cli socket path</span><input class="input mono" id="set-gvm-socket" value="' + esc(settings.gvm_socket_path || '') + '" placeholder="/run/gvmd/gvmd.sock" autocomplete="off"></label>' +
+          '<label class="field"><span>GVM username</span><input class="input" id="set-gvm-user" value="' + esc(settings.gvm_username || '') + '" placeholder="admin" autocomplete="off"></label>' +
+          '<label class="field"><span>GVM password</span><input class="input" id="set-gvm-password" type="password" placeholder="' + (settings.gvm_password_set ? 'Stored; leave blank to keep current' : '') + '" autocomplete="new-password"></label>' +
+          '</div></div>' +
           '<div class="form-section"><h3>Nuclei signature engine</h3>' +
           '<p class="muted small" style="margin-top:0">Nuclei is the default vulnerability-signature engine (CVE, misconfiguration and exposure templates). Template updates run daily at 03:30 UTC and require external APIs.</p>' +
           '<div class="kv"><span>Last template update</span><span>' +
@@ -3658,8 +3669,15 @@
             trivy_enabled: $('#set-trivy').checked,
             subfinder_enabled: $('#set-subfinder').checked,
             nuclei_default_tags: $('#set-nuclei-tags').value.trim(),
-            dangerous_tools_enabled: $('#set-dangerous').checked
+            dangerous_tools_enabled: $('#set-dangerous').checked,
+            openvas_enabled: $('#set-openvas').checked,
+            gvm_socket_path: $('#set-gvm-socket').value.trim(),
+            gvm_username: $('#set-gvm-user').value.trim()
           });
+          const gvmPassword = $('#set-gvm-password').value;
+          if (gvmPassword) {
+            await patch('/settings', { gvm_password: gvmPassword });
+          }
           toast('Settings saved');
           router();
         } catch (error) { toast(errorText(error), 'error'); }

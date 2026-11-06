@@ -364,6 +364,7 @@ deployment-level values that remain outside the GUI.
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Process-level master switch for OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. Editable in Settings → Advanced runtime; restart required. |
 | `VS_NVD_API_KEY` | empty | Optional NVD API key for CVE matching (raises the rate limit from 5 to 50 requests per 30 seconds). Not stored in the GUI; keep it in `.env`. |
 | `VS_SQLMAP_PATH` | empty | Path for the optional sqlmap binary (dangerous tool; double-gated via Settings + per-scan option). |
+| `VS_GVM_CLI_PATH` | empty | Path for the optional gvm-cli binary used by the OpenVAS engine (off by default in Settings). |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
 | `VS_SUBFINDER_WORDLIST` | `$VS_DATA_DIR/wordlists/subdomains.txt` | Subdomain wordlist used for local DNS discovery. Editable in Settings → Advanced runtime; files outside the data directory are read-only in the editor. |
 | `VS_SECLISTS_SUBDOMAIN_URL` | SecLists `subdomains-top1million-5000.txt` | Source used by **Load SecLists list**. Editable in Settings → Advanced runtime. |

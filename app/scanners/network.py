@@ -926,6 +926,27 @@ def scan(ctx: ScanContext) -> ScanResult:
         except Exception as exc:
             ctx.log(f"sqlmap stage failed: {exc}", "warning")
 
+    # Greenbone/OpenVAS: optional external feed-based engine.
+    if ctx.option_bool("openvas", False):
+        ctx.progress(88, "Running OpenVAS engine (optional)")
+        openvas_budget = _bounded_int(ctx.option("max_openvas_hosts", 5), 5, 1, 50)
+        openvas_checked = 0
+        from .openvas import run_openvas
+
+        for host, items in open_by_host.items():
+            if not items or ctx.cancelled():
+                continue
+            if openvas_checked >= openvas_budget:
+                ctx.log(f"OpenVAS limited to {openvas_budget} host(s)", "warning")
+                break
+            openvas_checked += 1
+            try:
+                run_openvas(result, host, ctx)
+            except ScanCancelled:
+                raise
+            except Exception as exc:
+                ctx.log(f"OpenVAS engine failed on {host}: {exc}", "warning")
+
     # Authenticated inventory/CVE checks use one credential per target OS.
     if ctx.option_bool("authenticated", False):
         ctx.progress(88, "Running authenticated host checks")

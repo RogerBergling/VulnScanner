@@ -95,9 +95,12 @@ Nessus-class vulnerability scanner with:
 
 ### Phase 4 — Greenbone/OpenVAS optional engine
 
-1. Optional external engine using the GVM stack (ospd-openvas) or
-   `gvm-cli`, like the other external tools: GUI toggle, path setting, feed
-   status, result normalisation into the same finding model.
+1. Optional external engine using the GVM stack — **done**
+   (`app/scanners/openvas.py`: gvm-cli task flow — create target/task,
+   start, poll, fetch report, parse results into findings with GMP severity
+   mapping; gated by a Settings toggle plus a per-scan option, encrypted
+   GVM credentials, per-scan host cap). Requires a working GVM stack
+   (PostgreSQL, gvmd, ospd-openvas, community feed).
 
 ## 4. Suggested next-level features (candidates, not yet committed)
 

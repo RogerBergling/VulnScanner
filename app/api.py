@@ -888,6 +888,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "service_probes",
             "nuclei",
             "sqlmap",
+            "openvas",
         ],
         "repo": [
             "include_secrets",
@@ -944,6 +945,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             ("max_web_hosts", 1, 200),
             ("max_testssl_hosts", 0, 50),
             ("max_wildcard_hosts", 1, 10_000),
+            ("max_openvas_hosts", 1, 50),
             ("ssh_port", 1, 65535),
             ("winrm_port", 1, 65535),
         ):
@@ -2215,6 +2217,10 @@ def get_settings() -> dict[str, Any]:
         "allow_private_outbound": get_setting("allow_private_outbound", "false") == "true",
         "dangerous_tools_enabled": get_setting("dangerous_tools_enabled", "false") == "true",
         "default_scan_policy": default_policy_id(),
+        "openvas_enabled": get_setting("openvas_enabled", "false") == "true",
+        "gvm_socket_path": get_setting("gvm_socket_path", ""),
+        "gvm_username": get_setting("gvm_username", ""),
+        "gvm_password_set": bool(get_setting("gvm_password", "")),
         "tool_policy": get_policy(),
         "bind_host": configured_bind_host,
         "bind_port": configured_bind_port,
@@ -2306,6 +2312,20 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
             "dangerous_tools_enabled",
             "true" if updates["dangerous_tools_enabled"] else "false",
         )
+
+    if "openvas_enabled" in updates and updates["openvas_enabled"] is not None:
+        set_setting("openvas_enabled", "true" if updates["openvas_enabled"] else "false")
+
+    for key in ("gvm_socket_path", "gvm_username"):
+        value = updates.get(key)
+        if value is not None:
+            set_setting(key, str(value))
+
+    # GVM passwords are secrets; encrypt them like SMTP passwords. An empty
+    # value clears the stored password.
+    if "gvm_password" in updates and updates["gvm_password"] is not None:
+        password = str(updates["gvm_password"])
+        set_setting("gvm_password", encrypt_secret(password) if password else "")
 
     if "allow_private_outbound" in updates and updates["allow_private_outbound"] is not None:
         set_setting(

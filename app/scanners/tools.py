@@ -68,17 +68,20 @@ TOOL_NAMES = (
     "gitleaks",
     "semgrep",
     "sqlmap",
+    "gvm-cli",
     "git",
 )
 # Commands that may be installed under a different name than the integration.
 TOOL_COMMANDS = {
     "testssl": ("testssl.sh", "testssl"),
+    "gvm-cli": ("gvm-cli", "omp"),
 }
 VERSION_ARGS = {
     "nuclei": ("-version",),
     "subfinder": ("-version",),
     "testssl": ("--version",),
     "sqlmap": ("--version",),
+    "gvm-cli": ("--version",),
 }
 
 
