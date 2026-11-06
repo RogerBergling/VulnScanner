@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import ipaddress
+import os
 import re
+import shutil
 import socket
+import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -17,9 +21,15 @@ from requests.packages import urllib3
 
 from ..config import DANGEROUS_PORTS, MAX_CIDR_HOSTS, SERVICE_NAMES, get_limit
 from ..database import get_setting
-from ..utils import parse_ports, safe_xml_fromstring, truncate, validate_host_target
+from ..utils import (
+    parse_ports,
+    parse_target_list,
+    safe_xml_fromstring,
+    truncate,
+    validate_host_target,
+)
 from .authenticated import authenticated_scan
-from .base import Finding, ScanContext, ScanResult
+from .base import Finding, ScanCancelled, ScanContext, ScanResult
 from .testssl import run_testssl
 from .tools import run_tool, tool_path
 from .web import (
@@ -31,6 +41,7 @@ from .web import (
     _session as web_session,
     _title,
     _tls_findings,
+    crawl_same_origin,
 )
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -41,10 +52,23 @@ BANNER_PORTS = {
 }
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
 HTTP_PORTS = {
-    80, 443, 591, 3000, 5000, 5601, 7001, 8000, 8008, 8080, 8081,
-    8443, 8888, 9000, 9090, 9443,
+    80, 443, 591, 3000, 4443, 5000, 5601, 5984, 6443, 7001, 8000, 8008,
+    8080, 8081, 8443, 8888, 9000, 9090, 9443, 10000,
 }
-TLS_PORTS = {443, 465, 636, 993, 995, 8443, 9443}
+TLS_PORTS = {443, 465, 636, 993, 995, 4443, 6443, 8443, 9443}
+WEB_SERVICE_NAMES = {
+    "http",
+    "https",
+    "http-proxy",
+    "https-alt",
+    "kibana",
+    "couchdb",
+    "weblogic",
+    "webmin",
+    "kubernetes",
+    "elasticsearch",
+}
+MAX_AUTO_WEB_PORTS = 20
 
 
 @dataclass
@@ -56,23 +80,54 @@ class PortResult:
 
 
 def _expand_hosts(target: str) -> list[str]:
-    kind, value = validate_host_target(target)
-    if kind == "cidr":
-        network = ipaddress.ip_network(value, strict=False)
-        limit = get_limit("max_cidr_hosts", MAX_CIDR_HOSTS)
-        if network.num_addresses > limit:
+    entries = parse_target_list(target)
+    if not entries:
+        raise ValueError("A network target is required")
+    limit = get_limit("max_cidr_hosts", MAX_CIDR_HOSTS)
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    def add(host: str) -> None:
+        key = host.lower()
+        if key not in seen:
+            seen.add(key)
+            hosts.append(host)
+
+    total = 0
+    for entry in entries:
+        kind, value = validate_host_target(entry)
+        if kind == "cidr":
+            network = ipaddress.ip_network(value, strict=False)
+            if network.num_addresses > limit:
+                raise ValueError(
+                    f"Network {value} contains {network.num_addresses} addresses; "
+                    f"limit is {limit}. Scan smaller ranges."
+                )
+            total += network.num_addresses
+            if total > limit:
+                raise ValueError(
+                    f"Target list expands to more than {limit} hosts. "
+                    "Reduce the number of targets or scan smaller ranges."
+                )
+            if network.num_addresses == 1:
+                add(str(network.network_address))
+            else:
+                for host in network.hosts():
+                    add(str(host))
+            continue
+
+        total += 1
+        if total > limit:
             raise ValueError(
-                f"Network contains {network.num_addresses} addresses; limit is {limit}. "
-                "Scan smaller ranges."
+                f"Target list expands to more than {limit} hosts. "
+                "Reduce the number of targets or scan smaller ranges."
             )
-        if network.num_addresses == 1:
-            return [str(network.network_address)]
-        return [str(host) for host in network.hosts()]
-    try:
-        socket.getaddrinfo(value, None)
-    except socket.gaierror as exc:
-        raise ValueError(f"Could not resolve host {value}: {exc}") from exc
-    return [value]
+        try:
+            socket.getaddrinfo(value, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"Could not resolve host {value}: {exc}") from exc
+        add(value)
+    return hosts
 
 
 def _probe_port(host: str, port: int, timeout: float) -> PortResult | None:
@@ -91,6 +146,112 @@ def _probe_port(host: str, port: int, timeout: float) -> PortResult | None:
             return PortResult(host, port, truncate(cleaned, 500), time.monotonic() - started)
     except (OSError, socket.timeout):
         return None
+
+
+def _ping_host(host: str, timeout: float = 1.0) -> bool | None:
+    """Return True/False for an ICMP echo result, or None if ICMP is unusable.
+
+    The built-in scanner normally scans every target with TCP connect probes and
+    does not require ICMP. When the operator explicitly disables the
+    "scan unresponsive hosts" option, this cheap system-ping pre-check filters
+    silent addresses before the more expensive port scan.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9._:%\[\]-]+", host) or host.startswith("-"):
+        return None
+    ping = shutil.which("ping")
+    if not ping:
+        return None
+    if os.name == "nt":
+        command = [ping, "-n", "1", "-w", str(max(250, int(timeout * 1000))), host]
+    elif sys.platform == "darwin":
+        command = [ping, "-n", "-c", "1", "-W", str(max(1, int(timeout * 1000))), host]
+    else:
+        command = [ping, "-n", "-c", "1", "-W", str(max(1, int(round(timeout)))), host]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=max(2.0, timeout + 2.0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    except OSError:
+        return None
+    if proc.returncode == 0:
+        return True
+    error = (proc.stderr or b"").decode("utf-8", errors="replace").lower()
+    if any(
+        token in error
+        for token in (
+            "permission",
+            "not permitted",
+            "operation not permitted",
+            "unknown option",
+            "invalid option",
+            "usage:",
+        )
+    ):
+        return None
+    return False
+
+
+def _filter_responsive_hosts(hosts: list[str], ctx: ScanContext) -> list[str]:
+    """Keep hosts that answer ICMP; scan all hosts when ICMP is unavailable."""
+    if not hosts:
+        return hosts
+    states: dict[str, bool | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, min(32, len(hosts)))
+    ) as executor:
+        future_to_host = {executor.submit(_ping_host, host): host for host in hosts}
+        for future in concurrent.futures.as_completed(future_to_host):
+            host = future_to_host[future]
+            try:
+                states[host] = future.result()
+            except Exception:
+                states[host] = None
+    unresolved = sum(1 for host in hosts if states.get(host) is None)
+    responsive = [host for host in hosts if states.get(host) is not False]
+    if unresolved == len(hosts):
+        ctx.log(
+            "ICMP ping is unavailable or not permitted; scanning all hosts anyway",
+            "warning",
+        )
+    skipped = len(hosts) - len(responsive)
+    if skipped:
+        ctx.log(
+            f"ICMP pre-check skipped {skipped} host(s) that did not respond; "
+            "enable 'Scan hosts even if they do not answer ping' to include them",
+            "warning",
+        )
+    return responsive
+
+
+def _is_web_candidate(item: PortResult) -> bool:
+    if item.port in HTTP_PORTS:
+        return True
+    if SERVICE_NAMES.get(item.port, "") in WEB_SERVICE_NAMES:
+        return True
+    banner = (item.banner or "").lower()
+    return "http/" in banner or "server:" in banner or "<html" in banner
+
+
+def _select_web_candidates(
+    all_open: list[PortResult], include_unknown: bool = True
+) -> list[PortResult]:
+    """Return known web services plus a bounded set of unknown ports to probe."""
+    candidates = [item for item in all_open if _is_web_candidate(item)]
+    selected = {(item.host, item.port) for item in candidates}
+    if not include_unknown:
+        return candidates
+    unknown: list[PortResult] = []
+    for item in all_open:
+        if (item.host, item.port) in selected:
+            continue
+        if SERVICE_NAMES.get(item.port) in (None, "unknown") and len(unknown) < MAX_AUTO_WEB_PORTS:
+            unknown.append(item)
+    return candidates + unknown
 
 
 def _bounded_int(value: Any, default: int, low: int, high: int) -> int:
@@ -156,7 +317,12 @@ def _probe_ports(
 
 
 def _http_service(
-    result: ScanResult, host: str, port: int, open_ports: list[int], ctx: ScanContext
+    result: ScanResult,
+    host: str,
+    port: int,
+    open_ports: list[int],
+    ctx: ScanContext,
+    probe_timeout: float = 6.0,
 ) -> tuple[str, requests.Response, str] | None:
     schemes = ["https", "http"] if port in TLS_PORTS else ["http", "https"]
     response = None
@@ -165,7 +331,7 @@ def _http_service(
     try:
         for scheme in schemes:
             try:
-                response = safe_get(session, f"{scheme}://{host}:{port}/", timeout=6)
+                response = safe_get(session, f"{scheme}://{host}:{port}/", timeout=probe_timeout)
                 used_scheme = scheme
                 break
             except requests.RequestException:
@@ -182,8 +348,9 @@ def _http_service(
             title=f"Web server detected on port {port}",
             category="network",
             description=(
-                "An HTTP/HTTPS web service was discovered. Header, exposed-file and "
-                "injection checks run when web checks are enabled for this scan."
+                "An HTTP/HTTPS web service was discovered. Header, exposed-file, "
+                "same-origin crawl and injection checks run when web checks are enabled "
+                "for this scan."
             ),
             evidence=(
                 f"URL: {used_scheme}://{host}:{port}/\n"
@@ -210,9 +377,10 @@ def _web_vulnerability_checks(
     url: str,
     response: requests.Response,
     body: str,
-) -> None:
+) -> int:
     """Run the reusable web checks against a discovered HTTP service."""
     session = web_session(verify_tls=not ctx.option_bool("ignore_tls_errors", False))
+    pages_crawled = 0
     try:
         _add_header_findings(result, url, response, body, ctx)
         try:
@@ -223,6 +391,18 @@ def _web_vulnerability_checks(
             _injection_checks(result, session, url, response, body, ctx)
         except requests.RequestException as exc:
             ctx.log(f"Injection probes stopped on {url}: {exc}", "warning")
+        try:
+            pages = crawl_same_origin(session, url, body, ctx)
+            pages_crawled = len(pages)
+            for page_url, page_response, page_body in pages:
+                try:
+                    _injection_checks(result, session, page_url, page_response, page_body, ctx)
+                except requests.RequestException as exc:
+                    ctx.log(f"Injection probes stopped on {page_url}: {exc}", "warning")
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"Same-origin crawl stopped on {url}: {exc}", "warning")
         _run_nuclei(result, url, ctx)
         # Add a summary finding showing the deep web scan was executed and results were added.
         web_findings = []
@@ -236,16 +416,24 @@ def _web_vulnerability_checks(
                 severity="info",
                 title=f"Deep web vulnerability assessment completed on {url}",
                 category="web",
-                description=f"A deep web scan (headers, exposed files, injection probes, Nuclei CVE templates) was executed against the discovered web server. {len(web_findings)} web/network findings produced.",
-                evidence=f"Target URL: {url}\nWeb findings generated: {len(web_findings)}",
+                description=(
+                    "A deep web scan (header review, exposed files, same-origin crawl, "
+                    "injection probes and Nuclei CVE templates) was executed against the "
+                    f"discovered web server. {len(web_findings)} web/network findings produced."
+                ),
+                evidence=(
+                    f"Target URL: {url}\nPages crawled: {pages_crawled}\n"
+                    f"Web findings generated: {len(web_findings)}"
+                ),
                 remediation="Review all related findings. Address critical/high web vulnerabilities before exposing this service externally.",
                 location=url,
                 key=f"deep-web-summary:{url}",
-                raw={"url": url, "findings": len(web_findings)},
+                raw={"url": url, "findings": len(web_findings), "pages_crawled": pages_crawled},
             )
         )
     finally:
         session.close()
+    return pages_crawled
 
 
 def _add_port_findings(
@@ -396,7 +584,9 @@ def _run_nmap(
         ctx.log("Nmap is not installed; using built-in TCP service detection", "warning")
         return
     port_arg = ",".join(str(port) for port in open_ports[:500])
-    command = [path, "-Pn", "-sV", "--version-light", "-T4", "-p", port_arg, "-oX", "-"]
+    command = [path, "-sV", "--version-light", "-T4", "-p", port_arg, "-oX", "-"]
+    if ctx.option_bool("scan_unresponsive_hosts", True):
+        command.insert(1, "-Pn")
     if ctx.option_bool("nmap_vulners", False):
         command[1:1] = ["--script", "vulners"]
     command.append(host)
@@ -424,11 +614,15 @@ def scan(ctx: ScanContext) -> ScanResult:
     workers = _bounded_int(
         ctx.option("workers", get_limit("workers", 300)), 300, 10, 600
     )
+    ctx.progress(3, "Resolving target")
+    if not ctx.option_bool("scan_unresponsive_hosts", True):
+        ctx.progress(4, "Checking ICMP reachability")
+        ctx.log(f"Running an ICMP pre-check against {len(hosts)} host(s)")
+        hosts = _filter_responsive_hosts(hosts, ctx)
     ctx.log(
         f"Scanning {len(hosts)} host(s) across {len(ports)} TCP port(s) "
         f"with a {timeout:.2f}s connect timeout"
     )
-    ctx.progress(3, "Resolving target")
     open_by_host: dict[str, list[PortResult]] = {host: [] for host in hosts}
     started = time.monotonic()
 
@@ -438,12 +632,14 @@ def scan(ctx: ScanContext) -> ScanResult:
         ctx.log("Port scan cancelled", "warning")
 
     all_open = [item for items in open_by_host.values() for item in items]
+    all_open.sort(key=lambda item: (item.host, item.port))
     ctx.log(f"Found {len(all_open)} open TCP port(s) in {time.monotonic() - started:.1f}s")
     ctx.progress(78, "Identifying services")
     result.metadata = {
         "hosts": hosts[:500],
         "host_count": len(hosts),
         "ports_scanned": len(ports),
+        "scan_unresponsive_hosts": ctx.option_bool("scan_unresponsive_hosts", True),
         "open_ports": [
             {
                 "host": item.host,
@@ -455,7 +651,7 @@ def scan(ctx: ScanContext) -> ScanResult:
     }
     _add_port_findings(result, all_open, ctx)
 
-    # Web/TLS checks for likely HTTP ports.
+    # Web/TLS checks for detected and likely HTTP/HTTPS services.
     web_checks = ctx.option_bool("web_checks", True)
     web_budget = _bounded_int(
         ctx.option("max_web_hosts", get_limit("max_web_hosts", 20)), 20, 1, 10_000
@@ -467,50 +663,65 @@ def scan(ctx: ScanContext) -> ScanResult:
     web_checked = 0
     testssl_checked = 0
     testssl_cap_logged = False
-    for item in all_open:
-        if item.port in HTTP_PORTS:
-            ctx.check_cancel()
-            try:
-                service = _http_service(
-                    result, item.host, item.port, [p.port for p in open_by_host[item.host]], ctx
-                )
-            except Exception as exc:
-                ctx.log(f"HTTP probe failed on {item.host}:{item.port}: {exc}", "warning")
-                continue
-            if not service or not web_checks:
-                continue
-            if web_checked >= web_budget:
+    web_cap_logged = False
+    web_candidates = _select_web_candidates(all_open, include_unknown=web_checks)
+    for item in web_candidates:
+        ctx.check_cancel()
+        known_web_port = _is_web_candidate(item)
+        try:
+            service = _http_service(
+                result,
+                item.host,
+                item.port,
+                [p.port for p in open_by_host[item.host]],
+                ctx,
+                probe_timeout=6.0 if known_web_port else 2.0,
+            )
+        except Exception as exc:
+            ctx.log(f"HTTP probe failed on {item.host}:{item.port}: {exc}", "warning")
+            continue
+        if not service or not web_checks:
+            continue
+        if web_checked >= web_budget:
+            if not web_cap_logged:
+                web_cap_logged = True
                 ctx.log(
                     f"Deep web checks limited to {web_budget} service(s); "
                     "remaining web ports were fingerprinted only",
                     "warning",
                 )
-                break
-            web_checked += 1
-            url, response, body = service
-            try:
-                _web_vulnerability_checks(result, ctx, url, response, body)
-            except Exception as exc:
-                ctx.log(f"Web vulnerability checks failed on {url}: {exc}", "warning")
-            parsed_url = urlparse(url)
-            if parsed_url.scheme == "https" and testssl_enabled:
-                if testssl_checked < testssl_budget:
-                    testssl_checked += 1
-                    try:
-                        run_testssl(
-                            result,
-                            parsed_url.hostname or item.host,
-                            parsed_url.port or 443,
-                            ctx,
-                        )
-                    except Exception as exc:
-                        ctx.log(f"testssl.sh integration failed on {url}: {exc}", "warning")
-                elif testssl_budget and not testssl_cap_logged:
-                    testssl_cap_logged = True
-                    ctx.log(
-                        f"testssl.sh limited to {testssl_budget} HTTPS service(s)",
-                        "warning",
+            continue
+        web_checked += 1
+        url, response, body = service
+        try:
+            pages_crawled = _web_vulnerability_checks(result, ctx, url, response, body)
+            for service_meta in result.metadata.get("web_services", []):
+                if service_meta.get("url") == url:
+                    service_meta["pages_crawled"] = pages_crawled
+                    break
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"Web vulnerability checks failed on {url}: {exc}", "warning")
+        parsed_url = urlparse(url)
+        if parsed_url.scheme == "https" and testssl_enabled:
+            if testssl_checked < testssl_budget:
+                testssl_checked += 1
+                try:
+                    run_testssl(
+                        result,
+                        parsed_url.hostname or item.host,
+                        parsed_url.port or 443,
+                        ctx,
                     )
+                except Exception as exc:
+                    ctx.log(f"testssl.sh integration failed on {url}: {exc}", "warning")
+            elif testssl_budget and not testssl_cap_logged:
+                testssl_cap_logged = True
+                ctx.log(
+                    f"testssl.sh limited to {testssl_budget} HTTPS service(s)",
+                    "warning",
+                )
 
     # Nmap is optional and only used to enrich hosts with open services.
     if ctx.option_bool("external_tools", False):

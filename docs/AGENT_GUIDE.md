@@ -288,7 +288,7 @@ vulnscanner_agent.py [--config PATH] configure [--server URL] [--token TOKEN] [-
 vulnscanner_agent.py [--config PATH] run [--once] [--interval SECONDS]
 vulnscanner_agent.py [--config PATH] status
 vulnscanner_agent.py [--config PATH] update-token --token TOKEN
-vulnscanner_agent.py [--config PATH] scan --modules system,packages,ports,network [--path DIR] [--target HOST_OR_CIDR] [--ports PORTS] [--output FILE]
+vulnscanner_agent.py [--config PATH] scan --modules system,packages,ports,network [--path DIR] [--target HOST_OR_CIDR_OR_LIST] [--ports PORTS] [--output FILE]
 ```
 
 - `enroll` writes the configuration file and token.
@@ -348,10 +348,11 @@ example a private subnet behind a jump host.
   open ports, service guesses and banners. The server applies the same
   dangerous-port rules, severity grading and fingerprinting as a server-side
   scan.
-- The target must be a host, IP address or CIDR. The server rejects CIDR ranges
-  above `VS_MAX_CIDR_HOSTS` (default 256), and both agents independently cap a
-  delegated range at 256 hosts. Only scan systems you own or have written
-  permission to assess.
+- The target must be a host, IP address, CIDR or a newline/comma-separated
+  list of those entries. The UI can import a `.txt`/`.csv` with one target per
+  row. The server rejects lists above `VS_MAX_CIDR_HOSTS` (default 256), and both
+  agents independently cap a delegated list at 256 hosts. Only scan systems you
+  own or have written permission to assess.
 
 The native PowerShell agent and Python agent 1.1+ both support delegated
 network scans. Older Python agents without the `network` capability cannot be

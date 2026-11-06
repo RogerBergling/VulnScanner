@@ -161,6 +161,27 @@ def normalize_repo_target(target: str) -> str:
     return str(path)
 
 
+def parse_target_list(value: str) -> list[str]:
+    """Split a multi-host target field into individual host/CIDR entries.
+
+    The scan dialog accepts one target per line, while API clients often send
+    comma-separated values. Empty lines, comments and duplicate entries are
+    ignored so an imported .txt/.csv file can be pasted directly.
+    """
+    entries: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[\r\n,;]+", value or ""):
+        entry = raw.strip().strip("\"'").strip()
+        if not entry or entry.startswith("#"):
+            continue
+        key = entry.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(entry)
+    return entries
+
+
 def validate_host_target(target: str) -> tuple[str, str]:
     """Return (kind, value) for a host, address or CIDR."""
     target = target.strip()
@@ -174,6 +195,8 @@ def validate_host_target(target: str) -> tuple[str, str]:
         return "cidr", str(network)
     if re.search(r"[\s/\\]", target):
         raise ValueError("Host target may not contain whitespace or slashes")
+    if target.startswith("-"):
+        raise ValueError("Host target may not start with '-'")
     return "host", target
 
 

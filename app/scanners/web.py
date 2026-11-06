@@ -14,6 +14,7 @@ import socket
 import ssl
 import string
 from datetime import datetime, timezone
+from html import unescape
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
@@ -250,6 +251,116 @@ def _same_scope(base_url: str, candidate_url: str) -> bool:
     if base_host == candidate_host:
         return True
     return candidate_host == f"www.{base_host}" or base_host == f"www.{candidate_host}"
+
+
+LINK_RE = re.compile(r"""href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I | re.S)
+BINARY_EXTENSIONS = {
+    ".7z", ".avi", ".bmp", ".css", ".doc", ".docx", ".eot", ".gif", ".gz", ".ico",
+    ".jpeg", ".jpg", ".js", ".m4a", ".mov", ".mp3", ".mp4", ".pdf", ".png", ".ppt",
+    ".pptx", ".rar", ".svg", ".tar", ".tgz", ".ttf", ".wav", ".webm", ".webp", ".woff",
+    ".woff2", ".xls", ".xlsx", ".zip",
+}
+UNSAFE_LINK_RE = re.compile(
+    r"(?:logout|signout|logoff|delete|remove|destroy|unsubscribe|checkout|purchase)",
+    re.I,
+)
+
+
+def _effective_port(parsed: Any) -> int:
+    try:
+        if parsed.port:
+            return int(parsed.port)
+    except ValueError:
+        return -1
+    return 443 if parsed.scheme == "https" else 80
+
+
+def _same_origin(base_url: str, candidate_url: str) -> bool:
+    """Require an exact scheme/host/port match before crawling a link."""
+    base = urlparse(base_url)
+    candidate = urlparse(candidate_url)
+    if candidate.scheme not in {"http", "https"} or base.scheme not in {"http", "https"}:
+        return False
+    if candidate.username or candidate.password:
+        return False
+    if (base.hostname or "").lower() != (candidate.hostname or "").lower():
+        return False
+    return base.scheme == candidate.scheme and _effective_port(base) == _effective_port(candidate)
+
+
+def extract_same_origin_links(base_url: str, body: str, limit: int = 50) -> list[str]:
+    """Extract bounded, same-origin HTML links for the deep web crawler."""
+    links: list[str] = []
+    seen: set[str] = set()
+    base_key = urlunparse(urlparse(base_url)._replace(fragment="")).rstrip("/")
+    seen.add(base_key)
+    for match in LINK_RE.finditer(body or ""):
+        raw = next((group for group in match.groups() if group is not None), "").strip()
+        raw = unescape(raw)
+        if not raw or raw.startswith(("#", "mailto:", "tel:", "javascript:", "data:", "blob:")):
+            continue
+        absolute = urljoin(base_url, raw)
+        if any(char.isspace() for char in absolute) or not _same_origin(base_url, absolute):
+            continue
+        parsed = urlparse(absolute)
+        if parsed.path.lower().endswith(tuple(BINARY_EXTENSIONS)):
+            continue
+        if UNSAFE_LINK_RE.search(parsed.path):
+            continue
+        normalized = urlunparse(parsed._replace(fragment=""))
+        key = normalized.rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(normalized)
+        if len(links) >= limit:
+            break
+    return links
+
+
+def crawl_same_origin(
+    session: requests.Session,
+    base_url: str,
+    body: str,
+    ctx: ScanContext,
+) -> list[tuple[str, requests.Response, str]]:
+    """Fetch a bounded set of same-origin HTML pages linked from the target."""
+    try:
+        limit = int(ctx.option("max_web_pages", 10))
+    except (TypeError, ValueError):
+        limit = 10
+    limit = max(0, min(50, limit))
+    if limit <= 0:
+        return []
+    queue = extract_same_origin_links(base_url, body, limit * 4)
+    visited = {urlunparse(urlparse(base_url)._replace(fragment="")).rstrip("/")}
+    pages: list[tuple[str, requests.Response, str]] = []
+    while queue and len(pages) < limit:
+        ctx.check_cancel()
+        url = queue.pop(0)
+        key = url.rstrip("/")
+        if key in visited:
+            continue
+        visited.add(key)
+        try:
+            response = _get(session, url, timeout=8)
+        except requests.RequestException:
+            continue
+        final_url = response.url or url
+        if not _same_origin(base_url, final_url):
+            continue
+        content_type = (response.headers.get("content-type") or "").lower()
+        if response.status_code >= 400:
+            continue
+        if "html" not in content_type and "text" not in content_type:
+            continue
+        page_body = _safe_text(response, 500_000)
+        pages.append((final_url, response, page_body))
+        for link in extract_same_origin_links(final_url, page_body, limit * 4):
+            if link.rstrip("/") not in visited and len(queue) < 200:
+                queue.append(link)
+    ctx.log(f"Crawled {len(pages)} same-origin page(s) from {base_url}")
+    return pages
 
 
 def _get(session: requests.Session, url: str, timeout: float = 10.0, **kwargs: Any) -> requests.Response:
@@ -817,6 +928,16 @@ def scan(ctx: ScanContext) -> ScanResult:
             _injection_checks(result, session, url, response, body, ctx)
         except requests.RequestException as exc:
             ctx.log(f"Injection probes stopped: {exc}", "warning")
+
+        ctx.progress(62, "Crawling same-origin pages")
+        pages = crawl_same_origin(session, url, body, ctx)
+        result.metadata["pages_crawled"] = len(pages)
+        result.metadata["crawled_urls"] = [page_url for page_url, _response, _body in pages][:50]
+        for page_url, page_response, page_body in pages:
+            try:
+                _injection_checks(result, session, page_url, page_response, page_body, ctx)
+            except requests.RequestException as exc:
+                ctx.log(f"Injection probes stopped on {redact_url(page_url)}: {exc}", "warning")
 
         parsed = urlparse(url)
         if parsed.scheme == "https" and parsed.hostname:

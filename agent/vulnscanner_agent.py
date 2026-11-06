@@ -1236,23 +1236,55 @@ def agent_expand_targets(target: str) -> list[str]:
     target = (target or "").strip()
     if not target:
         raise ValueError("A network scan target is required")
-    if "/" in target:
-        network = ipaddress.ip_network(target, strict=False)
-        if network.num_addresses > MAX_NETWORK_HOSTS:
+    hosts: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for entry in re.split(r"[\r\n,;]+", target):
+        entry = entry.strip().strip("\"'")
+        if not entry or entry.startswith("#"):
+            continue
+        if "/" in entry:
+            network = ipaddress.ip_network(entry, strict=False)
+            if network.num_addresses > MAX_NETWORK_HOSTS:
+                raise ValueError(
+                    f"Network contains {network.num_addresses} addresses; "
+                    f"limit is {MAX_NETWORK_HOSTS}"
+                )
+            total += network.num_addresses
+            if total > MAX_NETWORK_HOSTS:
+                raise ValueError(
+                    f"Target list expands to more than {MAX_NETWORK_HOSTS} hosts; "
+                    "reduce the number of targets"
+                )
+            if network.num_addresses == 1:
+                expanded = [str(network.network_address)]
+            else:
+                expanded = [str(host) for host in network.hosts()]
+            for host in expanded:
+                key = host.lower()
+                if key not in seen:
+                    seen.add(key)
+                    hosts.append(host)
+            continue
+        if re.search(r"[\s/\\]", entry) or entry.startswith("-"):
+            raise ValueError("Host target may not contain whitespace, slashes or start with '-'")
+        total += 1
+        if total > MAX_NETWORK_HOSTS:
             raise ValueError(
-                f"Network contains {network.num_addresses} addresses; "
-                f"limit is {MAX_NETWORK_HOSTS}"
+                f"Target list expands to more than {MAX_NETWORK_HOSTS} hosts; "
+                "reduce the number of targets"
             )
-        if network.num_addresses == 1:
-            return [str(network.network_address)]
-        return [str(host) for host in network.hosts()]
-    if re.search(r"[\s/\\]", target):
-        raise ValueError("Host target may not contain whitespace or slashes")
-    try:
-        socket.getaddrinfo(target, None)
-    except socket.gaierror as exc:
-        raise ValueError(f"Could not resolve host {target}: {exc}") from exc
-    return [target]
+        try:
+            socket.getaddrinfo(entry, None)
+        except socket.gaierror as exc:
+            raise ValueError(f"Could not resolve host {entry}: {exc}") from exc
+        key = entry.lower()
+        if key not in seen:
+            seen.add(key)
+            hosts.append(entry)
+    if not hosts:
+        raise ValueError("A network scan target is required")
+    return hosts
 
 
 def _probe_network_port(host: str, port: int, timeout: float) -> dict[str, Any] | None:

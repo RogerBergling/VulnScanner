@@ -7,6 +7,7 @@ from app.utils import (
     normalize_severity,
     normalize_target_url,
     parse_ports,
+    parse_target_list,
     redact_secret,
     redact_url,
     risk_label,
@@ -89,6 +90,17 @@ def test_validate_host_target():
         validate_host_target("bad host")
     with pytest.raises(ValueError):
         validate_host_target("10.0.0.0/99")
+    with pytest.raises(ValueError):
+        validate_host_target("-oN")
+
+
+def test_parse_target_list_from_text_and_csv_rows():
+    assert parse_target_list("192.0.2.10, 192.0.2.11;192.0.2.12\n# comment\n\n") == [
+        "192.0.2.10",
+        "192.0.2.11",
+        "192.0.2.12",
+    ]
+    assert parse_target_list('"192.0.2.10"\n192.0.2.10') == ["192.0.2.10"]
 
 
 def test_parse_ports_profiles_and_validation():

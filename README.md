@@ -60,8 +60,8 @@ no separate database server and no Node.js build step.
 - Websites and web applications: HTTP security checks, exposed files, security
   headers, cookies, forms and optional active checks.
 - Servers and network services: TCP port discovery, service banners, risky
-  ports, built-in web checks on discovered HTTP ports, and optional Nmap/NSE
-  enrichment.
+  ports, automatic HTTP/HTTPS discovery with deep web checks on every discovered
+  web service, and optional Nmap/NSE enrichment.
 - Linux and Windows hosts over SSH/WinRM with a high-privilege account: patch
   level, package CVEs, configuration and inventory, in addition to
   unauthenticated network checks.
@@ -257,7 +257,8 @@ for the full integration behaviour and scan options.
 1. Open **Customers**, create a customer, and add a group such as `webserver`.
 2. Add an asset in that group, for example a website URL or a hostname.
 3. Open **Scans**, choose **New scan**, select the customer/group/asset and the
-   scan type, then start the scan.
+   scan type, then start the scan. Network scans accept multiple hosts one per
+   line and can import `.txt`/`.csv` files with one target per row.
 4. Open the scan to follow progress, review findings, change finding status, and
    export JSON, CSV or a printable HTML report.
 
@@ -270,7 +271,7 @@ persisted in SQLite.
 | Type | Target | Main checks |
 | --- | --- | --- |
 | Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, optional Nuclei and testssl.sh |
-| Network | Hostname, IP address or CIDR (`/30` to `/24` by default) | TCP ports, dangerous services, banners, web checks on discovered HTTP ports, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
+| Network | Hostname, IP address, CIDR (`/30` to `/24` by default), or a newline/comma-separated target list imported from `.txt`/`.csv` | TCP ports, dangerous services, banners, HTTP/HTTPS discovery with deep web checks (same-origin crawl, headers, exposed files, injection probes) on discovered web services, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
 | Local repository | Absolute path on the server | Secrets, dependency manifests/OSV, source review, optional Gitleaks/Semgrep/osv-scanner and Trivy |
 | GitHub repository | `https://github.com/owner/repo` or `owner/repo` | Clone plus the same repository checks; private repositories can use a scan-only token |
 | Domain | `example.com` | Passive Subfinder enumeration plus local DNS wordlist discovery from an editable SecLists list; discovered hosts are reported, not scanned |
@@ -350,7 +351,7 @@ deployment-level values that remain outside the GUI.
 | `VS_MAX_REPO_BYTES` | `536870912` | Maximum cloned repository size. Editable in Settings → Scan guardrails. |
 | `VS_MAX_SOURCE_FILE_BYTES` | `1048576` | Maximum file size read by source scanners. Editable in Settings → Scan guardrails. |
 | `VS_MAX_SCAN_FILES` | `20000` | Maximum files visited per scan. Editable in Settings → Scan guardrails. |
-| `VS_MAX_CIDR_HOSTS` | `256` | Maximum addresses expanded from one CIDR target. Editable in Settings → Scan guardrails. |
+| `VS_MAX_CIDR_HOSTS` | `256` | Maximum hosts per network scan, including the combined total of an imported target list. Editable in Settings → Scan guardrails. |
 | `VS_AGENT_JOB_TIMEOUT` | `3600` | Seconds before a running agent job is marked failed and its scan is closed. Editable in Settings → Scan guardrails. |
 | `VS_SCAN_WORKERS` | `4` | Parallel server-side scan workers (1-32). Editable in Settings → Advanced runtime; restart required. |
 | `VS_SSH_KNOWN_HOSTS` | empty | known_hosts file for authenticated SSH scans. Required by default before credentials are sent. Editable in Settings → Advanced runtime. |

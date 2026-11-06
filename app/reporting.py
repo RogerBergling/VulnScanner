@@ -50,6 +50,12 @@ def _csv_cell(value: Any) -> Any:
     return text
 
 
+def _target_text(value: Any) -> str:
+    """Collapse a multi-host target list into a single display line."""
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    return ", ".join(lines)
+
+
 def _safe_reference_url(value: Any) -> str | None:
     """Return a reference URL only when it uses a safe web scheme."""
     text = str(value or "").strip()
@@ -169,7 +175,7 @@ def build_html(scan: dict[str, Any], findings: list[dict[str, Any]], context: di
 <header>
   <div><div class="brand">VulnScanner · Security Assessment</div>
   <h1>{escape(title)}</h1>
-  <div class="meta">Target: <b>{escape(scan.get('target'))}</b> · Scan #{scan.get('id')} · {escape(scan.get('completed_at') or scan.get('created_at') or '')}</div></div>
+  <div class="meta">Target: <b>{escape(_target_text(scan.get('target')))}</b> · Scan #{scan.get('id')} · {escape(scan.get('completed_at') or scan.get('created_at') or '')}</div></div>
   <div class="badge" style="background:#0f172a">Risk {escape(summary.get('risk_label', 'None'))} · {escape(summary.get('risk_score', 0))}/100</div>
 </header>
 <div class="cards">{cards}</div>
@@ -219,7 +225,7 @@ def build_pdf(
     customer = context.get("customer") or {}
     p.drawString(20 * mm, 260 * mm, f"Customer: {customer.get('name', '—')}")
     p.drawString(20 * mm, 250 * mm, f"Scan ID: {scan.get('id')}")
-    p.drawString(20 * mm, 240 * mm, f"Target: {scan.get('target')}")
+    p.drawString(20 * mm, 240 * mm, f"Target: {_target_text(scan.get('target'))}")
 
     # Summary section
     y = 220 * mm
@@ -368,7 +374,7 @@ def _draw_executive_summary_pdf(
     y -= 8 * mm
 
     p.setFont("Helvetica", 10)
-    p.drawString(30 * mm, y, f"Target: {scan.get('target')}")
+    p.drawString(30 * mm, y, f"Target: {_target_text(scan.get('target'))}")
     y -= 5 * mm
     p.drawString(
         30 * mm,

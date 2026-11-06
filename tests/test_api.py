@@ -230,6 +230,53 @@ def test_scan_creation_validation_and_listing(api_client, customer):
     assert queued_delete.status_code == 409
 
 
+def test_scan_accepts_multiple_targets_and_ping_option(api_client, customer):
+    customer_id = customer["id"]
+    response = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer_id,
+            "scan_type": "network",
+            "target": "192.0.2.10\n192.0.2.11, 192.0.2.12",
+            "options": {
+                "ports": "80,443",
+                "web_checks": True,
+                "max_web_pages": 6,
+                "scan_unresponsive_hosts": False,
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    scan = response.json()
+    assert scan["target"] == "192.0.2.10\n192.0.2.11\n192.0.2.12"
+    assert scan["options"]["max_web_pages"] == 6
+    assert scan["options"]["scan_unresponsive_hosts"] is False
+
+    invalid = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer_id,
+            "scan_type": "network",
+            "target": "192.0.2.10\nbad host",
+        },
+    )
+    assert invalid.status_code == 400
+
+    too_many = "\n".join(
+        f"10.0.{index // 256}.{index % 256}" for index in range(1, 258)
+    )
+    oversized = api_client.post(
+        "/api/scans",
+        json={
+            "customer_id": customer_id,
+            "scan_type": "network",
+            "target": too_many,
+        },
+    )
+    assert oversized.status_code == 400
+    assert "more than 256 hosts" in oversized.json()["detail"]
+
+
 def test_scan_cancel_rescan_and_delete(api_client, customer):
     customer_id = customer["id"]
     scan = api_client.post(

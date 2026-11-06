@@ -157,7 +157,9 @@ class ScanCreate(BaseModel):
     group_id: int | None = None
     asset_id: int | None = None
     scan_type: ScanType
-    target: str = Field(default="", max_length=4000)
+    # Network scans accept a newline/comma-separated target list imported from
+    # .txt/.csv, so this is intentionally larger than a single hostname.
+    target: str = Field(default="", max_length=100_000)
     options: dict[str, Any] = Field(default_factory=dict)
     # Per-scan credential overrides keyed by "linux"/"windows". The values are
     # encrypted into the per-scan credential table and never returned.
@@ -233,7 +235,7 @@ class AgentScanRequest(BaseModel):
         default_factory=lambda: ["system", "packages", "ports"]
     )
     paths: list[str] = Field(default_factory=list)
-    target: str = Field(default="", max_length=4000)
+    target: str = Field(default="", max_length=100_000)
     options: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("modules")
@@ -497,7 +499,7 @@ class ScheduleCreate(BaseModel):
     group_id: int | None = None
     asset_id: int | None = None
     scan_type: ScanType
-    target: str = Field(default="", max_length=4000)
+    target: str = Field(default="", max_length=100_000)
     options: dict[str, Any] = Field(default_factory=dict)
     cron_expression: str = Field(default="", max_length=120)
     notify_email: str | None = Field(default=None, max_length=320)
@@ -520,7 +522,7 @@ class ScheduleCreate(BaseModel):
 
 class ScheduleUpdate(BaseModel):
     scan_type: ScanType | None = None
-    target: str | None = Field(default=None, max_length=4000)
+    target: str | None = Field(default=None, max_length=100_000)
     options: dict[str, Any] | None = None
     cron_expression: str | None = Field(default=None, max_length=120)
     notify_email: str | None = Field(default=None, max_length=320)

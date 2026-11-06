@@ -15,11 +15,15 @@
   };
   const SCAN_TYPES = {
     web: { label: 'Website / web app', placeholder: 'https://example.com or 192.168.1.20:8080' },
-    network: { label: 'Server / network', placeholder: '192.168.1.0/24, hostname or IP address' },
+    network: { label: 'Server / network', placeholder: '192.168.1.0/24, 192.168.1.10 or a list (one target per line)' },
     repo: { label: 'Local repository', placeholder: '/path/to/repository (on this server)' },
     github: { label: 'GitHub repository', placeholder: 'https://github.com/owner/repo or owner/repo' },
     domain: { label: 'Domain / subdomains', placeholder: 'example.com' },
     ad: { label: 'AD report file', placeholder: '/path/to/ad-report.json (on this server)' }
+  };
+  const TARGET_IMPORT_HEADERS = {
+    ip: true, 'ip address': true, ip_address: true, host: true, hosts: true,
+    hostname: true, target: true, targets: true, address: true, addresses: true
   };
   const ASSET_TYPE = {
     web: 'web', github: 'github', repo: 'repo', host: 'network', domain: 'domain',
@@ -62,6 +66,77 @@
   function fmtHostPort(host, port) {
     const label = String(host || '');
     return (label.indexOf(':') >= 0 ? '[' + label + ']' : label) + ':' + num(port);
+  }
+  function csvFirstCell(line, delimiter) {
+    const separator = delimiter || ',';
+    let value = '';
+    let quoted = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const char = line.charAt(i);
+      if (quoted) {
+        if (char === '"') {
+          if (line.charAt(i + 1) === '"') { value += '"'; i += 1; }
+          else quoted = false;
+        } else {
+          value += char;
+        }
+      } else if (char === '"') {
+        quoted = true;
+      } else if (char === separator) {
+        break;
+      } else {
+        value += char;
+      }
+    }
+    return value.trim();
+  }
+  function parseImportedTargets(text) {
+    const values = [];
+    const seen = {};
+    String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/).forEach(function (rawLine) {
+      const line = rawLine.split('#')[0].trim();
+      if (!line) return;
+      let value = line;
+      if (line.indexOf(',') >= 0) value = csvFirstCell(line, ',');
+      else if (line.indexOf(';') >= 0) value = csvFirstCell(line, ';');
+      else if (line.indexOf('\t') >= 0) value = csvFirstCell(line, '\t');
+      value = value.trim().replace(/^["']+|["']+$/g, '').trim();
+      if (!value || value.charAt(0) === '#') return;
+      const key = value.toLowerCase();
+      if (TARGET_IMPORT_HEADERS[key] || seen[key]) return;
+      seen[key] = true;
+      values.push(value);
+    });
+    return values;
+  }
+  function splitTargetText(value) {
+    const values = [];
+    const seen = {};
+    String(value || '').split(/[\r\n,;]+/).forEach(function (raw) {
+      const entry = raw.trim().replace(/^["']+|["']+$/g, '').trim();
+      if (!entry || entry.charAt(0) === '#') return;
+      const key = entry.toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      values.push(entry);
+    });
+    return values;
+  }
+  function mergeTargetText(existing, imported) {
+    const values = splitTargetText(existing);
+    const seen = {};
+    values.forEach(function (value) { seen[value.toLowerCase()] = true; });
+    imported.forEach(function (value) {
+      const key = value.toLowerCase();
+      if (!seen[key]) { seen[key] = true; values.push(value); }
+    });
+    return values;
+  }
+  function targetLabel(value) {
+    const raw = String(value || '');
+    const parts = raw.split(/\r?\n/).map(function (item) { return item.trim(); }).filter(Boolean);
+    if (parts.length <= 1) return esc(raw);
+    return esc(parts[0]) + ' <span class="muted">+' + (parts.length - 1) + ' more</span>';
   }
   function relTime(value) {
     if (!value) return 'never';
@@ -495,7 +570,7 @@
       ? (data.recent_scans || []).map(function (scan) {
           const summary = scan.summary || {};
           return '<a class="recent-item" href="#/scans/' + scan.id + '">' +
-            '<div class="recent-main"><div class="recent-title">' + esc(scan.target || 'Untitled target') + '</div>' +
+            '<div class="recent-main"><div class="recent-title">' + targetLabel(scan.target || 'Untitled target') + '</div>' +
             '<div class="recent-sub">' + esc(scan.customer_name || 'Unassigned') + ' · ' +
             esc(scan.scan_type) + ' · ' + esc(relTime(scan.created_at)) + '</div></div>' +
             '<div style="text-align:right">' + statusPill(scan.status) +
@@ -854,7 +929,7 @@
       const asset = await get('/assets/' + assetId);
       const scans = (asset.scans || []).map(function (scan) {
         return '<a class="recent-item" href="#/scans/' + scan.id + '"><div class="recent-main">' +
-          '<div class="recent-title">' + esc(scan.target) + '</div>' +
+          '<div class="recent-title">' + targetLabel(scan.target) + '</div>' +
           '<div class="recent-sub">' + esc(scan.scan_type) + ' · ' + esc(fmtDate(scan.created_at)) + '</div></div>' +
           statusPill(scan.status) + '</a>';
       }).join('') || emptyHtml('No scans for this asset');
@@ -997,6 +1072,9 @@
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab targets only. This disables certificate verification and is recorded in the scan event log.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry over plain HTTP if HTTPS fails. Use only for authorised lab targets; recorded in the scan event log.</span></label>' +
+        '</div><div class="form-grid" style="margin-top:12px">' +
+        '<label class="field"><span>Max pages to crawl</span><input class="input" id="opt-max-web-pages" type="number" min="0" max="50" value="10">' +
+          '<span class="hint">Same-origin HTML pages linked from the target. Set 0 to disable crawling.</span></label>' +
         '</div><div class="modal-note" style="margin-top:8px">Only scan applications you are authorized to test. Active checks send real attack payloads. TLS verification is on by default.</div></div>';
     }
     if (type === 'network') {
@@ -1008,11 +1086,15 @@
           '<option value="common">Common services</option><option value="web">Web ports</option>' +
           '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
         '<label class="field"><span>Custom ports <span class="muted">(optional)</span></span>' +
-          '<input class="input" id="opt-ports" placeholder="22,80,443 or 1-1024"></label></div>' +
+          '<input class="input" id="opt-ports" placeholder="22,80,443 or 1-1024"></label>' +
+        '<label class="field"><span>Max pages to crawl per web service</span>' +
+          '<input class="input" id="opt-max-web-pages" type="number" min="0" max="50" value="10">' +
+          '<span class="hint">Same-origin HTML links followed after an HTTP/HTTPS service is found. 0 disables crawling.</span></label></div>' +
         '<div class="checkbox-row" style="margin-top:12px">' +
         '<label class="check"><input type="checkbox" id="opt-external" checked><span><strong>Use Nmap</strong> when available for service detection (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
-        '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — headers, exposed files and Nuclei on discovered HTTP ports.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — detect HTTP/HTTPS on discovered ports, then crawl, check headers, exposed files, injection and Nuclei.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-scan-unresponsive" checked><span><strong>Scan hosts even if they do not answer ping</strong> — include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of discovered HTTPS services when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab services only; recorded in the scan event log.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry plain HTTP when HTTPS fails; recorded in the scan event log.</span></label></div>' +
@@ -1108,9 +1190,14 @@
           }).join('') + '</select></label>' +
         '<label class="field"><span>Group</span><select class="select" id="scan-group" name="group_id"></select></label>' +
         '<label class="field"><span>Asset <span class="muted">(optional)</span></span><select class="select" id="scan-asset" name="asset_id"></select></label>' +
-        '<label class="field full"><span>Target</span>' +
-          '<input class="input" id="scan-target" name="target" required maxlength="4000" placeholder="">' +
-          '<span class="hint" id="target-hint"></span></label>' +
+        '<div class="field full"><span id="scan-target-label">Target</span>' +
+          '<textarea class="textarea" id="scan-target" name="target" required rows="2" maxlength="100000" spellcheck="false" placeholder=""></textarea>' +
+          '<div class="row-actions hidden" id="scan-target-import" style="margin-top:8px;align-items:center">' +
+            '<button type="button" class="btn btn-sm" id="scan-import-targets">Import .txt / .csv</button>' +
+            '<input class="hidden" id="scan-target-file" type="file" accept=".txt,.csv,text/plain,text/csv" multiple>' +
+            '<span class="muted small" id="scan-target-count"></span>' +
+          '</div>' +
+          '<span class="hint" id="target-hint"></span></div>' +
         '<label class="field full hidden" id="github-token-field"><span>GitHub token <span class="muted">(optional, not stored)</span></span>' +
           '<input class="input" id="scan-github-token" type="password" maxlength="500" placeholder="ghp_… (read-only token for private repositories)">' +
           '<span class="hint">The token is used for this clone only and is never written to the database.</span></label>' +
@@ -1141,11 +1228,16 @@
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
+                const webPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
+                payload.options.max_web_pages = webPagesValue === undefined || webPagesValue === '' ? 10 : Number(webPagesValue);
               } else if (type === 'network') {
                 payload.options.profile = ($('#opt-profile', ctx.overlay) || {}).value || 'common';
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.nmap_vulners = !!($('#opt-vulners', ctx.overlay) || {}).checked;
                 payload.options.web_checks = !!($('#opt-web-checks', ctx.overlay) || {}).checked;
+                payload.options.scan_unresponsive_hosts = !!($('#opt-scan-unresponsive', ctx.overlay) || {}).checked;
+                const networkPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
+                payload.options.max_web_pages = networkPagesValue === undefined || networkPagesValue === '' ? 10 : Number(networkPagesValue);
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
                 payload.options.allow_http_fallback = !!($('#opt-http-fallback', ctx.overlay) || {}).checked;
@@ -1251,6 +1343,15 @@
           }).join('');
         }
 
+        const targetLabelEl = $('#scan-target-label', overlay);
+        const targetImport = $('#scan-target-import', overlay);
+        const targetCount = $('#scan-target-count', overlay);
+        function updateTargetCount() {
+          if (!targetCount) return;
+          const count = splitTargetText(targetInput.value).length;
+          targetCount.textContent = count ? count + ' target' + (count === 1 ? '' : 's') + ' entered' : '';
+        }
+
         function renderType() {
           const type = typeSelect.value;
           const config = SCAN_TYPES[type];
@@ -1258,12 +1359,18 @@
           const previousProfile = ($('#opt-profile', overlay) || {}).value || '';
           const previousPorts = ($('#opt-ports', overlay) || {}).value || '';
           targetInput.placeholder = config.placeholder;
+          targetInput.rows = type === 'network' ? 5 : 2;
+          targetInput.style.minHeight = type === 'network' ? '104px' : '44px';
+          if (targetLabelEl) targetLabelEl.textContent = type === 'network' ? 'Targets' : 'Target';
+          if (targetImport) targetImport.classList.toggle('hidden', type !== 'network');
           $('#target-hint', overlay).textContent = type === 'github'
             ? 'Public repositories work without a token. The clone is stored locally and deleted after the scan.'
             : (type === 'repo' ? 'Use an absolute path on the server. A relative path is resolved from the server working directory.' :
               (type === 'ad' ? 'The JSON report must already exist on the server.' :
                 (type === 'domain' ? 'Enter a bare domain such as example.com. Discovered subdomains are reported, not scanned automatically.' :
-                  'Only scan systems you own or have written permission to test.')));
+                  (type === 'network'
+                    ? 'One host, IP or CIDR per line. Import a .txt or .csv with one target per row (the first CSV column is used).'
+                    : 'Only scan systems you own or have written permission to test.'))));
           $('#scan-type-options', overlay).innerHTML = scanTypeOptionsHtml(type, agentOptionsHtml());
           const agentSelect = $('#opt-agent', overlay);
           if (agentSelect && previousAgent) {
@@ -1295,6 +1402,7 @@
               });
             }
           }
+          updateTargetCount();
         }
         function renderAssets() {
           const groupId = groupSelect.value ? Number(groupSelect.value) : null;
@@ -1341,6 +1449,7 @@
           });
           if (!found) return;
           if (found.identifier) targetInput.value = found.identifier;
+          updateTargetCount();
           if (setType) {
             typeSelect.value = ASSET_TYPE[found.kind] || 'network';
             renderType();
@@ -1350,6 +1459,34 @@
           assetSelect.value = String(found.id);
         }
 
+        targetInput.addEventListener('input', updateTargetCount);
+        const importButton = $('#scan-import-targets', overlay);
+        const importFile = $('#scan-target-file', overlay);
+        if (importButton && importFile) {
+          importButton.addEventListener('click', function () { importFile.click(); });
+          importFile.addEventListener('change', async function () {
+            try {
+              const files = Array.prototype.slice.call(importFile.files || []);
+              if (!files.length) return;
+              let imported = [];
+              for (let index = 0; index < files.length; index += 1) {
+                const file = files[index];
+                if (file.size > 5 * 1024 * 1024) throw new Error('Target file is too large (maximum 5 MB)');
+                const text = await file.text();
+                imported = imported.concat(parseImportedTargets(text));
+              }
+              if (!imported.length) throw new Error('No targets were found in the selected file(s)');
+              const merged = mergeTargetText(targetInput.value, imported);
+              targetInput.value = merged.join('\n');
+              updateTargetCount();
+              toast('Imported ' + imported.length + ' target' + (imported.length === 1 ? '' : 's'));
+            } catch (error) {
+              toast(errorText(error), 'error');
+            } finally {
+              importFile.value = '';
+            }
+          });
+        }
         typeSelect.addEventListener('change', renderType);
         customerSelect.addEventListener('change', function () { loadCustomer(false, false); });
         groupSelect.addEventListener('change', function () { renderAssets(); assetSelect.value = ''; renderType(); });
@@ -1363,6 +1500,7 @@
           if (initial.type) typeSelect.value = initial.type;
           renderType();
           if (initial.target && !targetInput.value) targetInput.value = initial.target;
+          updateTargetCount();
         });
       }
     });
@@ -1433,7 +1571,7 @@
         const active = ACTIVE_STATUSES.indexOf(scan.status) !== -1;
         return '<tr class="clickable" data-href="#/scans/' + scan.id + '">' +
           '<td><div class="cell-main">#' + scan.id + '</div><div class="cell-sub">' + esc(scan.scan_type) + '</div></td>' +
-          '<td><div class="table-target cell-main" title="' + esc(scan.target) + '">' + esc(scan.target) + '</div>' +
+          '<td><div class="table-target cell-main" title="' + esc(scan.target) + '">' + targetLabel(scan.target) + '</div>' +
             '<div class="cell-sub">' + esc(scan.customer_name || 'Unassigned') +
             (scan.asset_name ? ' · ' + esc(scan.asset_name) : (scan.group_name ? ' · ' + esc(scan.group_name) : '')) + '</div></td>' +
           '<td>' + statusPill(scan.status) +
@@ -1565,7 +1703,7 @@
             '<button class="btn btn-danger" data-action="delete-scan">Delete</button>') +
         '</div></div>' +
       '<section class="panel" style="margin-bottom:16px"><div class="scan-hero">' +
-        '<div class="scan-hero-top"><div class="scan-hero-main"><div class="scan-target">' + esc(scan.target) + '</div>' +
+        '<div class="scan-hero-top"><div class="scan-hero-main"><div class="scan-target" title="' + esc(scan.target) + '">' + targetLabel(scan.target) + '</div>' +
           '<div class="scan-sub"><span data-scan-status>' + statusPill(scan.status) + '</span>' +
           '<span class="tag">' + esc(scan.scan_type) + '</span>' +
           '<span>' + esc(scan.customer_name || 'Unassigned') + '</span>' +
@@ -1921,7 +2059,7 @@
       '</tr></thead><tbody>' + agent.jobs.map(function (job) {
         return '<tr><td class="mono small">' + esc(job.id.slice(0, 8)) + '…</td>' +
           '<td>' + (job.scan_id ? '<a href="#/scans/' + num(job.scan_id) + '">#' + num(job.scan_id) + '</a>' : '—') +
-            (job.scan_target ? '<div class="cell-sub truncate" style="max-width:220px" title="' + esc(job.scan_target) + '">' + esc(job.scan_target) + '</div>' : '') + '</td>' +
+            (job.scan_target ? '<div class="cell-sub truncate" style="max-width:220px" title="' + esc(job.scan_target) + '">' + targetLabel(job.scan_target) + '</div>' : '') + '</td>' +
           '<td><div class="cap-list">' + (job.modules || []).map(function (module) {
             return '<span class="tag">' + esc(module) + '</span>';
           }).join('') + '</div></td>' +
@@ -1937,7 +2075,7 @@
       '</tr></thead><tbody>' + agent.scans.map(function (scan) {
         return '<tr class="clickable" data-href="#/scans/' + num(scan.id) + '">' +
           '<td><div class="cell-main">#' + num(scan.id) + '</div><div class="cell-sub">' + esc(scan.scan_type) + '</div></td>' +
-          '<td><div class="truncate" style="max-width:280px" title="' + esc(scan.target) + '">' + esc(scan.target) + '</div></td>' +
+          '<td><div class="truncate" style="max-width:280px" title="' + esc(scan.target) + '">' + targetLabel(scan.target) + '</div></td>' +
           '<td>' + statusPill(scan.status) + '</td>' +
           '<td>' + severityChips(scan.summary) + '</td>' +
           '<td><div class="cell-main">' + esc(relTime(scan.created_at)) + '</div>' +
@@ -2306,8 +2444,13 @@
         '<div class="form-section" style="margin-top:0;padding-top:0;border-top:0"><h3>Modules</h3><div class="checkbox-row" style="flex-direction:column;gap:9px">' + checks + '</div>' +
           '<div class="modal-note" style="margin-top:9px">A network scan runs on its own: selecting it clears the other modules.</div></div>' +
         '<div class="form-section hidden" id="agent-network-section"><h3>Network scan from the agent</h3><div class="form-grid">' +
-          '<label class="field full"><span>Target</span><input class="input" id="agent-network-target" maxlength="4000" placeholder="192.168.1.0/24, 10.0.0.5 or hostname">' +
-            '<span class="hint">The scan starts from this endpoint, so private ranges reachable only from its network can be tested.</span></label>' +
+          '<div class="field full"><span>Targets</span><textarea class="textarea" id="agent-network-target" rows="4" maxlength="100000" spellcheck="false" placeholder="192.168.1.0/24, 10.0.0.5 or a list (one per line)"></textarea>' +
+            '<div class="row-actions" id="agent-target-import" style="margin-top:8px;align-items:center">' +
+              '<button type="button" class="btn btn-sm" id="agent-import-targets">Import .txt / .csv</button>' +
+              '<input class="hidden" id="agent-target-file" type="file" accept=".txt,.csv,text/plain,text/csv" multiple>' +
+              '<span class="muted small" id="agent-target-count"></span>' +
+            '</div>' +
+            '<span class="hint">One host, IP or CIDR per line. The scan starts from this endpoint, so private ranges reachable only from its network can be tested.</span></div>' +
           '<label class="field"><span>Port profile</span><select class="select" id="agent-network-profile">' +
             '<option value="common">Common services</option><option value="web">Web ports</option>' +
             '<option value="top1000">Top 1000 ports</option><option value="all">All ports (slow)</option></select></label>' +
@@ -2364,10 +2507,46 @@
         const networkSection = $('#agent-network-section', overlay);
         const pathsSection = $('#agent-paths-section', overlay);
         const networkCheck = $('#agent-mod-network', overlay);
+        const networkTarget = $('#agent-network-target', overlay);
+        const targetCount = $('#agent-target-count', overlay);
+        const importButton = $('#agent-import-targets', overlay);
+        const importFile = $('#agent-target-file', overlay);
+        function updateAgentTargetCount() {
+          if (!targetCount || !networkTarget) return;
+          const count = splitTargetText(networkTarget.value).length;
+          targetCount.textContent = count ? count + ' target' + (count === 1 ? '' : 's') + ' entered' : '';
+        }
+        if (networkTarget) networkTarget.addEventListener('input', updateAgentTargetCount);
+        if (importButton && importFile) {
+          importButton.addEventListener('click', function () { importFile.click(); });
+          importFile.addEventListener('change', async function () {
+            try {
+              const files = Array.prototype.slice.call(importFile.files || []);
+              if (!files.length) return;
+              let imported = [];
+              for (let index = 0; index < files.length; index += 1) {
+                const file = files[index];
+                if (file.size > 5 * 1024 * 1024) throw new Error('Target file is too large (maximum 5 MB)');
+                const text = await file.text();
+                imported = imported.concat(parseImportedTargets(text));
+              }
+              if (!imported.length) throw new Error('No targets were found in the selected file(s)');
+              const merged = mergeTargetText(networkTarget.value, imported);
+              networkTarget.value = merged.join('\n');
+              updateAgentTargetCount();
+              toast('Imported ' + imported.length + ' target' + (imported.length === 1 ? '' : 's'));
+            } catch (error) {
+              toast(errorText(error), 'error');
+            } finally {
+              importFile.value = '';
+            }
+          });
+        }
         function syncNetworkMode() {
           const enabled = !!(networkCheck && networkCheck.checked);
           networkSection.classList.toggle('hidden', !enabled);
           pathsSection.classList.toggle('hidden', enabled);
+          updateAgentTargetCount();
         }
         $$('#agent-scan-form input[type=checkbox]', overlay).forEach(function (input) {
           input.addEventListener('change', function () {
@@ -2910,7 +3089,8 @@
         '<label class="field"><span>Max repository size (MiB)</span><input class="input" id="guard-repo-mib" type="number" min="1" max="10240" value="' + Math.max(1, Math.round(num(settings.max_repo_bytes) / 1048576)) + '"></label>' +
         '<label class="field"><span>Max source file size (KiB)</span><input class="input" id="guard-source-kib" type="number" min="1" max="102400" value="' + Math.max(1, Math.round(num(settings.max_source_file_bytes) / 1024)) + '"></label>' +
         '<label class="field"><span>Max files per scan</span><input class="input" id="guard-max-files" type="number" min="1" max="1000000" value="' + num(settings.max_scan_files) + '"></label>' +
-        '<label class="field"><span>Max CIDR hosts</span><input class="input" id="guard-max-cidr" type="number" min="1" max="65536" value="' + num(settings.max_cidr_hosts) + '"></label>' +
+        '<label class="field"><span>Max hosts per network scan</span><input class="input" id="guard-max-cidr" type="number" min="1" max="65536" value="' + num(settings.max_cidr_hosts) + '">' +
+          '<span class="hint">Applies to a single CIDR and to the combined host count of an imported target list.</span></label>' +
         '<label class="field"><span>Agent job timeout (seconds)</span><input class="input" id="guard-agent-timeout" type="number" min="60" max="86400" value="' + num(settings.agent_job_timeout) + '"></label>' +
       '</div>' +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-guardrails">Save guardrails</button>' +

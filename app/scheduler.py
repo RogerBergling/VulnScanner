@@ -615,11 +615,12 @@ def send_notification(
         f"Scheduled scan {scan_id} for {schedule.target} finished with status: {status}\n\n"
         f"{message}"
     )
+    subject_target = " ".join(str(schedule.target or "").split())
     if email:
         try:
             _send_email(
                 email,
-                f"VulnScanner: Scan {schedule.scan_type} {schedule.target} - {status}",
+                f"VulnScanner: Scan {schedule.scan_type} {subject_target} - {status}",
                 body,
             )
             _log_delivery("email", email, "success", "delivered", scan_id=scan_id, schedule_id=schedule.id)

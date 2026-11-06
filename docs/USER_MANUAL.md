@@ -375,6 +375,7 @@ Options:
 | Use testssl.sh | off | Run deep TLS checks when testssl.sh is installed and enabled in Settings. |
 | Ignore TLS certificate errors | off | Disable certificate verification for self-signed/lab targets. The scan event log records that verification was disabled. |
 | Allow HTTPS → HTTP fallback | off | Retry a failed HTTPS request over plain HTTP. The scan event log records the downgrade. |
+| Max pages to crawl | 10 | Same-origin HTML pages linked from the target (0-50). Set 0 to disable crawling. |
 
 Web scanning does not log in, submit destructive forms, brute force, or exploit
 SQL injection/XSS. It reports indicators that require manual validation.
@@ -385,12 +386,20 @@ Targets:
 
 - Hostname or IP: `web01.example.com`, `192.0.2.10`
 - CIDR: `192.0.2.0/30` (up to `VS_MAX_CIDR_HOSTS`, default 256 addresses)
+- Multiple hosts/CIDRs: enter one per line, or use **Import .txt / .csv**.
+  Imported files use one target per row; for CSV the first column is used and
+  common header rows (`ip`, `host`, `target`, …) are ignored. Duplicate targets
+  are removed. The combined list is bounded by the same host limit.
 - IPv6 literals are accepted where the network stack supports them.
 
 The built-in engine performs TCP connect checks against a configured port list
 and reads service banners. It flags risky exposed services such as Redis,
 MongoDB, Elasticsearch, SMB, RDP, Telnet, VNC, unauthenticated Docker API and
-database ports.
+database ports. When an HTTP or HTTPS service is found, the scan automatically
+goes deeper: it fingerprints the service, checks security headers and exposed
+files, crawls a bounded number of same-origin pages, runs safe injection probes,
+and optionally invokes Nuclei and testssl.sh. This also applies to web services
+on non-standard ports.
 
 Options:
 
@@ -401,6 +410,9 @@ Options:
 | Ports | profile | Explicit list/ranges, for example `22,80,443,8000-8100`. Overrides the profile. |
 | Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
+| Web vulnerability checks | on | Detect HTTP/HTTPS, then crawl, check headers/exposed files, run injection probes and optional Nuclei. |
+| Max pages to crawl per web service | 10 | Same-origin HTML pages followed per discovered web service (0-50). |
+| Scan hosts even if they do not answer ping | on | Include firewalled or ICMP-blocked hosts. Disable to run an ICMP pre-check and skip silent hosts (server scans only). If ping is unavailable, all hosts are still scanned. |
 | Ignore TLS certificate errors | off | Disable certificate verification for discovered HTTPS services. Recorded in the scan event log. |
 | Allow HTTPS → HTTP fallback | off | Retry plain HTTP when HTTPS fails. Recorded in the scan event log. |
 | NSE vulners | off | With external tools, run the Nmap `vulners` script (server-side scans only). |

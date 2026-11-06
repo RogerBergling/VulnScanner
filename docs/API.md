@@ -598,14 +598,18 @@ Target normalisation:
 | Type | Accepted target |
 | --- | --- |
 | `web` | Hostname or `http(s)://` URL; hostname gets `https://`. |
-| `network` | Hostname, IP or CIDR. |
+| `network` | Hostname, IP, CIDR, or a newline/comma-separated list of those entries. The UI imports `.txt`/`.csv` files with one target per row (the first CSV column is used). |
 | `repo` | Existing absolute/relative directory on the server. |
 | `github` | `https://github.com/owner/repo` or `owner/repo`. |
 | `ad` | Existing JSON report file on the server (prefer `/api/ad/import`). |
 
+A multi-target network list is normalised to one target per line. The total
+expanded host count is bounded by `max_cidr_hosts` (default 256), whether the
+targets come from individual hosts, CIDRs or an imported list.
+
 For a delegated `network` scan, the target is validated and sent to the agent.
 The agent must be able to reach it; private ranges are common. The server host
-limit (default 256 hosts) still applies.
+limit (default 256 hosts) applies to the combined target list.
 
 Options are filtered per scan type:
 
@@ -616,7 +620,8 @@ Options are filtered per scan type:
     "external_tools": false,
     "testssl": false,
     "ignore_tls_errors": false,
-    "allow_http_fallback": false
+    "allow_http_fallback": false,
+    "max_web_pages": 10
   },
   "network": {
     "ports": "22,80,443,8000-8100",
@@ -624,7 +629,9 @@ Options are filtered per scan type:
     "connect_timeout": 0.45,
     "external_tools": false,
     "nmap_vulners": false,
+    "scan_unresponsive_hosts": true,
     "web_checks": true,
+    "max_web_pages": 10,
     "max_web_hosts": 20,
     "testssl": false,
     "max_testssl_hosts": 5,
@@ -669,9 +676,9 @@ Options are filtered per scan type:
 Invalid port profiles, non-numeric timeouts, missing targets and invalid URLs
 return `400`/`422`. Numeric network options are clamped to safe ranges
 (`max_auth_hosts` 1-256, `auth_timeout` 3-90, `max_web_hosts` 1-200,
-`max_testssl_hosts` 0-50, ports 1-65535); invalid `target_os` or
-`winrm_transport` values return `400`. Domain options are clamped to
-`max_words` 1-50000, `workers` 1-100 and `max_subdomains` 1-5000. Domain
+`max_web_pages` 0-50, `max_testssl_hosts` 0-50, ports 1-65535); invalid
+`target_os` or `winrm_transport` values return `400`. Domain options are clamped
+to `max_words` 1-50000, `workers` 1-100 and `max_subdomains` 1-5000. Domain
 targets must be bare domains, not URLs, IP addresses or wildcards.
 
 Authenticated network options:
@@ -692,6 +699,9 @@ Web/TLS options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `web_checks` | `true` | Probe discovered HTTP/HTTPS services (including non-standard ports), then run headers, exposed-file, same-origin crawl and injection checks. |
+| `max_web_pages` | `10` | Maximum same-origin HTML pages crawled per discovered web service (0-50). |
+| `scan_unresponsive_hosts` | `true` | Scan hosts that do not answer ICMP. Set to `false` to run an ICMP pre-check and skip silent hosts; if ping is unavailable, all hosts are scanned and a warning is logged. |
 | `ignore_tls_errors` | `false` | Disable certificate verification for web/network HTTP checks. Recorded as a scan warning. |
 | `allow_http_fallback` | `false` | Retry an HTTPS target over plain HTTP if HTTPS fails. Recorded as a scan warning. |
 
@@ -916,8 +926,9 @@ Returns `201` with `scan_id`, `agent_online`, a message and the scan detail.
 Modules: `system`, `packages`, `ports`, `network`, `secrets`, `repo`, `ad`.
 `secrets`/`repo` require paths; `ad` requires a Windows agent. `network` must be
 the only module in the job, requires `target`, and requires an agent that
-advertises the `network` capability. Revoked agents return `409`; unsupported or
-invalid combinations return `400`.
+advertises the `network` capability. The `target` may be a single host/CIDR or a
+newline/comma-separated list bounded by the agent host limit. Revoked agents
+return `409`; unsupported or invalid combinations return `400`.
 
 ### `DELETE /api/agents/{agent_id}`
 

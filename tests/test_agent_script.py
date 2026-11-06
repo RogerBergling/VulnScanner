@@ -137,8 +137,15 @@ def test_agent_network_port_and_target_parsing(agent):
         agent.agent_parse_ports("70000")
     assert agent.agent_expand_targets("192.0.2.0/30") == ["192.0.2.1", "192.0.2.2"]
     assert agent.agent_expand_targets("192.0.2.10") == ["192.0.2.10"]
+    assert agent.agent_expand_targets(
+        "192.0.2.10\n192.0.2.11,192.0.2.12;192.0.2.10"
+    ) == ["192.0.2.10", "192.0.2.11", "192.0.2.12"]
     with pytest.raises(ValueError, match="limit is 256"):
         agent.agent_expand_targets("10.0.0.0/23")
+    with pytest.raises(ValueError, match="more than 256 hosts"):
+        agent.agent_expand_targets(
+            "\n".join(f"10.0.{index // 256}.{index % 256}" for index in range(1, 258))
+        )
 
 
 def test_agent_collect_network(agent, monkeypatch):

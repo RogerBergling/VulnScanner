@@ -145,6 +145,7 @@ from .utils import (
     normalize_severity,
     normalize_target_url,
     parse_dt,
+    parse_target_list,
     risk_label,
     risk_score,
     secure_filename,
@@ -840,6 +841,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "testssl",
             "ignore_tls_errors",
             "allow_http_fallback",
+            "scan_unresponsive_hosts",
         ],
         "repo": [
             "include_secrets",
@@ -905,6 +907,14 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
             clean[key] = max(low, min(high, value))
+    if scan_type in {"web", "network"} and "max_web_pages" in options:
+        try:
+            value = int(options["max_web_pages"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="max_web_pages must be an integer"
+            ) from exc
+        clean["max_web_pages"] = max(0, min(50, value))
     if scan_type == "domain":
         for key, low, high in (
             ("max_words", 1, 50_000),
@@ -926,16 +936,33 @@ def _normalize_scan_target(scan_type: str, target: str) -> str:
         if scan_type == "web":
             return normalize_target_url(target)
         if scan_type == "network":
-            kind, value = validate_host_target(target)
-            if kind == "cidr":
-                network = ipaddress.ip_network(value, strict=False)
-                limit = get_limit("max_cidr_hosts", MAX_CIDR_HOSTS)
-                if network.num_addresses > limit:
+            entries = parse_target_list(target)
+            if not entries:
+                raise ValueError("A network target is required")
+            limit = get_limit("max_cidr_hosts", MAX_CIDR_HOSTS)
+            normalized: list[str] = []
+            total_hosts = 0
+            for entry in entries:
+                kind, value = validate_host_target(entry)
+                if kind == "cidr":
+                    network = ipaddress.ip_network(value, strict=False)
+                    if network.num_addresses > limit:
+                        raise ValueError(
+                            f"Network {value} contains {network.num_addresses} addresses; "
+                            f"limit is {limit}. Scan smaller ranges."
+                        )
+                    total_hosts += network.num_addresses
+                else:
+                    total_hosts += 1
+                if total_hosts > limit:
                     raise ValueError(
-                        f"Network contains {network.num_addresses} addresses; "
-                        f"limit is {limit}. Scan smaller ranges."
+                        f"Target list expands to more than {limit} hosts. "
+                        "Reduce the number of targets or scan smaller ranges."
                     )
-            return value
+                normalized.append(value)
+            # Keep one entry per line so the stored target remains readable in
+            # the UI, reports and agent job payloads.
+            return "\n".join(normalized)
         if scan_type == "github":
             normalized = normalize_repo_target(target)
             if not normalized.startswith(("http://", "https://")):

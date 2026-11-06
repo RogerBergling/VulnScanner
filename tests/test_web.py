@@ -10,6 +10,8 @@ from app.scanners.web import (
     _run_nuclei,
     _session,
     _title,
+    crawl_same_origin,
+    extract_same_origin_links,
 )
 from tests.helpers import DummyContext, FakeResponse, FakeSession
 
@@ -252,3 +254,44 @@ def test_get_follows_same_host_redirect():
     response = _get(session, "https://example.test/start")
     assert response.status_code == 200
     assert session.calls == ["https://example.test/start", "https://example.test/final"]
+
+
+def test_extract_same_origin_links_filters_external_and_binary_urls():
+    body = (
+        '<a href="/about">About</a>'
+        '<a href="https://example.test/contact?x=1&amp;y=2">Contact</a>'
+        '<a href="https://elsewhere.test/secret">External</a>'
+        '<a href="/static/app.js">Script</a>'
+        '<a href="/logout">Logout</a>'
+        '<a href="#section">Fragment</a>'
+    )
+    assert extract_same_origin_links("https://example.test/", body) == [
+        "https://example.test/about",
+        "https://example.test/contact?x=1&y=2",
+    ]
+
+
+def test_crawl_same_origin_is_bounded_and_stays_on_origin():
+    pages = {
+        "https://example.test/": (
+            '<a href="/a">A</a><a href="/b">B</a><a href="https://elsewhere.test/x">X</a>'
+        ),
+        "https://example.test/a": '<a href="/c">C</a>',
+        "https://example.test/b": "no links",
+    }
+
+    def handler(url):
+        return FakeResponse(
+            url=url,
+            body=pages.get(url, "missing"),
+            status_code=200 if url in pages else 404,
+        )
+
+    session = FakeSession(handler)
+    ctx = DummyContext({"max_web_pages": 2})
+    crawled = crawl_same_origin(session, "https://example.test/", pages["https://example.test/"], ctx)
+    assert [url for url, _response, _body in crawled] == [
+        "https://example.test/a",
+        "https://example.test/b",
+    ]
+    assert all("elsewhere.test" not in url for url in session.calls)

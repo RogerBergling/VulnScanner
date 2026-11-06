@@ -212,8 +212,8 @@ directly.
 
 | Engine | Module | Approach |
 | --- | --- | --- |
-| Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei and testssl.sh. |
-| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, built-in web checks on discovered HTTP ports, optional HTTP/TLS inspection, testssl.sh and Nmap XML parsing, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results. |
+| Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, same-origin crawling, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei and testssl.sh. |
+| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, HTTP/HTTPS discovery with deep web checks (headers, exposed files, bounded crawl and injection probes), optional HTTP/TLS inspection, testssl.sh and Nmap XML parsing, optional ICMP reachability filtering, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results. |
 | Authenticated host | `scanners/authenticated.py` | Chooses SSH or WinRM per host, performs one authentication attempt, collects OS/patch/package/user/configuration inventory, parses it and emits host findings and OSV package CVEs. |
 | Repository | `scanners/repository.py` | Local path or GitHub clone, then secrets, dependencies and source review, plus optional Trivy. Temporary clones are deleted in a `finally` block. |
 | Dependencies | `scanners/dependencies.py` | Manifest/lockfile parsers for npm, Python, Go, Rust, PHP, Ruby, Java and .NET; OSV.dev batch queries; optional `osv-scanner` supplement. |

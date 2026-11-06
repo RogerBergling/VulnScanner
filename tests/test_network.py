@@ -4,6 +4,8 @@ from app.scanners.network import (
     PortResult,
     _add_port_findings,
     _expand_hosts,
+    _filter_responsive_hosts,
+    _select_web_candidates,
     parse_nmap_xml,
     process_agent_network_payload,
 )
@@ -57,6 +59,53 @@ def test_expand_hosts_for_single_and_cidr():
     assert _expand_hosts("192.0.2.10/32") == ["192.0.2.10"]
     with pytest.raises(ValueError, match="limit is 256"):
         _expand_hosts("10.0.0.0/23")
+
+
+def test_expand_hosts_accepts_imported_target_list():
+    target = "192.0.2.10\n192.0.2.11, 192.0.2.12;192.0.2.10\n# comment"
+    assert _expand_hosts(target) == ["192.0.2.10", "192.0.2.11", "192.0.2.12"]
+
+
+def test_expand_hosts_enforces_total_list_limit():
+    target = "\n".join(
+        f"10.0.{index // 256}.{index % 256}" for index in range(1, 258)
+    )
+    with pytest.raises(ValueError, match="more than 256 hosts"):
+        _expand_hosts(target)
+
+
+def test_icmp_filter_keeps_responsive_and_inconclusive_hosts(monkeypatch):
+    import app.scanners.network as network
+
+    monkeypatch.setattr(
+        network,
+        "_ping_host",
+        lambda host, timeout=1.0: False if host == "192.0.2.99" else True,
+    )
+    ctx = DummyContext()
+    assert _filter_responsive_hosts(["192.0.2.10", "192.0.2.99"], ctx) == ["192.0.2.10"]
+    assert any("skipped 1 host" in message for _level, message in ctx.logs)
+
+
+def test_icmp_filter_scans_all_when_ping_is_unavailable(monkeypatch):
+    import app.scanners.network as network
+
+    monkeypatch.setattr(network, "_ping_host", lambda host, timeout=1.0: None)
+    ctx = DummyContext()
+    assert _filter_responsive_hosts(["192.0.2.10"], ctx) == ["192.0.2.10"]
+    assert any("unavailable" in message for _level, message in ctx.logs)
+
+
+def test_select_web_candidates_includes_unknown_ports_for_web_checks():
+    known = [PortResult("192.0.2.10", 80)]
+    unknown = [PortResult("192.0.2.10", 5001), PortResult("192.0.2.10", 9001)]
+    assert _select_web_candidates(known + unknown, include_unknown=False) == known
+    selected = _select_web_candidates(known + unknown)
+    assert [(item.host, item.port) for item in selected] == [
+        ("192.0.2.10", 80),
+        ("192.0.2.10", 5001),
+        ("192.0.2.10", 9001),
+    ]
 
 
 def test_add_port_findings_severities_and_banner():
@@ -141,11 +190,12 @@ def test_scan_runs_web_checks_on_http_ports(monkeypatch):
     def fake_probe(host, port, timeout):
         return PortResult(host, port)
 
-    def fake_http(result, host, port, open_ports, ctx):
+    def fake_http(result, host, port, open_ports, ctx, probe_timeout=6.0):
         return f"http://{host}:{port}/", object(), "<html>ok</html>"
 
     def fake_web(result, ctx, url, response, body):
         checked.append(url)
+        return 0
 
     monkeypatch.setattr(network, "_probe_port", fake_probe)
     monkeypatch.setattr(network, "_http_service", fake_http)
@@ -154,6 +204,70 @@ def test_scan_runs_web_checks_on_http_ports(monkeypatch):
         DummyContext({"ports": "80", "web_checks": True}, target="127.0.0.1")
     )
     assert checked == ["http://127.0.0.1:80/"]
+
+
+def test_scan_detects_web_service_on_nonstandard_port(monkeypatch):
+    import app.scanners.network as network
+
+    checked: list[str] = []
+
+    def fake_probe(host, port, timeout):
+        return PortResult(host, port)
+
+    def fake_http(result, host, port, open_ports, ctx, probe_timeout=6.0):
+        return f"http://{host}:{port}/", object(), "<html>ok</html>"
+
+    def fake_web(result, ctx, url, response, body):
+        checked.append(url)
+        return 0
+
+    monkeypatch.setattr(network, "_probe_port", fake_probe)
+    monkeypatch.setattr(network, "_http_service", fake_http)
+    monkeypatch.setattr(network, "_web_vulnerability_checks", fake_web)
+    network.scan(
+        DummyContext({"ports": "9001", "web_checks": True}, target="127.0.0.1")
+    )
+    assert checked == ["http://127.0.0.1:9001/"]
+
+
+def test_scan_skips_unresponsive_hosts_when_ping_check_enabled(monkeypatch):
+    import app.scanners.network as network
+
+    probed: list[str] = []
+
+    def fake_probe(host, port, timeout):
+        probed.append(host)
+        return None
+
+    monkeypatch.setattr(network, "_probe_port", fake_probe)
+    monkeypatch.setattr(
+        network,
+        "_ping_host",
+        lambda host, timeout=1.0: host != "192.0.2.99",
+    )
+    result = network.scan(
+        DummyContext(
+            {"ports": "80", "scan_unresponsive_hosts": False},
+            target="192.0.2.10\n192.0.2.99",
+        )
+    )
+    assert result.metadata["host_count"] == 1
+    assert "192.0.2.10" in probed
+    assert "192.0.2.99" not in probed
+
+
+def test_scan_includes_unresponsive_hosts_by_default(monkeypatch):
+    import app.scanners.network as network
+
+    def fail_ping(*_args, **_kwargs):
+        raise AssertionError("ping must not run unless the option is disabled")
+
+    monkeypatch.setattr(network, "_ping_host", fail_ping)
+    monkeypatch.setattr(network, "_probe_port", lambda host, port, timeout: None)
+    result = network.scan(
+        DummyContext({"ports": "80"}, target="192.0.2.10\n192.0.2.99")
+    )
+    assert result.metadata["host_count"] == 2
 
 
 def test_scan_tolerates_invalid_workers_option(monkeypatch):

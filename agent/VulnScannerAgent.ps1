@@ -554,6 +554,31 @@ function Expand-AgentTarget {
     param([string]$Value)
     $Value = ("" + $Value).Trim()
     if (-not $Value) { throw "A network scan target is required." }
+    $entries = @($Value -split "[\r\n,;]+" |
+        ForEach-Object { $_.Trim().Trim([char[]]@('"', "'")) } |
+        Where-Object { $_ -and -not $_.StartsWith("#") })
+    if ($entries.Count -eq 0) { throw "A network scan target is required." }
+    $seen = @{}
+    $all = New-Object System.Collections.ArrayList
+    foreach ($entry in $entries) {
+        $single = @(Expand-AgentTargetSingle -Value $entry)
+        foreach ($hostValue in $single) {
+            if (-not $seen.ContainsKey($hostValue)) {
+                $seen[$hostValue] = $true
+                [void]$all.Add($hostValue)
+            }
+        }
+    }
+    if ($all.Count -gt 256) {
+        throw "Target list expands to more than 256 hosts; reduce the number of targets."
+    }
+    return @($all)
+}
+
+function Expand-AgentTargetSingle {
+    param([string]$Value)
+    $Value = ("" + $Value).Trim()
+    if (-not $Value) { throw "A network scan target is required." }
     if ($Value.Contains("/")) {
         $parts = $Value.Split("/")
         if ($parts.Count -ne 2) { throw "Invalid CIDR range: $Value" }
