@@ -83,12 +83,15 @@ Nessus-class vulnerability scanner with:
 ### Phase 3 — AD report import and intelligence
 
 1. Native PingCastle XML report parsing — **done** (parser, import API, GUI
-   upload and tests). Purple Knight native import still needs a sample file
-   from the operator.
-2. Delta/trend reporting: new, resolved and changed findings between scans
-   of the same asset.
-3. Compliance mapping packs (CIS, ISO 27001, PCI DSS 4.0) reporting findings
-   against controls.
+   upload and tests). Purple Knight native import — **skipped** per operator
+   decision.
+2. Delta/trend reporting — **done** (scan detail now offers **Delta vs
+   previous**: new/fixed/severity-changed findings and an improved badge,
+   backed by `/api/trends/compare`).
+3. Compliance mapping packs — **done**
+   (`app/scanners/compliance.py`: curated PCI DSS 4.0, ISO/IEC 27001:2022
+   and CIS Controls v8 subsets; the scan page's **Compliance** button maps
+   findings to controls with severity counts, guidance and samples).
 
 ### Phase 4 — Greenbone/OpenVAS optional engine
 

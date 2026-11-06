@@ -1723,6 +1723,48 @@
   // ---------------------------------------------------------------------------
   // Scan detail
   // ---------------------------------------------------------------------------
+  function deltaHtml(delta) {
+    if (delta.error) return '<p class="muted">' + esc(delta.error) + '</p>';
+    const rows = (delta.new_findings_list || []).map(function (item) {
+      return '<tr><td><span class="badge sev-' + sev(item.severity) + '">' + esc(item.severity) + '</span></td><td class="danger-text">+ ' + esc(item.title) + '</td></tr>';
+    }).join('') || '<tr><td colspan="2" class="muted">No new findings</td></tr>';
+    const fixed = (delta.fixed_findings_list || []).map(function (item) {
+      return '<tr><td><span class="badge sev-' + sev(item.severity) + '">' + esc(item.severity) + '</span></td><td class="ok-text">− ' + esc(item.title) + '</td></tr>';
+    }).join('') || '<tr><td colspan="2" class="muted">Nothing fixed</td></tr>';
+    const changed = (delta.severity_changes || []).map(function (item) {
+      return '<tr><td>' + esc(item.title) + '</td><td>' + esc(item.old_severity) + ' → ' + esc(item.new_severity) + '</td></tr>';
+    }).join('') || '<tr><td colspan="2" class="muted">No severity changes</td></tr>';
+    return '<div class="summary-strip" style="margin-bottom:12px">' +
+      '<span class="badge sev-' + (delta.improved ? 'low' : 'high') + '">' + (delta.improved ? 'improved' : 'not improved') + '</span>' +
+      '<span class="tag">' + num(delta.new_findings) + ' new</span>' +
+      '<span class="tag">' + num(delta.fixed_findings) + ' fixed</span>' +
+      '<span class="tag">' + num(delta.unchanged) + ' unchanged</span></div>' +
+      '<h4>New findings</h4><table class="table"><tbody>' + rows + '</tbody></table>' +
+      '<h4 style="margin-top:12px">Fixed findings</h4><table class="table"><tbody>' + fixed + '</tbody></table>' +
+      '<h4 style="margin-top:12px">Severity changes</h4><table class="table"><tbody>' + changed + '</tbody></table>';
+  }
+
+  function complianceHtml(report) {
+    const frameworks = (report.frameworks || []);
+    if (!frameworks.length) return '<p class="muted">No framework controls were matched by this scan\'s findings.</p>';
+    return frameworks.map(function (framework) {
+      const controls = (framework.controls || []).map(function (control) {
+        const badges = Object.keys(control.severity || {}).map(function (key) {
+          return '<span class="badge sev-' + key + '">' + num(control.severity[key]) + ' ' + key + '</span>';
+        }).join('');
+        const findings = (control.findings || []).map(function (finding) {
+          return '<div class="tool-row"><span class="tool-name">' + esc(finding.title) + '</span>' +
+            '<span class="badge sev-' + sev(finding.severity) + '">' + esc(finding.severity) + '</span>' +
+            (finding.cve ? '<span class="tool-version mono">' + esc(finding.cve) + '</span>' : '<span class="tool-version">' + esc(finding.location || '') + '</span>') + '</div>';
+        }).join('');
+        return '<div class="compliance-control"><div class="compliance-head"><span class="mono">' + esc(control.id) + '</span><strong>' + esc(control.title) + '</strong>' +
+          '<span class="spacer"></span>' + badges + '</div>' +
+          '<p class="muted small" style="margin:4px 0 6px">' + esc(control.guidance) + '</p>' + findings + '</div>';
+      }).join('');
+      return '<h4>' + esc(framework.name) + '</h4>' + controls;
+    }).join('<div style="height:14px"></div>');
+  }
+
   function findingDetailHtml(finding) {
     const evidence = finding.evidence
       ? '<div class="full"><h4>Evidence</h4><pre class="evidence-block">' + esc(finding.evidence) + '</pre></div>'
@@ -1806,6 +1848,8 @@
           '<a class="btn" href="/api/scans/' + scan.id + '/export?format=html" target="_blank" rel="noopener">HTML report</a>' +
           '<a class="btn" href="/api/scans/' + scan.id + '/export?format=json" download>JSON</a>' +
           '<a class="btn" href="/api/scans/' + scan.id + '/export?format=csv" download>CSV</a>' +
+          (scan.previous_scan_id && !active ? '<button class="btn" data-action="scan-delta">Delta vs previous</button>' : '') +
+          (scan.finding_count ? '<button class="btn" data-action="scan-compliance">Compliance</button>' : '') +
           (scan.scan_type !== 'agent' && !active ? '<button class="btn" data-action="rescan">Rescan</button>' : '') +
           (active ? '<button class="btn btn-danger" data-action="cancel-scan">Cancel</button>' :
             '<button class="btn btn-danger" data-action="delete-scan">Delete</button>') +
@@ -1918,6 +1962,28 @@
             const created = await post('/scans/' + scan.id + '/rescan', {});
             toast('Rescan queued'); refreshActiveBadge();
             location.hash = '#/scans/' + created.id;
+          } catch (error) { toast(errorText(error), 'error'); }
+        });
+      } else if (act === 'scan-delta') {
+        runWithButton(action, async function () {
+          try {
+            const delta = await get('/trends/compare?older_scan_id=' + scan.previous_scan_id + '&newer_scan_id=' + scan.id);
+            openModal({
+              title: 'Delta vs previous scan',
+              size: 'wide',
+              content: deltaHtml(delta)
+            });
+          } catch (error) { toast(errorText(error), 'error'); }
+        });
+      } else if (act === 'scan-compliance') {
+        runWithButton(action, async function () {
+          try {
+            const report = await get('/scans/' + scan.id + '/compliance');
+            openModal({
+              title: 'Compliance mapping',
+              size: 'wide',
+              content: complianceHtml(report)
+            });
           } catch (error) { toast(errorText(error), 'error'); }
         });
       }

@@ -501,6 +501,14 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tool-path { flex: 1; color: var(--text-3); font-size: 11px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-version { color: var(--text-2); font-size: 11px; }
 .ok-text { color: var(--ok); }
+.compliance-control {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  margin-bottom: 10px; background: var(--surface-2);
+}
+.compliance-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.compliance-head .mono { color: var(--accent); font-weight: 700; }
 .warn-text { color: var(--high); }
 .danger-text { color: var(--critical); }
 

@@ -1159,6 +1159,15 @@ def _scan_detail(scan_id: int) -> dict[str, Any]:
             scan["agent"] = None
         scan["finding_count"] = len(findings)
         scan["credentials"] = scan_credentials_public(scan_id)
+        if scan.get("asset_id"):
+            previous = conn.execute(
+                "SELECT id FROM scans WHERE asset_id = ? AND status = 'completed' "
+                "AND id < ? ORDER BY id DESC LIMIT 1",
+                (scan["asset_id"], scan_id),
+            ).fetchone()
+            scan["previous_scan_id"] = previous["id"] if previous else None
+        else:
+            scan["previous_scan_id"] = None
     return scan
 
 
@@ -2758,6 +2767,15 @@ def trends_compare(
 ) -> dict[str, Any]:
     from .trends import compare_scans
     return compare_scans(older_scan_id, newer_scan_id)
+
+
+@router.get("/scans/{scan_id}/compliance")
+def scan_compliance_report(scan_id: int) -> dict[str, Any]:
+    from .scanners.compliance import scan_compliance
+
+    scan = _scan_detail(scan_id)
+    findings = scan.get("findings") or []
+    return scan_compliance(findings)
 
 
 @router.get("/trends/assets/{asset_id}")
