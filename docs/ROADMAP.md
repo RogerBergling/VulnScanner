@@ -56,8 +56,12 @@ Nessus-class vulnerability scanner with:
    parameterized URLs discovered by the built-in injection probes, bounded by
    `max_sqlmap_targets`; GPL tool invoked as a separate process, never
    linked/bundled).
-6. **Risk scoring upgrade.** EPSS enrichment — **done**; KEV-weighted risk
-   score and MITRE ATT&CK tags remain open.
+6. **Risk scoring upgrade.** EPSS enrichment — **done**; KEV/EPSS-weighted
+   risk score — **done** (`utils.context_risk_score`: boosts critical/high
+   findings that are KEV-listed or high-EPSS, capped to the 0-100 scale);
+   MITRE ATT&CK mapping — **done** (`app/scanners/attack.py`: curated
+   CWE/category → technique mapping attached as `raw.attack`, shown as
+   ATT&CK/KEV/EPSS tags in the findings table).
 
 ### Phase 2 — Master / satellite architecture (DMZ scanning)
 

@@ -1704,6 +1704,14 @@
     const statusOptions = ['open', 'acknowledged', 'false_positive', 'accepted', 'fixed'].map(function (value) {
       return '<option value="' + value + '"' + (value === status ? ' selected' : '') + '>' + value.replace(/_/g, ' ') + '</option>';
     }).join('');
+    const attack = (finding.raw && Array.isArray(finding.raw.attack)) ? finding.raw.attack : [];
+    const attackTags = attack.slice(0, 3).map(function (technique) {
+      return '<span class="tag tag-attack" title="' + esc(technique.id + ' ' + technique.name + ' — ' + technique.tactic) + '">' +
+        esc(technique.id) + ' · ' + esc(technique.tactic) + '</span>';
+    }).join('');
+    const kev = finding.raw && finding.raw.kev ? '<span class="tag tag-kev" title="CISA Known Exploited Vulnerability' + (finding.raw.kev.known_ransomware ? '; known ransomware use' : '') + '">KEV</span>' : '';
+    const epss = finding.raw && finding.raw.epss && finding.raw.epss.percentile
+      ? '<span class="tag tag-epss" title="EPSS exploitation likelihood percentile">EPSS ' + Math.round(finding.raw.epss.percentile * 100) + '%</span>' : '';
     return '<tr class="finding-row" data-severity="' + sev(finding.severity) + '" data-status="' + esc(status) + '">' +
       '<td>' + sevBadge(finding.severity) + '</td>' +
       '<td class="finding-title-cell"><div class="finding-title">' + esc(finding.title) + '</div>' +
@@ -1711,6 +1719,7 @@
           (finding.cve ? '<span class="tag">' + esc(finding.cve) + '</span>' : '') +
           (finding.cwe ? '<span class="tag">' + esc(finding.cwe) + '</span>' : '') +
           (finding.cvss !== null && finding.cvss !== undefined ? '<span class="tag">CVSS ' + esc(finding.cvss) + '</span>' : '') +
+          kev + epss + attackTags +
         '</div></td>' +
       '<td>' + esc(finding.category) + '</td>' +
       '<td><div class="truncate" style="max-width:240px" title="' + esc(finding.location) + '">' + esc(finding.location || '—') + '</div></td>' +

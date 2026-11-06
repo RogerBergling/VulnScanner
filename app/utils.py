@@ -58,6 +58,37 @@ def risk_score(summary: dict[str, int]) -> int:
     return int(min(100, round(weighted)))
 
 
+def context_risk_score(summary: dict[str, int], findings: list[dict]) -> int:
+    """Risk score that accounts for exploitation context.
+
+    Adds to the base severity score when critical/high findings are known to
+    be exploited (CISA KEV) or have a high EPSS exploitation likelihood, so
+    the dashboard prioritises what attackers actually use. The boost is
+    capped so the score stays on the same 0-100 scale as ``risk_score``.
+    """
+    base = risk_score(summary)
+    boost = 0.0
+    for finding in findings:
+        if finding.get("severity") not in {"critical", "high"}:
+            continue
+        raw = finding.get("raw") or {}
+        if raw.get("kev"):
+            boost += 10
+            continue
+        epss = raw.get("epss")
+        if not isinstance(epss, dict):
+            continue
+        try:
+            percentile = float(epss.get("percentile") or 0)
+        except (TypeError, ValueError):
+            continue
+        if percentile >= 0.9:
+            boost += 6
+        elif percentile >= 0.5:
+            boost += 3
+    return int(min(100, base + min(boost, 40)))
+
+
 def risk_label(score: int) -> str:
     if score >= 70:
         return "Critical"

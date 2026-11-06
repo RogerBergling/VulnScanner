@@ -17,6 +17,7 @@ from .database import (
 from .discovery import record_scan_inventory, track_historical_findings
 from .scanners.ad import process_ad_report, scan_ad_report
 from .scanners.agent import process_agent_payload
+from .scanners.attack import enrich_finding_with_attack
 from .scanners.base import ScanCancelled, ScanContext, ScanResult
 from .scanners.kev import enrich_finding
 from .scanners.network import process_agent_network_payload, scan as scan_network
@@ -25,7 +26,7 @@ from .scanners.pingcastle import parse_pingcastle_xml, scan_pingcastle_report
 from .scanners.repository import scan_repository
 from .scanners.subdomains import scan_subdomains
 from .scanners.web import scan as scan_web
-from .utils import risk_label, risk_score, severity_summary, truncate
+from .utils import context_risk_score, risk_label, severity_summary, truncate
 
 
 def _fetch_scan(scan_id: int) -> dict[str, Any] | None:
@@ -110,9 +111,12 @@ def persist_result(scan_id: int, result: ScanResult) -> dict[str, Any]:
         raise RuntimeError("Scan record disappeared")
     findings = result.normalized()
     _enrich_with_kev(findings)
+    # ATT&CK mapping is offline and cheap; it only adds metadata.
+    for finding in findings:
+        enrich_finding_with_attack(finding)
     # Recalculate because enrichment can add metadata but not findings.
     summary = severity_summary(findings)
-    score = risk_score(summary)
+    score = context_risk_score(summary, findings)
     summary["risk_score"] = score
     summary["risk_label"] = risk_label(score)
     summary["metadata"] = result.metadata

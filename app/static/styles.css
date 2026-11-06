@@ -211,6 +211,15 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
   border: 1px solid var(--border); border-radius: 5px; padding: 1.5px 6px;
   white-space: nowrap;
 }
+.tag-attack {
+  color: #12304d; background: #e3edf7; border-color: #b8d3ea;
+}
+.tag-kev {
+  color: #7a1f1f; background: #fdeaea; border-color: #f2b8b8; font-weight: 700;
+}
+.tag-epss {
+  color: #5c3d0e; background: #fbf3e2; border-color: #ecd9ad;
+}
 .kind-chip {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 46px; font-size: 10px; font-weight: 700; letter-spacing: .04em;
