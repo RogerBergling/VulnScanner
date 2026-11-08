@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 
 from app.config import data_dir, database_path
 
@@ -54,6 +55,7 @@ def test_relocate_database_and_data_directory(api_client, monkeypatch, tmp_path)
     assert new_db.is_file()
     assert old_db.is_file()
     assert env_file.is_file()
+    assert stat.S_IMODE(new_data.stat().st_mode) == 0o700
     env_text = env_file.read_text(encoding="utf-8")
     assert f"VS_DATA_DIR={new_data}" in env_text
     assert f"VS_DATABASE={new_db}" in env_text

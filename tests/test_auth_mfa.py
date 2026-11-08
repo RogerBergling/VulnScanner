@@ -64,7 +64,9 @@ def test_totp_mfa_login_and_recovery_codes(client, monkeypatch):
     assert login.status_code == 200
     csrf = login.json()["csrf_token"]
     setup = client.post(
-        "/api/auth/mfa/setup", json={}, headers={"X-CSRF-Token": csrf}
+        "/api/auth/mfa/setup",
+        json={"password": "correct-horse-battery-1"},
+        headers={"X-CSRF-Token": csrf},
     )
     assert setup.status_code == 200, setup.text
     secret = setup.json()["secret"]
@@ -73,12 +75,16 @@ def test_totp_mfa_login_and_recovery_codes(client, monkeypatch):
     step = totp.current_step()
     enabled = client.post(
         "/api/auth/mfa/enable",
-        json={"code": totp.hotp(secret, step)},
+        json={
+            "password": "correct-horse-battery-1",
+            "code": totp.hotp(secret, step),
+        },
         headers={"X-CSRF-Token": csrf},
     )
     assert enabled.status_code == 200, enabled.text
     codes = enabled.json()["recovery_codes"]
     assert len(codes) == 10
+    assert all(len(totp.normalize_recovery_code(code)) >= 32 for code in codes)
 
     status = client.get("/api/auth/status").json()
     client.post("/api/auth/logout", headers={"X-CSRF-Token": status["csrf_token"]})
@@ -123,3 +129,57 @@ def test_totp_mfa_login_and_recovery_codes(client, monkeypatch):
         client, "correct-horse-battery-1", recovery_code=codes[0]
     )
     assert reused.status_code == 401
+
+
+def test_mfa_setup_and_enable_require_the_current_password(client):
+    _set_password(client)
+    login = _login(client, "correct-horse-battery-1")
+    assert login.status_code == 200
+    csrf = login.json()["csrf_token"]
+
+    missing = client.post(
+        "/api/auth/mfa/setup", json={}, headers={"X-CSRF-Token": csrf}
+    )
+    assert missing.status_code == 422
+
+    wrong = client.post(
+        "/api/auth/mfa/setup",
+        json={"password": "not-the-password"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert wrong.status_code == 403
+
+    setup = client.post(
+        "/api/auth/mfa/setup",
+        json={"password": "correct-horse-battery-1"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert setup.status_code == 200, setup.text
+    secret = setup.json()["secret"]
+    step = totp.current_step()
+    code = totp.hotp(secret, step)
+
+    denied = client.post(
+        "/api/auth/mfa/enable",
+        json={"password": "not-the-password", "code": code},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert denied.status_code == 403
+    assert client.get("/api/auth/mfa").json()["enabled"] is False
+
+    enabled = client.post(
+        "/api/auth/mfa/enable",
+        json={"password": "correct-horse-battery-1", "code": code},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["mfa"]["enabled"] is True
+
+    # A hijacked session cannot silently re-enroll while MFA is active.
+    again = client.post(
+        "/api/auth/mfa/setup",
+        json={"password": "correct-horse-battery-1"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert again.status_code == 400
+    assert "already enabled" in again.json()["detail"].lower()

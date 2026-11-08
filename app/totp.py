@@ -88,11 +88,11 @@ def provisioning_uri(secret: str, account: str, issuer: str = ISSUER) -> str:
 
 
 def generate_recovery_codes(count: int = 10) -> list[str]:
-    """Return human-friendly one-time recovery codes."""
+    """Return human-friendly one-time recovery codes with 128-bit entropy."""
     codes: list[str] = []
     for _ in range(count):
-        raw = secrets.token_hex(5).upper()
-        codes.append(f"{raw[:5]}-{raw[5:]}")
+        raw = secrets.token_hex(16).upper()
+        codes.append("-".join(raw[i : i + 8] for i in range(0, len(raw), 8)))
     return codes
 
 

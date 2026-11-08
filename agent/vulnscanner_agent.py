@@ -1479,10 +1479,15 @@ def pending_path() -> Path:
 
 
 def save_pending(job_id: str, result: dict[str, Any], status: str, error: str) -> None:
-    pending_path().write_text(
+    path = pending_path()
+    path.write_text(
         json.dumps({"job_id": job_id, "result": result, "status": status, "error": error}),
         encoding="utf-8",
     )
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def retry_pending(config: dict[str, Any]) -> bool:

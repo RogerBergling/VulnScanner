@@ -48,7 +48,7 @@ def constant_time_equal(left: str, right: str) -> bool:
 
 
 PASSWORD_SCHEME = "pbkdf2_sha256"
-PASSWORD_ITERATIONS = 260_000
+PASSWORD_ITERATIONS = 600_000
 
 
 def hash_password(password: str) -> str:

@@ -3,12 +3,38 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..database import log_event, scan_cancelled, update_scan
 from ..utils import clean_text, normalize_severity, severity_summary, utcnow
+
+
+def coerce_cvss(value: Any) -> float | None:
+    """Return a finite CVSS score in the 0-10 range, or None.
+
+    Scan engines and API clients are untrusted input. Keeping CVSS numeric
+    prevents report templates from ever interpolating arbitrary markup.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        return None
+    if not math.isfinite(number) or not 0 <= number <= 10:
+        return None
+    return number
 
 
 @dataclass
@@ -38,7 +64,7 @@ class Finding:
             "remediation": clean_text(self.remediation, 4000),
             "cve": clean_text(self.cve, 300),
             "cwe": clean_text(self.cwe, 300),
-            "cvss": self.cvss,
+            "cvss": coerce_cvss(self.cvss),
             "location": clean_text(self.location, 2000),
             "resource": clean_text(self.resource, 2000),
             "key": clean_text(self.key, 300),
@@ -59,7 +85,7 @@ def normalize_finding(value: Finding | dict[str, Any]) -> dict[str, Any]:
         "remediation": clean_text(str(value.get("remediation") or ""), 4000),
         "cve": clean_text(str(value.get("cve") or ""), 300),
         "cwe": clean_text(str(value.get("cwe") or ""), 300),
-        "cvss": value.get("cvss"),
+        "cvss": coerce_cvss(value.get("cvss")),
         "location": clean_text(str(value.get("location") or ""), 2000),
         "resource": clean_text(str(value.get("resource") or ""), 2000),
         "key": clean_text(str(value.get("key") or ""), 300),

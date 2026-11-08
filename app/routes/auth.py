@@ -12,6 +12,7 @@ from ..schemas import (
     LoginRequest,
     MfaDisableRequest,
     MfaEnableRequest,
+    MfaSetupRequest,
     RecoveryCodesRequest,
 )
 from ..security import (
@@ -168,12 +169,31 @@ def mfa_state() -> dict:
     return mfa_status()
 
 
+def _require_current_password(request: Request, password: str, action: str) -> None:
+    if verify_admin(admin_user(), password):
+        return
+    record_request(
+        request,
+        action,
+        category="auth",
+        outcome="failure",
+        detail="Current password missing or incorrect",
+    )
+    raise HTTPException(status_code=403, detail="Current password is incorrect")
+
+
 @router.post("/mfa/setup")
-def mfa_start(request: Request) -> dict:
+def mfa_start(payload: MfaSetupRequest, request: Request) -> dict:
     if not admin_auth_enabled():
         raise HTTPException(
             status_code=400,
             detail="Set a dashboard password before enrolling authenticator MFA",
+        )
+    _require_current_password(request, payload.password, "auth.mfa.setup_denied")
+    if mfa_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled; disable it before enrolling again",
         )
     try:
         result = mfa_setup(admin_user())
@@ -189,6 +209,12 @@ def mfa_activate(payload: MfaEnableRequest, request: Request) -> dict:
         raise HTTPException(
             status_code=400,
             detail="Set a dashboard password before enrolling authenticator MFA",
+        )
+    _require_current_password(request, payload.password, "auth.mfa.enable_denied")
+    if mfa_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled; disable it before enrolling again",
         )
     try:
         codes = mfa_enable(payload.code)

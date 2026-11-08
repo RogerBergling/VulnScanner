@@ -4107,28 +4107,56 @@
     if (mfaSetup) mfaSetup.addEventListener('click', function (event) {
       runWithButton(event.currentTarget, async function () {
         try {
-          const setup = await post('/auth/mfa/setup', {});
           openModal({
             title: 'Set up authenticator MFA',
-            content: '<p class="muted small" style="margin-top:0">Add this account to your authenticator app using the key below, then enter the current 6-digit code to confirm.</p>' +
-              '<label class="field full"><span>Manual setup key</span><input class="input mono" id="mfa-secret" readonly value="' + esc(setup.secret) + '"></label>' +
-              '<label class="field full" style="margin-top:8px"><span>otpauth URI <span class="muted">(paste into an authenticator that supports URI import)</span></span>' +
-              '<textarea class="textarea mono" id="mfa-uri" rows="3" readonly>' + esc(setup.otpauth_uri) + '</textarea></label>' +
-              '<label class="field full" style="margin-top:8px"><span>Verification code</span><input class="input mono" id="mfa-enable-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="123456"></label>' +
-              '<div class="form-error" id="mfa-enable-error" role="alert"></div>',
+            content: '<p class="muted small" style="margin-top:0">Confirm your current password to start authenticator enrollment.</p>' +
+              '<label class="field full"><span>Current password</span><input class="input" type="password" id="mfa-setup-password" autocomplete="current-password"></label>' +
+              '<div class="form-error" id="mfa-setup-error" role="alert"></div>',
             actions: [
               { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
               {
-                label: 'Enable MFA',
+                label: 'Continue',
                 class: 'btn-primary',
                 onClick: function (ctx) {
                   runWithButton(ctx.button, async function () {
                     try {
-                      const result = await post('/auth/mfa/enable', { code: (ctx.card.querySelector('#mfa-enable-code').value || '').trim() });
+                      const password = (ctx.card.querySelector('#mfa-setup-password').value || '');
+                      const setup = await post('/auth/mfa/setup', { password: password });
                       ctx.close();
-                      showRecoveryCodes(result.recovery_codes || []);
+                      openModal({
+                        title: 'Set up authenticator MFA',
+                        content: '<p class="muted small" style="margin-top:0">Add this account to your authenticator app using the key below, then confirm your password and the current 6-digit code.</p>' +
+                          '<label class="field full"><span>Manual setup key</span><input class="input mono" id="mfa-secret" readonly value="' + esc(setup.secret) + '"></label>' +
+                          '<label class="field full" style="margin-top:8px"><span>otpauth URI <span class="muted">(paste into an authenticator that supports URI import)</span></span>' +
+                          '<textarea class="textarea mono" id="mfa-uri" rows="3" readonly>' + esc(setup.otpauth_uri) + '</textarea></label>' +
+                          '<label class="field full" style="margin-top:8px"><span>Current password</span><input class="input" type="password" id="mfa-enable-password" autocomplete="current-password"></label>' +
+                          '<label class="field full" style="margin-top:8px"><span>Verification code</span><input class="input mono" id="mfa-enable-code" inputmode="numeric" maxlength="8" autocomplete="one-time-code" placeholder="123456"></label>' +
+                          '<div class="form-error" id="mfa-enable-error" role="alert"></div>',
+                        actions: [
+                          { label: 'Cancel', onClick: function (ctx2) { ctx2.close(); } },
+                          {
+                            label: 'Enable MFA',
+                            class: 'btn-primary',
+                            onClick: function (ctx2) {
+                              runWithButton(ctx2.button, async function () {
+                                try {
+                                  const result = await post('/auth/mfa/enable', {
+                                    password: (ctx2.card.querySelector('#mfa-enable-password').value || ''),
+                                    code: (ctx2.card.querySelector('#mfa-enable-code').value || '').trim()
+                                  });
+                                  ctx2.close();
+                                  showRecoveryCodes(result.recovery_codes || []);
+                                } catch (error) {
+                                  const box = ctx2.card.querySelector('#mfa-enable-error');
+                                  if (box) { box.textContent = errorText(error); box.classList.add('show'); }
+                                }
+                              });
+                            }
+                          }
+                        ]
+                      });
                     } catch (error) {
-                      const box = ctx.card.querySelector('#mfa-enable-error');
+                      const box = ctx.card.querySelector('#mfa-setup-error');
                       if (box) { box.textContent = errorText(error); box.classList.add('show'); }
                     }
                   });

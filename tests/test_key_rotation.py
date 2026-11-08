@@ -25,3 +25,17 @@ def test_rotate_credential_key_reencrypts_credentials(data_dir):
     assert decrypt_secret(row["secret"]) == "super-secret"
     # The old key is kept for rollback/forensics.
     assert (data_dir / "credential.key.old").is_file()
+
+
+def test_rotate_credential_key_reencrypts_mfa_secrets(data_dir):
+    from app import security, totp
+
+    pending = security.mfa_setup("admin")
+    rotate_credential_key()
+    assert security._decrypt_setting("mfa_pending_secret") == pending["secret"]
+
+    step = totp.current_step()
+    security.mfa_enable(totp.hotp(pending["secret"], step))
+    rotate_credential_key()
+    assert security.mfa_enabled() is True
+    assert security._decrypt_setting("mfa_secret") == pending["secret"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 from typing import Any
 from urllib.parse import urlparse
 
@@ -54,6 +55,19 @@ def _target_text(value: Any) -> str:
     """Collapse a multi-host target list into a single display line."""
     lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
     return ", ".join(lines)
+
+
+def _cvss_text(value: Any) -> str:
+    """Render a CVSS score only when it is a finite number in range."""
+    if value is None or isinstance(value, bool):
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number) or not 0 <= number <= 10:
+        return ""
+    return f"{number:g}"
 
 
 def _safe_reference_url(value: Any) -> str | None:
@@ -146,6 +160,7 @@ def build_html(scan: dict[str, Any], findings: list[dict[str, Any]], context: di
                 for url in safe_refs
             )
             references = f'<div class="lbl">References</div><div class="meta">{links}</div>'
+        cvss = _cvss_text(finding.get("cvss"))
         finding_html.append(
             f"""
 <section class="finding" style="border-left-color:{color}">
@@ -154,7 +169,7 @@ def build_html(scan: dict[str, Any], findings: list[dict[str, Any]], context: di
   <div class="fmeta">
     {escape(finding.get('category') or '')}
     {(' · ' + escape(finding.get('location'))) if finding.get('location') else ''}
-    {(' · CVSS ' + str(finding.get('cvss'))) if finding.get('cvss') else ''}
+    {(' · CVSS ' + escape(cvss)) if cvss else ''}
     {(' · ' + escape(finding.get('cve'))) if finding.get('cve') else ''}
     {(' · ' + escape(finding.get('cwe'))) if finding.get('cwe') else ''}
     · status: {escape(finding.get('status') or 'open')}

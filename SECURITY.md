@@ -11,8 +11,8 @@ guidance.
 
 | Version | Supported |
 | --- | --- |
-| 1.1.x | Yes |
-| 1.0.x | Best effort |
+| 1.3.x | Yes |
+| 1.2.x | Best effort |
 | Older | No |
 
 ## Reporting a vulnerability

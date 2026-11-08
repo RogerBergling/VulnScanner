@@ -89,8 +89,8 @@ the service bound to `127.0.0.1` in that mode.
 | `POST` | `/api/auth/login` | Password login; optional `code` or `recovery_code`. |
 | `POST` | `/api/auth/logout` | Delete the current session (CSRF required). |
 | `GET` | `/api/auth/mfa` | MFA status and remaining recovery codes. |
-| `POST` | `/api/auth/mfa/setup` | Generate a pending TOTP secret and `otpauth://` URI. |
-| `POST` | `/api/auth/mfa/enable` | Verify a code and return ten one-time recovery codes. |
+| `POST` | `/api/auth/mfa/setup` | With the current password, generate a pending TOTP secret and `otpauth://` URI. |
+| `POST` | `/api/auth/mfa/enable` | With the current password and a valid code, enable MFA and return ten one-time recovery codes. |
 | `POST` | `/api/auth/mfa/disable` | Disable MFA; requires the current password and MFA/recovery code. |
 | `POST` | `/api/auth/mfa/recovery-codes` | Regenerate recovery codes; requires password and MFA code. |
 

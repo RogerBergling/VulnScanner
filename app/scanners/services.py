@@ -362,6 +362,9 @@ def _http_get_json(host: str, port: int, path: str, timeout: float,
             timeout=timeout,
             verify=verify,
             headers={"User-Agent": "VulnScanner/1.0 (service probe)"},
+            # A probe must only describe the port that was actually scanned.
+            # Following a redirect could fingerprint an unrelated host.
+            allow_redirects=False,
         )
     except requests.RequestException:
         return None

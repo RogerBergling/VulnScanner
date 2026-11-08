@@ -171,6 +171,8 @@ def rotate_credential_key() -> dict[str, Any]:
                 "gvm_password",
                 "nvd_api_key",
                 "interactsh_token",
+                "mfa_secret",
+                "mfa_pending_secret",
             )
             updated = 0
             for key in secret_settings:

@@ -93,9 +93,15 @@ def read_wordlist(path: Path | None = None) -> list[str]:
 def wordlist_info() -> dict[str, Any]:
     path = subfinder_wordlist_path()
     exists = path.is_file()
+    try:
+        path.resolve().relative_to(data_dir().resolve())
+        inside_data_dir = True
+    except (OSError, ValueError):
+        inside_data_dir = False
+
     content = ""
     truncated = False
-    if exists:
+    if exists and inside_data_dir:
         try:
             raw = path.read_bytes()
             if len(raw) > MAX_WORDLIST_BYTES:
@@ -104,19 +110,22 @@ def wordlist_info() -> dict[str, Any]:
             content = raw.decode("utf-8", errors="replace")
         except OSError:
             exists = False
+    # A configured wordlist outside the data directory is metadata-only. The
+    # scanner can still read it, but the authenticated GET endpoint must never
+    # turn an arbitrary local path into a file-read primitive.
     try:
-        path.resolve().relative_to(data_dir().resolve())
-        editable = True
-    except ValueError:
-        editable = False
+        size = path.stat().st_size if exists else 0
+    except OSError:
+        size = 0
     return {
         "path": str(path),
         "exists": exists,
-        "editable": editable and not truncated,
+        "editable": inside_data_dir and not truncated,
+        "external": not inside_data_dir,
         "truncated": truncated,
         "content": content,
         "line_count": len(_wordlist_lines(content)),
-        "size": path.stat().st_size if exists else 0,
+        "size": size,
         "source": SECLISTS_REPOSITORY_URL,
         "source_url": seclists_subdomain_url(),
     }

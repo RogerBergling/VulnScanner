@@ -534,8 +534,16 @@ class LoginRequest(BaseModel):
     recovery_code: str = Field(default="", max_length=64)
 
 
+class MfaSetupRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    code: str = Field(default="", max_length=32)
+    recovery_code: str = Field(default="", max_length=64)
+
+
 class MfaEnableRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
     code: str = Field(min_length=1, max_length=32)
+    recovery_code: str = Field(default="", max_length=64)
 
 
 class MfaDisableRequest(BaseModel):

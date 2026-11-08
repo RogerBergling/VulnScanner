@@ -43,6 +43,11 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
+def _reject_control_characters(value: str, label: str) -> None:
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError(f"{label} contains control characters")
+
+
 def _nearest_writable(path: Path) -> bool:
     candidate = path
     while not candidate.exists() and candidate != candidate.parent:
@@ -53,6 +58,9 @@ def _nearest_writable(path: Path) -> bool:
 def _resolve_paths(
     data_dir_value: str, database_value: str | None
 ) -> tuple[Path, Path]:
+    _reject_control_characters(data_dir_value, "Data directory")
+    if database_value:
+        _reject_control_characters(database_value, "Database path")
     data = Path(data_dir_value).expanduser()
     if not data.is_absolute():
         raise ValueError("Data directory must be an absolute path")
@@ -282,6 +290,11 @@ def relocate_storage(payload: StorageRelocateRequest, request: Request) -> dict[
         if payload.copy_supporting_files:
             copied = _copy_supporting(current_data, data)
         _copy_database(current_db, database)
+        # The data root contains the database, credential key and backups.
+        try:
+            os.chmod(data, 0o700)
+        except OSError:
+            pass
         entries = {"VS_DATA_DIR": str(data), "VS_DATABASE": str(database)}
         configured_wordlist = os.getenv("VS_SUBFINDER_WORDLIST", "").strip()
         if configured_wordlist and payload.copy_supporting_files:

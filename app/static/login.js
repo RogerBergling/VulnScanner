@@ -20,7 +20,17 @@
   function nextUrl() {
     const params = new URLSearchParams(location.search);
     const next = params.get('next') || '/';
-    return next.startsWith('/') && !next.startsWith('//') ? next : '/';
+    // Resolve relative to this origin and reject absolute URLs, protocol-
+    // relative paths, backslash tricks and control characters.
+    if (!next || next.startsWith('//') || /[\\\u0000-\u001f]/.test(next)) return '/';
+    try {
+      const target = new URL(next, location.origin);
+      if (target.origin !== location.origin || !target.pathname.startsWith('/')) return '/';
+      if (target.pathname.startsWith('//')) return '/';
+      return target.pathname + target.search + target.hash;
+    } catch (error) {
+      return '/';
+    }
   }
 
   function showError(message) {

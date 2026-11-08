@@ -86,6 +86,27 @@ async def lifespan(_app: FastAPI):
     start_scheduler()
     data_dir()
     scheme = "https" if os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"} else "http"
+    # Launchers that use ``uvicorn app.main:app`` never call ``run()``. Start
+    # the optional satellite listener here as well; the guard in
+    # _start_satellite_listener prevents a second thread when run() already did.
+    if SATELLITE_PORT:
+        if scheme == "https":
+            try:
+                from .certs import get_cert_paths
+
+                cert_path, key_path = get_cert_paths()
+                _start_satellite_listener(
+                    cert_path,
+                    key_path,
+                    os.getenv("VS_LOG_LEVEL", "info").lower(),
+                )
+            except Exception:
+                logger.exception("Could not start the satellite mTLS listener")
+        else:
+            logger.warning(
+                "VS_SATELLITE_PORT is set but VS_SSL is disabled; the mTLS "
+                "satellite listener needs TLS and was not started."
+            )
     logger.info("VulnScanner %s starting on %s://%s:%s", __version__, scheme, HOST, PORT)
     logger.info("Database: %s", database_path())
     if HOST not in {"127.0.0.1", "::1", "localhost"} and not os.getenv(
@@ -118,6 +139,7 @@ async def lifespan(_app: FastAPI):
                 HOST,
             )
     yield
+    _stop_satellite_listener()
     shutdown(wait=False)
     stop_scheduler()
 
@@ -157,6 +179,10 @@ _PUBLIC_PREFIXES = (
     "/login",
     "/favicon.ico",
 )
+_satellite_lock = threading.Lock()
+_satellite_thread: threading.Thread | None = None
+_satellite_server = None
+
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -181,6 +207,14 @@ def _secure_response(
     if path.startswith("/api/") or path in {"/", "/login"}:
         response.headers.setdefault("Cache-Control", "no-store")
         response.headers.setdefault("Pragma", "no-cache")
+    if path.startswith("/api/") and not path.startswith("/api/docs"):
+        # JSON/API responses never need to render active content. The report
+        # export endpoint supplies its own style-only policy before this runs.
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'; "
+            "base-uri 'none'; form-action 'none'",
+        )
     if not path.startswith("/api/") and not path.startswith("/agent/"):
         response.headers.setdefault(
             "Content-Security-Policy",
@@ -192,12 +226,54 @@ def _secure_response(
     return response
 
 
-def _hostname(value: str) -> str:
+def _origin_parts(value: str) -> tuple[str, str, int] | None:
+    """Return (scheme, hostname, port) for an absolute or scheme-relative URL."""
     try:
         parsed = urlparse(value if "://" in value else "//" + value)
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"http", "https"}:
+            return None
+        host = (parsed.hostname or "").lower().strip("[]")
+        if not host:
+            return None
+        port = parsed.port
     except ValueError:
-        return ""
-    return (parsed.hostname or "").lower().strip("[]")
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+def _allowed_origin(parts: tuple[str, str, int]) -> bool:
+    """Return True when an allowed host entry covers a candidate origin."""
+    scheme, host, port = parts
+    for item in allowed_hosts():
+        text = item.strip().lower()
+        if not text:
+            continue
+        if text == "*":
+            return True
+        try:
+            parsed = urlparse(text if "://" in text else "//" + text)
+            allowed_host = (parsed.hostname or "").lower().strip("[]")
+            allowed_port = parsed.port
+            allowed_scheme = (parsed.scheme or "").lower() if "://" in text else ""
+        except ValueError:
+            continue
+        if not allowed_host:
+            continue
+        if allowed_host.startswith("*."):
+            suffix = allowed_host[1:]
+            if not host.endswith(suffix) or host == allowed_host[2:]:
+                continue
+        elif allowed_host != host:
+            continue
+        if allowed_port is not None and allowed_port != port:
+            continue
+        if allowed_scheme and allowed_scheme != scheme:
+            continue
+        return True
+    return False
 
 
 def _origin_allowed(request: Request) -> bool:
@@ -212,16 +288,26 @@ def _origin_allowed(request: Request) -> bool:
         return True
     if candidate.strip().lower() == "null":
         return False
-    origin_host = _hostname(candidate)
-    if not origin_host:
+    origin = _origin_parts(candidate)
+    if origin is None:
         return False
-    request_host = _hostname(request.headers.get("host", "")) or (
-        request.url.hostname or ""
-    ).lower()
-    allowed = {item.lower().strip("[]") for item in allowed_hosts()}
-    if "*" in allowed:
-        return True
-    return origin_host in allowed or (bool(request_host) and origin_host == request_host)
+
+    request_scheme = "https" if request_is_secure(request) else "http"
+    request_host_header = request.headers.get("host", "")
+    if request_host_header:
+        request_origin = _origin_parts(f"{request_scheme}://{request_host_header}")
+    else:
+        request_host = (request.url.hostname or "").lower().strip("[]")
+        request_port = request.url.port or (443 if request_scheme == "https" else 80)
+        request_origin = (
+            (request_scheme, request_host, request_port) if request_host else None
+        )
+    if request_origin is None:
+        return False
+    if origin[1] == request_origin[1]:
+        # Same hostname must be an exact scheme/host/port match.
+        return origin == request_origin
+    return _allowed_origin(origin)
 
 
 @app.middleware("http")
@@ -259,6 +345,17 @@ async def security_and_auth(request: Request, call_next):
         )
 
     if not auth.authenticated and not public:
+        if auth.metadata.get("rate_limited"):
+            retry = int(auth.metadata.get("retry_after") or 1)
+            return _secure_response(
+                JSONResponse(
+                    {"detail": auth.detail, "retry_after": retry},
+                    status_code=429,
+                    headers={"Retry-After": str(retry)},
+                ),
+                path,
+                request,
+            )
         if path.startswith("/api/"):
             body = {"detail": auth.detail or "Authentication required"}
             body.update(auth.metadata)
@@ -391,7 +488,7 @@ def _start_satellite_listener(
     key_path: str,
     log_level: str,
 ) -> threading.Thread | None:
-    """Start the optional mTLS-only satellite listener.
+    """Start the optional mTLS-only satellite listener exactly once.
 
     The main listener stays usable by browsers and agents. Satellites can be
     required to connect to a separate port that requests a client certificate
@@ -399,6 +496,8 @@ def _start_satellite_listener(
     rejects every path except ``/api/satellite/*`` and ``/api/health`` on that
     port.
     """
+    global _satellite_server, _satellite_thread
+
     if not SATELLITE_PORT:
         return None
     if SATELLITE_PORT == PORT:
@@ -407,13 +506,15 @@ def _start_satellite_listener(
             "listener was not started."
         )
         return None
-    import uvicorn
+    with _satellite_lock:
+        if _satellite_thread is not None and _satellite_thread.is_alive():
+            return _satellite_thread
 
-    from .certs import satellite_client_ca_path
+        import uvicorn
 
-    ca_path = satellite_client_ca_path()
+        from .certs import satellite_client_ca_path
 
-    def _serve() -> None:
+        ca_path = satellite_client_ca_path()
         config = uvicorn.Config(
             app,
             host=SATELLITE_HOST,
@@ -426,14 +527,18 @@ def _start_satellite_listener(
             ssl_cert_reqs=ssl.CERT_REQUIRED,
         )
         server = uvicorn.Server(config)
-        server.run()
 
-    thread = threading.Thread(
-        target=_serve,
-        name="vulnscanner-satellite-listener",
-        daemon=True,
-    )
-    thread.start()
+        def _serve() -> None:
+            server.run()
+
+        thread = threading.Thread(
+            target=_serve,
+            name="vulnscanner-satellite-listener",
+            daemon=True,
+        )
+        _satellite_server = server
+        _satellite_thread = thread
+        thread.start()
     logger.info(
         "Satellite mTLS listener enabled on https://%s:%s (client CA: %s)",
         SATELLITE_HOST,
@@ -441,6 +546,20 @@ def _start_satellite_listener(
         ca_path,
     )
     return thread
+
+
+def _stop_satellite_listener() -> None:
+    """Ask the optional satellite listener to exit during application shutdown."""
+    global _satellite_server, _satellite_thread
+    with _satellite_lock:
+        server = _satellite_server
+        thread = _satellite_thread
+        _satellite_server = None
+        _satellite_thread = None
+    if server is not None:
+        server.should_exit = True
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=5)
 
 
 def run() -> None:

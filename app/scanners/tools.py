@@ -127,6 +127,7 @@ def tool_status() -> dict[str, dict[str, Any]]:
                     text=True,
                     timeout=8,
                     check=False,
+                    env=safe_tool_env(),
                 )
                 output = (proc.stdout or proc.stderr or "").strip().splitlines()
                 entry["version"] = output[0][:200] if output else ""

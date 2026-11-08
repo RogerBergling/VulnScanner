@@ -45,6 +45,28 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path, onerror=on_error)
 
 
+def _github_token_hosts() -> set[str]:
+    """Return hosts that may receive the configured GitHub token.
+
+    ``github.com`` is always allowed. GitHub Enterprise installations can be
+    approved explicitly with a comma-separated ``VS_GITHUB_TOKEN_HOSTS``.
+    """
+    hosts = {"github.com"}
+    for item in os.getenv("VS_GITHUB_TOKEN_HOSTS", "").split(","):
+        candidate = item.strip().lower()
+        if not candidate:
+            continue
+        parsed = urlparse(candidate if "://" in candidate else "//" + candidate)
+        host = (parsed.hostname or "").strip(".")
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _github_token_allowed(host: str) -> bool:
+    return (host or "").strip(".").lower() in _github_token_hosts()
+
+
 def _clone_github(ctx: ScanContext, target: str, token: str | None = None) -> Path:
     git = tool_path("git")
     if not git:
@@ -61,10 +83,17 @@ def _clone_github(ctx: ScanContext, target: str, token: str | None = None) -> Pa
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
     if token:
-        encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
-        env["GIT_CONFIG_COUNT"] = "1"
-        env["GIT_CONFIG_KEY_0"] = "http.extraHeader"
-        env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: basic {encoded}"
+        host = (parsed.hostname or "").strip(".").lower()
+        if _github_token_allowed(host):
+            encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+            env["GIT_CONFIG_COUNT"] = "1"
+            env["GIT_CONFIG_KEY_0"] = "http.extraHeader"
+            env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: basic {encoded}"
+        else:
+            ctx.log(
+                f"Not sending the GitHub token to unapproved host {host or 'unknown'}",
+                "warning",
+            )
     ctx.log(f"Cloning {redact_url(target)} (shallow={not ctx.option_bool('git_history', False)})")
     try:
         proc = run_tool(command, timeout=300, env=env)

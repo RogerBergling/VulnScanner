@@ -18,7 +18,7 @@ from .config import (
     env_file_path,
 )
 from .database import get_setting, get_setting_optional
-from .envfile import upsert_env_entries
+from .envfile import env_safe, upsert_env_entries
 
 
 def active_ssl() -> bool:
@@ -35,11 +35,12 @@ def sync_env_from_settings() -> None:
         else "false"
     )
     entries = {
-        "VS_HOST": bind_host,
-        "VS_PORT": str(bind_port),
-        "VS_SSL": ssl_text,
-        "VS_ADMIN_USER": get_setting(
-            "admin_user", os.getenv("VS_ADMIN_USER", "admin")
+        "VS_HOST": env_safe(str(bind_host), "VS_HOST"),
+        "VS_PORT": env_safe(str(bind_port), "VS_PORT"),
+        "VS_SSL": env_safe(ssl_text, "VS_SSL"),
+        "VS_ADMIN_USER": env_safe(
+            get_setting("admin_user", os.getenv("VS_ADMIN_USER", "admin")),
+            "VS_ADMIN_USER",
         ),
         "VS_ADMIN_PASSWORD": "",
     }
@@ -51,7 +52,9 @@ def sync_env_from_settings() -> None:
             os.environ.pop(env_name, None)
     else:
         for name, env_name in TOOL_ENV_VARS.items():
-            entries[env_name] = TOOL_PATHS.get(name, "")
+            entries[env_name] = env_safe(
+                TOOL_PATHS.get(name, "") or "", f"{name} path"
+            )
 
     upsert_env_entries(env_file_path(BASE_DIR), entries)
     os.environ["VS_HOST"] = bind_host

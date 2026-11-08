@@ -1606,7 +1606,16 @@ def export_scan(scan_id: int, format: str = "html") -> Response:
     return Response(
         body,
         media_type="text/html; charset=utf-8",
-        headers={"Content-Disposition": f'inline; filename="{filename}.html"'},
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}.html"',
+            # The report is standalone HTML with inline styles. Restrict it to
+            # a document with no scripts, forms, frames or external resources.
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "img-src 'self' data:; base-uri 'none'; form-action 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

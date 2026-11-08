@@ -8,6 +8,8 @@ shared cache.
 
 from __future__ import annotations
 
+import ipaddress
+import os
 import threading
 import time
 from collections import deque
@@ -63,25 +65,70 @@ class SlidingWindowLimiter:
 
 login_limiter = SlidingWindowLimiter()
 sensitive_limiter = SlidingWindowLimiter()
+basic_auth_limiter = SlidingWindowLimiter()
+
+
+def _trust_proxy_enabled() -> bool:
+    return os.getenv("VS_TRUST_PROXY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _trusted_proxy_hops() -> int:
+    try:
+        hops = int(os.getenv("VS_TRUSTED_PROXY_HOPS", "1"))
+    except (TypeError, ValueError):
+        hops = 1
+    return max(1, min(hops, 50))
+
+
+def _parse_forwarded_address(value: str) -> str:
+    """Return a canonical IP from one X-Forwarded-For element."""
+    candidate = value.strip()
+    if candidate.startswith("["):
+        # Bracketed IPv6, optionally followed by :port.
+        closing = candidate.find("]")
+        if closing > 1:
+            candidate = candidate[1:closing]
+    elif candidate.count(":") == 1:
+        # IPv4 with an optional :port suffix.
+        host, _, port = candidate.partition(":")
+        if port.isdigit():
+            candidate = host
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return ""
 
 
 def client_ip(request) -> str:
     """Return the peer address, honouring a trusted reverse proxy header.
 
-    ``VS_TRUST_PROXY`` must be enabled explicitly.  Blindly trusting
-    ``X-Forwarded-For`` lets a client rotate the rate-limit key.
+    ``VS_TRUST_PROXY`` must be enabled explicitly. ``X-Forwarded-For`` is
+    ordered client-first, so the leftmost value is attacker-controlled. The
+    rightmost ``VS_TRUSTED_PROXY_HOPS`` entries were appended by proxies we
+    trust; use the address immediately before those proxies.
     """
-    import os
-
-    if os.getenv("VS_TRUST_PROXY", "").strip().lower() in {"1", "true", "yes", "on"}:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",", 1)[0].strip()[:64]
-    client = getattr(request, "client", None)
-    return getattr(client, "host", "") or "unknown"
+    peer = getattr(getattr(request, "client", None), "host", "") or "unknown"
+    if not _trust_proxy_enabled():
+        return peer
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if not forwarded:
+        return peer
+    parts = [part for part in (piece.strip() for piece in forwarded.split(",")) if part]
+    if not parts:
+        return peer
+    hops = _trusted_proxy_hops()
+    index = max(0, len(parts) - hops)
+    address = _parse_forwarded_address(parts[index])
+    return address or peer
 
 
 def reset_rate_limits() -> None:
     """Reset all buckets (used by tests and after a successful login)."""
     login_limiter.reset()
     sensitive_limiter.reset()
+    basic_auth_limiter.reset()

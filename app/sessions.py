@@ -31,6 +31,28 @@ CSRF_HEADER = "x-csrf-token"
 MFA_HEADER = "x-vs-mfa"
 RECOVERY_HEADER = "x-vs-recovery-code"
 
+BASIC_AUTH_IP_LIMIT = 20
+BASIC_AUTH_USER_LIMIT = 5
+BASIC_AUTH_WINDOW = 300
+
+
+def _audit_basic_failure(request, actor: str, action: str, detail: str) -> None:
+    """Best-effort audit of a failed stateless Basic-auth attempt."""
+    try:
+        from .audit import record_request
+
+        record_request(
+            request,
+            action,
+            category="auth",
+            actor=actor or "basic",
+            detail=detail,
+            outcome="failure",
+        )
+    except Exception:
+        # Auditing must never break authentication handling.
+        pass
+
 
 def _env_int(name: str, default: int, low: int, high: int) -> int:
     try:
@@ -223,23 +245,65 @@ def authenticate_request(request) -> AuthContext:
     if header.lower().startswith("basic "):
         import base64
 
+        from .rate_limit import basic_auth_limiter, client_ip
+
         try:
             decoded = base64.b64decode(header.split(" ", 1)[1]).decode("utf-8")
             username, password = decoded.split(":", 1)
         except (ValueError, UnicodeDecodeError):
+            _audit_basic_failure(
+                request,
+                "basic",
+                "auth.basic.failed",
+                "Malformed Basic authorization header",
+            )
             return AuthContext(detail="Malformed Basic authorization header")
+
+        ip = client_ip(request)
+        ip_key = f"basic:ip:{ip}"
+        user_key = f"basic:user:{username.lower()}"
+        retry = basic_auth_limiter.retry_after(
+            ip_key, BASIC_AUTH_IP_LIMIT, BASIC_AUTH_WINDOW
+        )
+        if not retry:
+            retry = basic_auth_limiter.retry_after(
+                user_key, BASIC_AUTH_USER_LIMIT, BASIC_AUTH_WINDOW
+            )
+        if retry:
+            _audit_basic_failure(
+                request,
+                username or "basic",
+                "auth.basic.rate_limited",
+                f"Retry after {retry}s",
+            )
+            return AuthContext(
+                detail="Too many authentication attempts. Try again later.",
+                metadata={"rate_limited": True, "retry_after": retry},
+            )
+
+        def _failed(
+            action: str, detail: str, metadata: dict[str, Any] | None = None
+        ) -> AuthContext:
+            basic_auth_limiter.hit(ip_key, BASIC_AUTH_IP_LIMIT, BASIC_AUTH_WINDOW)
+            basic_auth_limiter.hit(user_key, BASIC_AUTH_USER_LIMIT, BASIC_AUTH_WINDOW)
+            _audit_basic_failure(request, username or "basic", action, detail)
+            return AuthContext(detail=detail, metadata=metadata or {})
+
         if not verify_admin(username, password):
-            return AuthContext(detail="Invalid username or password")
+            return _failed("auth.basic.failed", "Invalid username or password")
         if mfa_enabled():
             code = request.headers.get(MFA_HEADER, "")
             recovery = request.headers.get(RECOVERY_HEADER, "")
             if not code and not recovery:
-                return AuthContext(
-                    detail="MFA code required",
-                    metadata={"mfa_required": True},
+                return _failed(
+                    "auth.basic.mfa_required",
+                    "MFA code required",
+                    {"mfa_required": True},
                 )
             if not verify_mfa_code(recovery or code, recovery=bool(recovery)):
-                return AuthContext(detail="Invalid MFA code")
+                return _failed("auth.basic.mfa_failed", "Invalid MFA code")
+        basic_auth_limiter.reset(ip_key)
+        basic_auth_limiter.reset(user_key)
         return AuthContext(
             authenticated=True,
             actor=username,

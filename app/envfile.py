@@ -12,8 +12,29 @@ migration each growing their own subtly different implementation.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+
+
+def validate_env_entry(key: str, value: str) -> None:
+    """Reject entries that could inject extra shell commands into ``.env``.
+
+    The launchers source the file, so a newline in a value is equivalent to
+    writing a second line of shell code.
+    """
+    if not _ENV_KEY_RE.match(key or ""):
+        raise ValueError(f"Invalid environment variable name: {key!r}")
+    if _has_control_characters(str(value)):
+        raise ValueError(
+            f"{key} contains control characters that are unsafe in .env"
+        )
 
 
 def is_env_entry(line: str, key: str) -> bool:
@@ -71,10 +92,17 @@ def write_env_file(path: Path, lines: list[str]) -> None:
 
 def upsert_env_entries(path: Path, entries: dict[str, str]) -> None:
     """Add or replace ``KEY=VALUE`` entries while preserving other lines."""
+    validated: dict[str, str] = {}
+    for key, value in entries.items():
+        text_key = str(key)
+        text_value = str(value)
+        validate_env_entry(text_key, text_value)
+        validated[text_key] = text_value
+
     lines: list[str] = []
     if path.exists():
         lines = path.read_text(encoding="utf-8").splitlines()
-    for key, value in entries.items():
+    for key, value in validated.items():
         entry = f"{key}={value}"
         new_lines: list[str] = []
         found = False
@@ -130,6 +158,6 @@ def env_safe(value: str, label: str) -> str:
         unsafe |= {" ", "\t", "\\", "&", "(", ")"}
     else:
         unsafe |= {"%", "^"}
-    if any(char in value for char in unsafe):
+    if _has_control_characters(value) or any(char in value for char in unsafe):
         raise ValueError(f"{label} contains characters that are unsafe in .env")
     return value
