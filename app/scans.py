@@ -14,7 +14,10 @@ from .database import (
     update_scan,
     utcnow,
 )
+from .agents import get_agent
+from .credentials import resolve_scan_web_auth
 from .discovery import record_scan_inventory, track_historical_findings
+from .scan_diagnostics import build_scan_diagnostics
 from .scanners.ad import process_ad_report, scan_ad_report
 from .scanners.agent import process_agent_payload
 from .scanners.attack import enrich_finding_with_attack
@@ -33,6 +36,37 @@ def _fetch_scan(scan_id: int) -> dict[str, Any] | None:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
     return dict(row) if row else None
+
+
+def _satellite_for_scan(scan_id: int) -> dict[str, Any] | None:
+    from .satellites import get_satellite
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT satellite_id FROM satellite_jobs WHERE scan_id = ? ORDER BY created_at DESC LIMIT 1",
+            (scan_id,),
+        ).fetchone()
+    return get_satellite(row["satellite_id"]) if row else None
+
+
+def _attach_diagnostics(
+    scan: dict[str, Any],
+    result: ScanResult,
+    *,
+    agent: dict[str, Any] | None = None,
+    satellite: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    options = json_load(scan.get("options"), {})
+    diagnostics = build_scan_diagnostics(
+        str(scan.get("scan_type") or ""),
+        options,
+        target=str(scan.get("target") or ""),
+        executor=str(scan.get("executor") or ""),
+        agent=agent,
+        satellite=satellite,
+    )
+    result.metadata["diagnostics"] = diagnostics
+    return diagnostics
 
 
 def _save_findings(scan: dict[str, Any], findings: list[dict[str, Any]]) -> int:
@@ -191,17 +225,31 @@ def execute_scan(scan_id: int, runtime_options: dict[str, Any] | None = None) ->
         _notify_schedule(runtime_options, scan_id, "cancelled", "Scan cancelled before execution")
         return
     options = json_load(scan.get("options"), {})
+    # Runtime-only keys must come from encrypted scan credentials, never from
+    # a policy JSON blob or an API caller.
+    options.pop("_web_auth", None)
+    if scan.get("scan_type") == "web":
+        web_auth = resolve_scan_web_auth(scan_id)
+        if web_auth:
+            options["_web_auth"] = web_auth
     ctx = ScanContext(scan_id, scan["target"], options)
     started = utcnow()
     update_scan(scan_id, status="running", progress=1, stage="Starting", started_at=started)
     log_event(scan_id, f"Starting {scan['scan_type']} scan against {scan['target']}")
     try:
+        agent = get_agent(scan["agent_id"]) if scan.get("agent_id") else None
+        diagnostics = build_scan_diagnostics(
+            scan["scan_type"], options, target=scan["target"], agent=agent
+        )
+        for warning in diagnostics.get("warnings", []):
+            ctx.log(f"Scan readiness: {warning}", "warning")
         from .tool_policy import enforce_scan_policy
 
         for warning in enforce_scan_policy(scan["scan_type"], options):
             log_event(scan_id, f"Tool version policy: {warning}", "warning")
             ctx.log(f"Tool version policy: {warning}", "warning")
         result = _dispatch(scan, ctx, runtime_options)
+        result.metadata["diagnostics"] = diagnostics
         if ctx.cancelled() or scan_cancelled(scan_id):
             summary = persist_result(scan_id, result)
             update_scan(
@@ -382,6 +430,10 @@ def execute_agent_result(
             result = process_agent_network_payload(ctx, payload)
         else:
             result = process_agent_payload(ctx, payload)
+        agent = get_agent(scan["agent_id"]) if scan.get("agent_id") else None
+        diagnostics = _attach_diagnostics(scan, result, agent=agent)
+        for warning in diagnostics.get("warnings", []):
+            ctx.log(f"Scan readiness: {warning}", "warning")
         if ctx.cancelled() or scan_cancelled(scan_id):
             update_scan(
                 scan_id,
@@ -472,6 +524,17 @@ def execute_satellite_result(
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         result.metadata = metadata
         result.metadata["execution"] = "satellite"
+        satellite = _satellite_for_scan(scan_id)
+        diagnostics = _attach_diagnostics(scan, result, satellite=satellite)
+        for warning in diagnostics.get("warnings", []):
+            ctx.log(f"Scan readiness: {warning}", "warning")
+        logs = payload.get("logs") if isinstance(payload.get("logs"), list) else []
+        for entry in logs[-200:]:
+            if not isinstance(entry, dict):
+                continue
+            message = truncate(str(entry.get("message") or ""), 1000)
+            if message:
+                log_event(scan_id, f"Satellite: {message}", str(entry.get("level") or "info"))
         if ctx.cancelled() or scan_cancelled(scan_id):
             update_scan(
                 scan_id,
@@ -482,6 +545,7 @@ def execute_satellite_result(
                 error="Scan cancelled by user",
             )
             log_event(scan_id, "Satellite report discarded because the scan was cancelled", "warning")
+            _notify_schedule(options, scan_id, "cancelled", "Scan cancelled by user.")
             from .satellites import complete_job
 
             complete_job(job_id, "cancelled", "Scan cancelled by user")
@@ -501,6 +565,13 @@ def execute_satellite_result(
             f"Satellite scan completed with {summary.get('total', 0)} finding(s) "
             f"(risk score {summary.get('risk_score', 0)})",
         )
+        _notify_schedule(
+            options,
+            scan_id,
+            "completed",
+            f"Scan completed with {summary.get('total', 0)} finding(s); "
+            f"risk score {summary.get('risk_score', 0)}.",
+        )
         from .satellites import complete_job
 
         complete_job(job_id, "completed")
@@ -515,6 +586,7 @@ def execute_satellite_result(
             error=message,
         )
         log_event(scan_id, f"Could not process satellite report: {message}", "error")
+        _notify_schedule(options, scan_id, "failed", message)
         from .satellites import complete_job
 
         complete_job(job_id, "failed", message)
@@ -549,11 +621,13 @@ def scan_counts() -> dict[str, int]:
         row = conn.execute(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running, "
-            "SUM(CASE WHEN status = 'waiting_agent' THEN 1 ELSE 0 END) AS waiting "
+            "SUM(CASE WHEN status = 'waiting_agent' THEN 1 ELSE 0 END) AS waiting_agent, "
+            "SUM(CASE WHEN status = 'waiting_satellite' THEN 1 ELSE 0 END) AS waiting_satellite "
             "FROM scans"
         ).fetchone()
     return {
         "total": int(row["total"] or 0),
         "running": int(row["running"] or 0),
-        "waiting_agent": int(row["waiting"] or 0),
+        "waiting_agent": int(row["waiting_agent"] or 0),
+        "waiting_satellite": int(row["waiting_satellite"] or 0),
     }

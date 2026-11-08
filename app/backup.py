@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from .backup_crypto import (
+    BackupCryptoError,
+    ENCRYPTED_SUFFIX,
+    decrypt_file,
+    encrypt_file,
+    is_encrypted,
+)
 from .config import clear_limit_cache, database_path, reload_tool_paths, reports_dir
 from .database import (
     SCHEMA_VERSION,
@@ -28,7 +35,7 @@ from .database import (
 )
 from .migrations import upgrade_database_file
 
-BACKUP_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
+BACKUP_SUFFIXES = {".db", ".sqlite", ".sqlite3", ENCRYPTED_SUFFIX}
 RESTORE_MODES = {"all", "scans", "settings"}
 
 # Insert order is dependency order. Delete order is the reverse.
@@ -48,7 +55,12 @@ ALL_TABLES = [
     "settings",
     "osv_cache",
     "kev_catalog",
+    "nvd_cache",
+    "epss_cache",
+    "scan_policies",
     "scan_schedules",
+    "satellites",
+    "satellite_jobs",
     "asset_inventory",
     "finding_history",
     "notification_log",
@@ -123,26 +135,42 @@ def create_backup(
     overwrite: bool = False,
     record: bool = True,
     prefix: str = "vulnscanner",
+    passphrase: str | None = None,
 ) -> dict[str, Any]:
-    """Create a consistent SQLite backup and return its metadata."""
+    """Create a consistent SQLite backup and return its metadata.
+
+    When ``passphrase`` is supplied the database snapshot is encrypted with
+    AES-256-GCM and written with the ``.vsenc`` suffix. The passphrase is never
+    stored in the database or environment.
+    """
     target = _resolve_backup_target(destination, prefix=prefix, overwrite=overwrite)
+    encrypted = bool(passphrase)
+    if encrypted and not target.name.endswith(ENCRYPTED_SUFFIX):
+        target = target.with_name(target.name + ENCRYPTED_SUFFIX)
+        if target.exists() and not overwrite:
+            raise FileExistsError(f"Backup file already exists: {target}")
     temporary = target.with_name(
         f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     )
+    snapshot = temporary if not encrypted else temporary.with_suffix(".plain")
     try:
         with get_db() as source:
-            destination_conn = sqlite3.connect(temporary)
+            destination_conn = sqlite3.connect(snapshot)
             try:
                 source.backup(destination_conn)
             finally:
                 destination_conn.close()
-        os.chmod(temporary, 0o600)
+        os.chmod(snapshot, 0o600)
+        if encrypted:
+            encrypt_file(snapshot, temporary, str(passphrase))
+            snapshot.unlink(missing_ok=True)
         os.replace(temporary, target)
     except Exception:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for item in (temporary, snapshot):
+            try:
+                item.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
 
     created_at = utcnow()
@@ -154,6 +182,7 @@ def create_backup(
         "path": str(target),
         "size": _file_size(target),
         "created_at": created_at,
+        "encrypted": encrypted,
     }
 
 
@@ -285,12 +314,36 @@ def _upgraded_source(source: Path, info: dict[str, Any]) -> tuple[Path, dict[str
     return temporary, upgraded_info, True
 
 
-def inspect_backup(path: str, mode: str = "all") -> dict[str, Any]:
+def inspect_backup(
+    path: str, mode: str = "all", passphrase: str | None = None
+) -> dict[str, Any]:
     """Inspect a backup without changing the live database."""
     mode = (mode or "").strip().lower()
     if mode not in RESTORE_MODES:
         raise ValueError("mode must be all, scans or settings")
     source = _source_path(path)
+    temporary: Path | None = None
+    if is_encrypted(source):
+        if not passphrase:
+            raise BackupCryptoError(
+                "This backup is encrypted; provide the backup passphrase"
+            )
+        fd, temp_name = tempfile.mkstemp(prefix="vulnscanner-inspect-", suffix=".db")
+        os.close(fd)
+        temporary = Path(temp_name)
+        try:
+            decrypt_file(source, temporary, passphrase)
+            source = temporary
+            info = _inspect_source(source, mode)
+            result = {
+                "ok": True,
+                **info,
+                "path": str(Path(path)),
+                "encrypted": True,
+            }
+        finally:
+            temporary.unlink(missing_ok=True)
+        return result
     info = _inspect_source(source, mode)
     return {
         "ok": True,
@@ -687,7 +740,9 @@ def _counts() -> dict[str, int]:
     return {key: int(row[key] or 0) for key in row.keys()}
 
 
-def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
+def restore_database(
+    path: str, mode: str = "all", passphrase: str | None = None
+) -> dict[str, Any]:
     """Restore a backup into the live database.
 
     ``mode`` is ``all`` (full database), ``scans`` (scan history merged into
@@ -699,6 +754,27 @@ def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
         raise ValueError("mode must be all, scans or settings")
 
     source = _source_path(path)
+    decrypted_temporary: Path | None = None
+    if is_encrypted(source):
+        if not passphrase:
+            raise BackupCryptoError(
+                "This backup is encrypted; provide the backup passphrase"
+            )
+        fd, temp_name = tempfile.mkstemp(prefix="vulnscanner-restore-", suffix=".db")
+        os.close(fd)
+        decrypted_temporary = Path(temp_name)
+        decrypt_file(source, decrypted_temporary, passphrase)
+        source = decrypted_temporary
+    try:
+        return _restore_database_source(source, mode, display_source=str(Path(path)))
+    finally:
+        if decrypted_temporary is not None:
+            decrypted_temporary.unlink(missing_ok=True)
+
+
+def _restore_database_source(
+    source: Path, mode: str, display_source: str | None = None
+) -> dict[str, Any]:
     original_info = _inspect_source(source, mode)
     info = original_info
     if mode in {"all", "scans"}:
@@ -752,14 +828,14 @@ def restore_database(path: str, mode: str = "all") -> dict[str, Any]:
 
     restored_at = utcnow()
     set_setting("last_restore_at", restored_at)
-    set_setting("last_restore_source", str(source))
+    set_setting("last_restore_source", display_source or str(source))
     set_setting("last_restore_mode", mode)
     set_setting("last_restore_safety_backup", str(safety["path"]))
     set_setting("last_restore_error", "")
     return {
         "ok": True,
         "mode": mode,
-        "source": str(source),
+        "source": display_source or str(source),
         "source_version": original_info["version"],
         "current_version": SCHEMA_VERSION,
         "upgraded": upgraded,

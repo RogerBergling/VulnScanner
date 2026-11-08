@@ -29,6 +29,22 @@ def test_settings_expose_gui_configuration(api_client):
         "max_scan_files",
         "max_cidr_hosts",
         "agent_job_timeout",
+        "network_connect_timeout",
+        "max_testssl_hosts",
+        "max_openvas_hosts",
+        "max_nuclei_network_targets",
+        "nvd_api_key_configured",
+        "tls_ca_bundle",
+        "interactsh_server",
+        "interactsh_token_set",
+        "allowed_hosts",
+        "max_request_bytes",
+        "satellite_port",
+        "satellite_port_saved",
+        "satellite_host",
+        "satellite_host_saved",
+        "tool_management",
+        "vulnerability_data",
         "mfa_enabled",
         "mfa",
         "session_ttl_hours",
@@ -201,3 +217,34 @@ def test_runtime_settings_reject_unsafe_paths(api_client, monkeypatch, tmp_path)
         "/api/settings/runtime", json={"seclists_subdomain_url": "file:///tmp/list"}
     )
     assert bad_url.status_code == 422
+
+
+def test_vulnerability_intelligence_and_depth_guardrails(api_client, tmp_path):
+    ca = tmp_path / "internal-ca.pem"
+    ca.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    response = api_client.patch(
+        "/api/settings",
+        json={
+            "nvd_api_key": "nvd-test-key",
+            "tls_ca_bundle": str(ca),
+            "interactsh_server": "https://oast.example.test",
+            "interactsh_token": "oast-token",
+            "network_connect_timeout": 1.25,
+            "max_testssl_hosts": 3,
+            "max_openvas_hosts": 2,
+            "max_nuclei_network_targets": 75,
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["nvd_api_key_configured"] is True
+    assert data["tls_ca_bundle"] == str(ca)
+    assert data["interactsh_server"] == "https://oast.example.test"
+    assert data["interactsh_token_set"] is True
+    assert data["network_connect_timeout"] == 1.25
+    assert data["max_testssl_hosts"] == 3
+    assert data["max_openvas_hosts"] == 2
+    assert data["max_nuclei_network_targets"] == 75
+    # Secrets are encrypted at rest and never returned.
+    assert get_setting("nvd_api_key", "") != "nvd-test-key"
+    assert get_setting("interactsh_token", "") != "oast-token"

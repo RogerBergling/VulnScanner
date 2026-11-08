@@ -19,6 +19,7 @@ from typing import Any
 
 import requests
 
+from ..config import tls_ca_bundle
 from ..utils import truncate
 from .base import Finding, ScanContext, ScanResult
 
@@ -353,13 +354,13 @@ def probe_mongodb(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> dict[
 
 
 def _http_get_json(host: str, port: int, path: str, timeout: float,
-                   https: bool = False) -> dict[str, Any] | None:
+                   https: bool = False, verify: bool | str = True) -> dict[str, Any] | None:
     scheme = "https" if https else "http"
     try:
         response = requests.get(
             f"{scheme}://{host}:{port}{path}",
             timeout=timeout,
-            verify=False,
+            verify=verify,
             headers={"User-Agent": "VulnScanner/1.0 (service probe)"},
         )
     except requests.RequestException:
@@ -372,8 +373,9 @@ def _http_get_json(host: str, port: int, path: str, timeout: float,
         return None
 
 
-def probe_elasticsearch(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> dict[str, Any] | None:
-    data = _http_get_json(host, port, "/", timeout)
+def probe_elasticsearch(host: str, port: int, timeout: float = PROBE_TIMEOUT,
+                        verify: bool | str = True) -> dict[str, Any] | None:
+    data = _http_get_json(host, port, "/", timeout, verify=verify)
     if not isinstance(data, dict) or "version" not in data:
         return None
     version = data.get("version", {})
@@ -388,8 +390,9 @@ def probe_elasticsearch(host: str, port: int, timeout: float = PROBE_TIMEOUT) ->
     }
 
 
-def probe_kibana(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> dict[str, Any] | None:
-    data = _http_get_json(host, port, "/api/status", timeout)
+def probe_kibana(host: str, port: int, timeout: float = PROBE_TIMEOUT,
+                 verify: bool | str = True) -> dict[str, Any] | None:
+    data = _http_get_json(host, port, "/api/status", timeout, verify=verify)
     if not isinstance(data, dict) or "name" not in data:
         return None
     version = data.get("version", {})
@@ -403,8 +406,8 @@ def probe_kibana(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> dict[s
 
 
 def probe_docker(host: str, port: int, timeout: float = PROBE_TIMEOUT,
-                 https: bool = False) -> dict[str, Any] | None:
-    data = _http_get_json(host, port, "/version", timeout, https=https)
+                 https: bool = False, verify: bool | str = True) -> dict[str, Any] | None:
+    data = _http_get_json(host, port, "/version", timeout, https=https, verify=verify)
     if not isinstance(data, dict) or "Version" not in data:
         return None
     return {
@@ -576,6 +579,10 @@ def run_service_probes(
     extra_banners: dict[tuple[str, int], str] = {}
     total = sum(len(items) for items in open_by_host.values())
     done = 0
+    verify: bool | str = False if ctx.option_bool("ignore_tls_errors", False) else (
+        tls_ca_bundle() or True
+    )
+    http_probes = {"probe_elasticsearch", "probe_kibana", "probe_docker"}
     for host, items in open_by_host.items():
         for item in items:
             done += 1
@@ -585,9 +592,12 @@ def run_service_probes(
             if not handler:
                 continue
             name, kwargs = handler
+            call_kwargs = dict(kwargs)
+            if name in http_probes:
+                call_kwargs["verify"] = verify
             try:
                 probe = globals()[name]
-                data = probe(host, item.port, **kwargs)
+                data = probe(host, item.port, **call_kwargs)
             except (OSError, requests.RequestException, socket.timeout):
                 continue
             if not data:

@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import requests
 from requests.packages import urllib3
 
+from ..config import get_limit, tls_ca_bundle
 from ..utils import normalize_target_url, redact_url, truncate
 from .base import Finding, ScanCancelled, ScanContext, ScanResult
 from .cpe import add_cve_findings, fingerprint_text, lookup_cves, lookup_epss
@@ -208,12 +209,17 @@ SECURITY_HEADERS = [
 ]
 
 
-def _session(verify_tls: bool = True) -> requests.Session:
+def _session(
+    verify_tls: bool = True,
+    ca_bundle: str = "",
+    web_auth: dict[str, Any] | None = None,
+) -> requests.Session:
     """Create a scanner HTTP session.
 
     TLS verification is enabled by default. A scan must explicitly opt in to
     ignoring certificate errors, which is intended only for self-signed lab
-    targets and is recorded in scan metadata/events.
+    targets and is recorded in scan metadata/events. A custom CA bundle lets
+    internal/private-CA targets stay verified.
     """
     session = requests.Session()
     session.headers.update(
@@ -223,7 +229,33 @@ def _session(verify_tls: bool = True) -> requests.Session:
             "Accept-Language": "en-US,en;q=0.7",
         }
     )
-    session.verify = bool(verify_tls)
+    if not verify_tls:
+        session.verify = False
+    elif ca_bundle:
+        session.verify = ca_bundle
+    else:
+        session.verify = True
+    if web_auth:
+        headers = {
+            str(key): str(value)
+            for key, value in (web_auth.get("headers") or {}).items()
+            if str(key).strip()
+        }
+        if headers:
+            session.headers.update(headers)
+        auth_type = str(web_auth.get("auth_type") or "").lower()
+        if auth_type == "basic":
+            session.auth = (
+                str(web_auth.get("username") or ""),
+                str(web_auth.get("password") or ""),
+            )
+        elif auth_type == "bearer":
+            session.headers["Authorization"] = f"Bearer {web_auth.get('token') or ''}"
+        elif auth_type == "cookie":
+            session.headers["Cookie"] = str(web_auth.get("cookie") or "")
+        elif auth_type == "header":
+            for key, value in (web_auth.get("headers") or {}).items():
+                session.headers[str(key)] = str(value)
     return session
 
 
@@ -849,21 +881,25 @@ def _run_cve_matching(result: ScanResult, ctx: ScanContext, url: str,
         texts.append((match.group(1), "html-generator-meta"))
     if not texts:
         return 0
-    max_lookups = 5
+    max_lookups = get_limit("max_cve_lookups", 25)
     try:
-        max_lookups = int(ctx.option("max_cve_lookups", 5))
+        max_lookups = int(ctx.option("max_cve_lookups", max_lookups))
     except (TypeError, ValueError):
         pass
     max_lookups = max(0, min(200, max_lookups))
     if max_lookups == 0:
         return 0
+    max_per_service = get_limit("max_cves_per_service", 50)
     try:
-        max_per_service = int(ctx.option("max_cves_per_service", 50))
+        max_per_service = int(
+            ctx.option("max_cves_per_service", max_per_service)
+        )
     except (TypeError, ValueError):
         max_per_service = 50
     max_per_service = max(1, min(500, max_per_service))
+    max_per_scan = get_limit("max_cves_per_scan", 500)
     try:
-        max_per_scan = int(ctx.option("max_cves_per_scan", 500))
+        max_per_scan = int(ctx.option("max_cves_per_scan", max_per_scan))
     except (TypeError, ValueError):
         max_per_scan = 500
     max_per_scan = max(1, min(5_000, max_per_scan))
@@ -911,7 +947,16 @@ def scan(ctx: ScanContext) -> ScanResult:
             "(ignore_tls_errors=true)",
             "warning",
         )
-    session = _session(verify_tls=not ignore_tls)
+    ca_bundle = tls_ca_bundle()
+    web_auth = ctx.option("_web_auth") or None
+    if web_auth:
+        ctx.log(
+            f"Using authenticated web session ({web_auth.get('auth_type') or 'custom'})",
+            "info",
+        )
+    session = _session(
+        verify_tls=not ignore_tls, ca_bundle=ca_bundle, web_auth=web_auth
+    )
     try:
         url, response, body = _resolve_web_target(ctx, session)
         ctx.progress(20, "Analyzing HTTP response")

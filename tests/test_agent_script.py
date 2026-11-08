@@ -223,3 +223,10 @@ def test_windows_agent_and_installer_contents():
     assert "Register-ScheduledTask" in installer_text
     assert "VulnScanner Agent" in installer_text
     assert "icacls" in installer_text
+
+
+def test_powershell_agent_advertises_package_inventory():
+    text = POWERSHELL_AGENT_PATH.read_text(encoding="utf-8")
+    assert '"packages"' in text
+    assert "function Get-InstalledPackages" in text
+    assert '$modules -contains "packages"' in text

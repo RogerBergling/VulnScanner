@@ -14,6 +14,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
@@ -42,6 +43,8 @@ from .config import (
     HOST,
     MAX_CIDR_HOSTS,
     PORT,
+    SATELLITE_HOST,
+    SATELLITE_PORT,
     SCAN_WORKERS,
     SECLISTS_REPOSITORY_URL,
     TOP_PORTS,
@@ -52,6 +55,8 @@ from .config import (
     database_path,
     env_file_path,
     get_limit,
+    max_request_bytes,
+    reload_tool_paths,
     reports_dir,
     seclists_subdomain_url,
     ssh_host_key_policy,
@@ -67,13 +72,16 @@ from .credentials import (
     encrypt_secret,
     list_credentials,
     normalize_input,
+    rotate_credential_key,
     scan_credentials_public,
     set_asset_credential,
     store_scan_credentials,
+    store_scan_web_auth,
     update_credential,
 )
 from .audit import record_request
 from .build_info import build_info
+from .certs import certificate_fingerprint
 from .database import (
     ensure_default_group,
     get_db,
@@ -119,6 +127,7 @@ from .schemas import (
     PolicyCreate,
     PolicyUpdate,
     ScanCreate,
+    ScanDiagnosticsRequest,
     RuntimeSettingsUpdate,
     SatelliteHeartbeatRequest,
     SatelliteJobResultRequest,
@@ -130,7 +139,12 @@ from .schemas import (
     ToolSettingsUpdate,
     WordlistUpdate,
 )
+from .scan_diagnostics import build_scan_diagnostics
 from .scanners.kev import KevSyncError, sync_kev
+from .vulnerability_data import (
+    start_sync as start_vulnerability_sync,
+    status as vulnerability_data_status,
+)
 from .scanners.nuclei import TAG_RE, update_templates
 from .scanners.pingcastle import parse_pingcastle_xml
 from .satellites import (
@@ -145,6 +159,7 @@ from .satellites import (
     queue_satellite_job,
     register_satellite,
     revoke_satellite,
+    rotate_satellite_token,
     update_satellite,
 )
 from .policies import (
@@ -177,6 +192,11 @@ from .security import (
     verify_admin,
 )
 from .tool_policy import DEFAULT_MINIMUMS, get_policy, set_policy
+from .tools_manager import (
+    catalog as tool_catalog,
+    install_tool_background,
+    set_tool_source,
+)
 from .utils import (
     format_duration,
     human_age,
@@ -239,6 +259,13 @@ def _directory_stats(path: Path) -> tuple[int, int]:
     except OSError:
         return count, size
     return count, size
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def _file_size(path: Path) -> int:
@@ -439,6 +466,7 @@ def dashboard() -> dict[str, Any]:
             "agents_online": online,
             "running_scans": scan_stats["running"],
             "waiting_agent_scans": scan_stats["waiting_agent"],
+            "waiting_satellite_scans": scan_stats["waiting_satellite"],
             "assessed_assets": latest_count,
         },
         "severity": severity,
@@ -871,6 +899,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "allow_http_fallback",
             "cve_lookup",
             "nuclei",
+            "oast",
             "sqlmap",
         ],
         "network": [
@@ -887,6 +916,8 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             "cve_lookup",
             "service_probes",
             "nuclei",
+            "nuclei_network",
+            "oast",
             "sqlmap",
             "openvas",
         ],
@@ -946,6 +977,7 @@ def _clean_options(scan_type: str, options: dict[str, Any]) -> dict[str, Any]:
             ("max_testssl_hosts", 0, 50),
             ("max_wildcard_hosts", 1, 10_000),
             ("max_openvas_hosts", 1, 50),
+            ("max_nuclei_network_targets", 1, 2000),
             ("ssh_port", 1, 65535),
             ("winrm_port", 1, 65535),
         ):
@@ -1239,6 +1271,12 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
     normalized_target = _normalize_scan_target(payload.scan_type, target)
     options = _clean_options(payload.scan_type, payload.options)
     policy_id = payload.policy_id if payload.policy_id is not None else default_policy_id()
+    if policy_id and payload.policy_id is None:
+        # A default policy only applies to its own scan type. Otherwise setting
+        # a default network policy would make every web scan fail validation.
+        default_policy = get_scan_policy(policy_id)
+        if not default_policy or default_policy["scan_type"] != payload.scan_type:
+            policy_id = None
     try:
         options = resolve_policy(policy_id, payload.scan_type, options)
     except ValueError as exc:
@@ -1298,12 +1336,28 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
                 status_code=400,
                 detail="Satellite execution is only available for network and web scans",
             )
-    if satellite_id and credential_entries:
+    if satellite_id and (credential_entries or options.get("authenticated")):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Per-scan credentials cannot be sent to a satellite. "
+                "Authenticated network scans cannot run on a satellite or agent. "
                 "Run the authenticated scan from the VulnScanner server instead."
+            ),
+        )
+    if agent and options.get("authenticated"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Authenticated network scans cannot run on an agent. "
+                "Run the authenticated scan from the VulnScanner server instead."
+            ),
+        )
+    if payload.web_auth and satellite_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Per-scan web authentication cannot be sent to a satellite. "
+                "Run the authenticated web scan on the VulnScanner server."
             ),
         )
     scan_id = _create_scan_record(
@@ -1329,6 +1383,13 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
     if agent:
         queue_network_scan_job(agent, scan_id, normalized_target, options)
     else:
+        if payload.web_auth:
+            try:
+                store_scan_web_auth(scan_id, payload.web_auth.model_dump())
+            except CredentialError as exc:
+                with transaction() as conn:
+                    conn.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         if credential_entries:
             try:
                 store_scan_credentials(scan_id, credential_entries)
@@ -1341,6 +1402,29 @@ def create_scan(payload: ScanCreate) -> dict[str, Any]:
             runtime["_github_token"] = payload.github_token.strip()
         submit_scan(scan_id, runtime)
     return _scan_detail(scan_id)
+
+
+@router.post("/scan-diagnostics")
+def scan_diagnostics(payload: ScanDiagnosticsRequest) -> dict[str, Any]:
+    agent = None
+    if payload.agent_id:
+        agent = get_agent(payload.agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+    satellite = None
+    executor = (payload.executor or "").strip()
+    if executor and executor not in {"auto", "server"}:
+        satellite = get_satellite(executor)
+        if not satellite:
+            raise HTTPException(status_code=404, detail="Satellite not found")
+    return build_scan_diagnostics(
+        payload.scan_type,
+        _clean_options(payload.scan_type, payload.options),
+        target=payload.target,
+        executor=executor,
+        agent=agent,
+        satellite=satellite,
+    )
 
 
 @router.get("/scans/{scan_id}")
@@ -1418,7 +1502,7 @@ def delete_scan(scan_id: int) -> dict[str, Any]:
         row = conn.execute("SELECT status FROM scans WHERE id = ?", (scan_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Scan not found")
-        if row["status"] in {"running", "queued", "waiting_agent"}:
+        if row["status"] in {"running", "queued", "waiting_agent", "waiting_satellite"}:
             raise HTTPException(status_code=409, detail="Cancel the scan before deleting it")
         conn.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
         conn.commit()
@@ -1975,6 +2059,7 @@ def server_status() -> dict[str, Any]:
                     (SELECT COUNT(*) FROM scans WHERE status = 'queued') scans_queued,
                     (SELECT COUNT(*) FROM scans WHERE status = 'running') scans_running,
                     (SELECT COUNT(*) FROM scans WHERE status = 'waiting_agent') scans_waiting_agent,
+                    (SELECT COUNT(*) FROM scans WHERE status = 'waiting_satellite') scans_waiting_satellite,
                     (SELECT COUNT(*) FROM agent_jobs WHERE status = 'queued') jobs_queued,
                     (SELECT COUNT(*) FROM agent_jobs
                         WHERE status IN ('running', 'processing')) jobs_running,
@@ -2001,6 +2086,7 @@ def server_status() -> dict[str, Any]:
         counts.get("scans_queued", 0)
         + counts.get("scans_running", 0)
         + counts.get("scans_waiting_agent", 0)
+        + counts.get("scans_waiting_satellite", 0)
     )
 
     try:
@@ -2117,6 +2203,7 @@ def server_status() -> dict[str, Any]:
             "scans_queued": counts.get("scans_queued", 0),
             "scans_running": counts.get("scans_running", 0),
             "scans_waiting_agent": counts.get("scans_waiting_agent", 0),
+            "scans_waiting_satellite": counts.get("scans_waiting_satellite", 0),
             "jobs_queued": counts.get("jobs_queued", 0),
             "jobs_running": counts.get("jobs_running", 0),
             "jobs_failed": counts.get("jobs_failed", 0),
@@ -2214,6 +2301,12 @@ def get_settings() -> dict[str, Any]:
         "session_idle_minutes": _session_idle_minutes(),
         "trust_proxy": os.getenv("VS_TRUST_PROXY", "false").strip().lower()
         in {"1", "true", "yes", "on"},
+        "allowed_hosts": os.getenv("VS_ALLOWED_HOSTS", ""),
+        "max_request_bytes": max_request_bytes(),
+        "satellite_port": SATELLITE_PORT,
+        "satellite_port_saved": _safe_int_env("VS_SATELLITE_PORT", SATELLITE_PORT),
+        "satellite_host": SATELLITE_HOST,
+        "satellite_host_saved": os.getenv("VS_SATELLITE_HOST", SATELLITE_HOST),
         "allow_private_outbound": get_setting("allow_private_outbound", "false") == "true",
         "dangerous_tools_enabled": get_setting("dangerous_tools_enabled", "false") == "true",
         "default_scan_policy": default_policy_id(),
@@ -2252,6 +2345,7 @@ def get_settings() -> dict[str, Any]:
         "ssh_known_hosts": ssh_known_hosts_path(),
         "ssh_host_key_policy": ssh_host_key_policy(),
         "tools": _tools_with_policy(),
+        "tool_management": tool_catalog(),
         "tool_paths": dict(TOOL_PATHS),
         "wordlist_path": str(subfinder_wordlist_path()),
         "seclists_url": SECLISTS_REPOSITORY_URL,
@@ -2285,7 +2379,22 @@ def get_settings() -> dict[str, Any]:
         "max_cve_lookups": int(get_setting("max_cve_lookups", "25")),
         "max_cves_per_service": int(get_setting("max_cves_per_service", "50")),
         "max_cves_per_scan": int(get_setting("max_cves_per_scan", "500")),
-        "nvd_api_key_configured": bool(os.getenv("VS_NVD_API_KEY", "").strip()),
+        "network_connect_timeout": float(
+            get_setting("network_connect_timeout", "0.45")
+        ),
+        "max_testssl_hosts": int(get_setting("max_testssl_hosts", "5")),
+        "max_openvas_hosts": int(get_setting("max_openvas_hosts", "5")),
+        "max_nuclei_network_targets": int(
+            get_setting("max_nuclei_network_targets", "200")
+        ),
+        "nvd_api_key_configured": bool(
+            os.getenv("VS_NVD_API_KEY", "").strip()
+            or get_setting("nvd_api_key", "").strip()
+        ),
+        "tls_ca_bundle": get_setting("tls_ca_bundle", ""),
+        "interactsh_server": get_setting("interactsh_server", ""),
+        "interactsh_token_set": bool(get_setting("interactsh_token", "")),
+        "vulnerability_data": vulnerability_data_status(),
     }
 
 
@@ -2326,6 +2435,38 @@ def update_settings(payload: SettingsUpdate) -> dict[str, Any]:
     if "gvm_password" in updates and updates["gvm_password"] is not None:
         password = str(updates["gvm_password"])
         set_setting("gvm_password", encrypt_secret(password) if password else "")
+
+    if "nvd_api_key" in updates and updates["nvd_api_key"] is not None:
+        key = str(updates["nvd_api_key"]).strip()
+        set_setting("nvd_api_key", encrypt_secret(key) if key else "")
+
+    if "interactsh_token" in updates and updates["interactsh_token"] is not None:
+        token = str(updates["interactsh_token"]).strip()
+        set_setting("interactsh_token", encrypt_secret(token) if token else "")
+
+    if "tls_ca_bundle" in updates and updates["tls_ca_bundle"] is not None:
+        value = str(updates["tls_ca_bundle"]).strip()
+        if value:
+            path = Path(value).expanduser()
+            if not path.is_absolute() or not path.is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail="TLS CA bundle must be an existing absolute file",
+                )
+            value = str(path.resolve())
+        set_setting("tls_ca_bundle", value)
+
+    if "interactsh_server" in updates and updates["interactsh_server"] is not None:
+        set_setting("interactsh_server", str(updates["interactsh_server"]).strip())
+
+    for key in ("max_testssl_hosts", "max_openvas_hosts", "max_nuclei_network_targets"):
+        if key in updates and updates[key] is not None:
+            set_setting(key, str(int(updates[key])))
+
+    if "network_connect_timeout" in updates and updates["network_connect_timeout"] is not None:
+        set_setting(
+            "network_connect_timeout", str(float(updates["network_connect_timeout"]))
+        )
 
     if "allow_private_outbound" in updates and updates["allow_private_outbound"] is not None:
         set_setting(
@@ -2414,6 +2555,22 @@ def sync_kev_catalog() -> dict[str, Any]:
         return sync_kev()
     except KevSyncError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/vulnerability-data")
+def get_vulnerability_data() -> dict[str, Any]:
+    return vulnerability_data_status()
+
+
+@router.post("/vulnerability-data/sync")
+def sync_vulnerability_data(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    targets = payload.get("targets")
+    if not isinstance(targets, list):
+        targets = ["nvd", "epss", "kev"]
+    result = start_vulnerability_sync([str(item) for item in targets])
+    if not result.get("started"):
+        raise HTTPException(status_code=409, detail=result.get("detail", "Sync not started"))
+    return result
 
 
 @router.post("/settings/nuclei/update-templates")
@@ -2574,9 +2731,40 @@ def _satellite_from_header(
     return satellite
 
 
+def _satellite_urls(request: Request) -> tuple[str, str]:
+    scheme = request.url.scheme or "https"
+    host_header = request.headers.get("host", "").strip()
+    parsed = urlparse(f"{scheme}://{host_header}") if host_header else request.url
+    host = parsed.hostname or request.url.hostname or HOST
+    default_port = 443 if scheme == "https" else 80
+    main_port = parsed.port or request.url.port or default_port
+    try:
+        from .config import SATELLITE_PORT
+
+        satellite_port = SATELLITE_PORT or main_port
+    except Exception:
+        satellite_port = main_port
+    return (
+        f"{scheme}://{host}:{main_port}",
+        f"{scheme}://{host}:{satellite_port}",
+    )
+
+
 @router.post("/satellites/pairing")
-def create_satellite_pairing() -> dict[str, Any]:
-    return create_pairing()
+def create_satellite_pairing(request: Request) -> dict[str, Any]:
+    pairing = create_pairing()
+    fingerprint = certificate_fingerprint()
+    enroll_url, server_url = _satellite_urls(request)
+    pairing["server_fingerprint"] = fingerprint
+    # Enrolment must use the main listener because the mTLS listener requires a
+    # client certificate that the satellite does not have yet.
+    pairing["enroll_url"] = enroll_url
+    pairing["server_url"] = server_url
+    pairing["satellite_url"] = server_url
+    pairing["mtls_port"] = int(
+        urlparse(server_url).port or (443 if server_url.startswith("https://") else 80)
+    )
+    return pairing
 
 
 @router.get("/satellites")
@@ -2596,6 +2784,19 @@ def satellites_update(satellite_id: str, payload: dict[str, Any]) -> dict[str, A
     return updated
 
 
+@router.post("/satellites/{satellite_id}/rotate-token")
+def satellites_rotate_token(satellite_id: str) -> dict[str, Any]:
+    if get_satellite(satellite_id) is None:
+        raise HTTPException(status_code=404, detail="Satellite not found")
+    token = rotate_satellite_token(satellite_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="Satellite not found or revoked")
+    return {
+        "token": token,
+        "detail": "Update the satellite configuration with the new token and restart the runner",
+    }
+
+
 @router.delete("/satellites/{satellite_id}")
 def satellites_revoke(satellite_id: str) -> dict[str, Any]:
     if get_satellite(satellite_id) is None:
@@ -2608,7 +2809,7 @@ def satellites_revoke(satellite_id: str) -> dict[str, Any]:
 # inbound firewall rule is needed on the master side of a DMZ deployment.
 
 @router.post("/satellite/pair")
-def satellite_pair(payload: SatellitePairRequest) -> dict[str, Any]:
+def satellite_pair(payload: SatellitePairRequest, request: Request) -> dict[str, Any]:
     registration = register_satellite(
         payload.pairing_code,
         payload.name,
@@ -2619,6 +2820,8 @@ def satellite_pair(payload: SatellitePairRequest) -> dict[str, Any]:
     )
     if not registration:
         raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
+    _enroll_url, server_url = _satellite_urls(request)
+    registration["server_url"] = server_url
     return registration
 
 
@@ -3048,6 +3251,32 @@ def set_admin_user(payload: AdminUserUpdate, request: Request) -> dict[str, Any]
     return {"ok": True, "admin_user": payload.username}
 
 
+@router.post("/settings/rotate-credential-key")
+def rotate_key(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    if admin_auth_enabled():
+        password = str(payload.get("password") or "")
+        if not verify_admin(admin_user(), password):
+            raise HTTPException(status_code=403, detail="Current admin password is required")
+    if str(payload.get("confirm") or "").strip().upper() != "ROTATE":
+        raise HTTPException(status_code=400, detail="Type ROTATE to confirm key rotation")
+    with get_db() as conn:
+        active = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM scans WHERE status IN "
+                "('queued','running','waiting_agent','waiting_satellite')"
+            ).fetchone()[0]
+        )
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail="Cancel or wait for active scans before rotating the credential key",
+        )
+    try:
+        return rotate_credential_key()
+    except CredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/settings/legacy-password/cleanup")
 def cleanup_legacy_password_endpoint(request: Request) -> dict[str, Any]:
     """Remove a plaintext legacy admin password from the environment file."""
@@ -3206,6 +3435,25 @@ def update_runtime_settings(payload: RuntimeSettingsUpdate) -> dict[str, Any]:
     if updates.get("trust_proxy") is not None:
         entries["VS_TRUST_PROXY"] = "true" if updates["trust_proxy"] else "false"
 
+    if "allowed_hosts" in updates and updates["allowed_hosts"] is not None:
+        allowed = str(updates["allowed_hosts"]).strip()
+        if allowed:
+            allowed = safe_value(allowed, "Allowed hosts")
+        entries["VS_ALLOWED_HOSTS"] = allowed
+        restart_required = True
+
+    if updates.get("max_request_bytes") is not None:
+        entries["VS_MAX_REQUEST_BYTES"] = str(int(updates["max_request_bytes"]))
+        restart_required = True
+
+    if updates.get("satellite_port") is not None:
+        entries["VS_SATELLITE_PORT"] = str(int(updates["satellite_port"]))
+        restart_required = True
+
+    if "satellite_host" in updates and updates["satellite_host"] is not None:
+        entries["VS_SATELLITE_HOST"] = str(updates["satellite_host"]).strip()
+        restart_required = True
+
     if entries:
         try:
             upsert_env_entries(env_file_path(BASE_DIR), entries)
@@ -3317,6 +3565,38 @@ def set_tool_paths(payload: ToolSettingsUpdate) -> dict[str, Any]:
         "tool_paths": dict(TOOL_PATHS),
         "tools": _tools_with_policy(),
     }
+
+
+@router.get("/tools")
+def list_tool_management() -> dict[str, Any]:
+    return {"tools": tool_catalog()}
+
+
+@router.patch("/tools/{name}")
+def update_tool_management(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        result = set_tool_source(
+            name,
+            str(payload.get("mode") or "system"),
+            str(payload.get("path") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reload_tool_paths()
+    return result
+
+
+@router.post("/tools/{name}/install")
+def install_managed_tool(name: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    try:
+        result = install_tool_background(
+            name,
+            version=str(payload.get("version") or ""),
+            log=lambda message: None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
 
 
 @router.get("/settings/wordlist")

@@ -68,12 +68,20 @@ template *updates* do). Gitleaks, Semgrep and `osv-scanner` have no separate
 Settings toggle; the scan's **External tools** option is their only gate.
 Wordlist DNS discovery is local and does not require external APIs.
 
+Each tool has a source chosen in **Settings → Optional command-line tools**:
+**System PATH**, **Explicit path**, **Managed download** or **Disabled**.
+Managed downloads are checksum-verified against the release checksum file and
+stored under `$VS_DATA_DIR/tools/`. Nuclei, Subfinder, Trivy, Gitleaks and
+osv-scanner support managed installation; tools without a published checksum
+remain manual/system-managed.
+
 Tool paths are resolved in this order:
 
-1. The matching `VS_*_PATH` environment variable, if it points to an existing
+1. The selected source (disabled, managed path, explicit path, or system).
+2. The matching `VS_*_PATH` environment variable, if it points to an existing
    file.
-2. The executable found on `PATH` (`testssl.sh` or `testssl` for testssl.sh).
-3. Not available: the scan logs a warning and continues.
+3. The executable found on `PATH` (`testssl.sh` or `testssl` for testssl.sh).
+4. Not available: the scan logs a warning and continues.
 
 Settings shows availability, path and version for `nmap`, `nuclei`, `testssl`,
 `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep` and `git`. Paths can
@@ -255,9 +263,21 @@ template-driven CVE, misconfiguration and exposure detection.
 - Only critical/high/medium templates are requested.
 - JSONL output is converted into `web` findings. Template ID, matcher, matched
   URL, CVE/CWE, CVSS, tags and remediation are retained when present.
+- **Network templates:** when **Nuclei network templates** is enabled (default
+  on), Nuclei runs its TCP-protocol templates (`-pt tcp`) against open
+  SMB/RDP/SSH/database/mail services. Results become `network` findings. This is
+  the main signature layer for non-HTTP services.
+- **OAST:** the default command adds `-no-interactsh`. If the per-scan **OAST
+  collaborator** option is enabled and an Interactsh server is configured in
+  Settings, the integration uses that collaborator and its token. It never
+  contacts a third-party collaborator without the explicit per-scan opt-in.
+- **Authenticated sessions:** Basic, bearer, cookie and custom headers from the
+  web scan dialog are written to a private `0600` temporary Nuclei config file,
+  not passed in argv, and the file is deleted after the run.
 - Findings are keyed by template and matcher so repeated matches deduplicate.
 - A missing binary or failed run is logged; built-in web checks continue.
-- Set `VS_NUCLEI_PATH` to pin a version.
+- Install Nuclei manually or use **Settings → Optional tools → Managed
+  download** (checksum-verified); `VS_NUCLEI_PATH` still pins a version.
 
 Nuclei templates can be intrusive and change over time. Use them only against
 authorised targets and with an agreed rate and time window.
@@ -315,6 +335,10 @@ engine through `gvm-cli`, adding feed-based results to network scans.
   linked or bundled.
 - `VS_GVM_CLI_PATH` pins the binary; `gvm-cli` or `omp` is searched on
   `PATH` otherwise.
+- **Local process-list exposure:** the current `gvm-cli` interface requires the
+  GVM password as a command-line argument. A local user who can inspect process
+  arguments may see it. Run VulnScanner on a dedicated host, restrict login
+  access, or use a GVM socket that does not require a reusable password.
 
 GMP task polling can take many minutes per host. Reserve the OpenVAS engine
 for targeted, authorised assessments.
@@ -556,6 +580,13 @@ vulnerability report:
   ranges server-side, so range-based advisories are included.
 - Responses are cached in SQLite for 24 hours, keyed by product and version,
   so rescans reuse downloaded data.
+- **Offline vulnerability data:** **Settings → Vulnerability data → Sync NVD +
+  EPSS + KEV** downloads product-level NVD records for every product in the
+  built-in fingerprint registry. Versions are evaluated locally, so CVE matching
+  continues to work during an internet outage. The sync also downloads the full
+  EPSS score table and refreshes the CISA KEV catalogue. OSV package lookups
+  reuse their response cache but still need live OSV for packages that were
+  never queried.
 - NVD is rate limited (5 requests/30 seconds without a key, 50 with
   `VS_NVD_API_KEY`); the client throttles itself and retries 429/5xx with
   backoff.
@@ -601,7 +632,10 @@ Settings shows whether the binary is visible and which version it reports.
 | Variable | Integration | Notes |
 | --- | --- | --- |
 | `VS_ENABLE_EXTERNAL_APIS` | OSV, KEV, NVD, EPSS, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy DB, SecLists download | Process-level switch; disabled in air-gapped deployments. |
-| `VS_NVD_API_KEY` | NVD CVE matching | Optional API key; raises the rate limit from 5 to 50 requests per 30 seconds. |
+| `VS_NVD_API_KEY` | NVD CVE matching | Optional API key; raises the rate limit from 5 to 50 requests per 30 seconds. Also editable and encrypted in Settings. |
+| `VS_TLS_CA_BUNDLE` | Web/service TLS | Custom PEM CA bundle; keeps verification on for private/self-signed internal CAs. |
+| `VS_INTERACTSH_SERVER` | Nuclei OAST | Optional self-hosted Interactsh collaborator. Used only with the per-scan OAST option. |
+| `VS_INTERACTSH_TOKEN` | Nuclei OAST | Optional collaborator token; encrypted when set in Settings. |
 | `VS_NMAP_PATH` | Nmap | Absolute path or empty to use `PATH`. |
 | `VS_NUCLEI_PATH` | Nuclei | Absolute path or empty to use `PATH`. |
 | `VS_TESTSSL_PATH` | testssl.sh | Absolute path or empty to use `PATH` (`testssl.sh` or `testssl`). |

@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from ..audit import record_request
 from ..config import HOST, PORT, database_path
@@ -46,6 +46,7 @@ def backup_database(
         result = create_backup(
             payload.destination if payload else None,
             overwrite=payload.overwrite if payload else False,
+            passphrase=payload.passphrase if payload else None,
         )
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -69,11 +70,12 @@ def backup_database(
 def inspect_database_backup(
     path: str,
     mode: str = Query(default="all", pattern="^(all|scans|settings)$"),
+    backup_passphrase: str | None = Header(default=None, alias="X-Backup-Passphrase"),
 ) -> dict[str, Any]:
     from ..backup import inspect_backup
 
     try:
-        return inspect_backup(path, mode)
+        return inspect_backup(path, mode, backup_passphrase)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -89,7 +91,7 @@ def restore_database_endpoint(payload: DatabaseRestoreRequest, request: Request)
         get_setting("ssl_enabled", os.getenv("VS_SSL", "true")),
     )
     try:
-        result = restore_database(payload.path, payload.mode)
+        result = restore_database(payload.path, payload.mode, payload.passphrase)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (OSError, sqlite3.Error) as exc:

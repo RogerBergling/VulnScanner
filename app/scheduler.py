@@ -134,24 +134,38 @@ def _job_target(schedule_id: int) -> None:
     """Called by the scheduler tick for one due schedule."""
     try:
         from .jobs import submit_scan
+        from .satellites import matching_satellite, queue_satellite_job
 
         schedule = get_schedule(schedule_id)
         if not schedule or not schedule.enabled or schedule.status == "failed":
             return
+
+        options = dict(schedule.options or {})
+        satellite_id = None
+        if schedule.scan_type in {"network", "web"} and not schedule.options.get("authenticated"):
+            satellite_id = matching_satellite(schedule.target)
+        if satellite_id:
+            # The satellite result handler reads this from the persisted scan
+            # to deliver the same schedule notifications as a local scan.
+            options["_schedule_id"] = schedule.id
+        status = "waiting_satellite" if satellite_id else "queued"
+        stage = "Waiting for satellite" if satellite_id else "Queued"
 
         with transaction() as conn:
             cursor = conn.execute(
                 "INSERT INTO scans("
                 "customer_id, group_id, asset_id, scan_type, target, status, progress, "
                 "stage, options, summary, requested_by, created_at"
-                ") VALUES (?, ?, ?, ?, ?, 'queued', 0, 'Queued', ?, '{}', 'schedule', ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, '{}', 'schedule', ?)",
                 (
                     schedule.customer_id,
                     schedule.group_id,
                     schedule.asset_id,
                     schedule.scan_type,
                     schedule.target,
-                    _json_dumps(schedule.options),
+                    status,
+                    stage,
+                    _json_dumps(options),
                     utcnow(),
                 ),
             )
@@ -159,7 +173,15 @@ def _job_target(schedule_id: int) -> None:
             conn.execute(
                 "INSERT INTO scan_events(scan_id, created_at, level, message) "
                 "VALUES (?, ?, 'info', ?)",
-                (scan_id, utcnow(), f"Scheduled scan queued for {schedule.target}"),
+                (
+                    scan_id,
+                    utcnow(),
+                    (
+                        f"Scheduled scan queued on satellite {satellite_id} for {schedule.target}"
+                        if satellite_id
+                        else f"Scheduled scan queued for {schedule.target}"
+                    ),
+                ),
             )
             conn.execute(
                 "UPDATE scan_schedules SET last_run = ?, next_run = ?, status = 'active', "
@@ -167,7 +189,18 @@ def _job_target(schedule_id: int) -> None:
                 (utcnow(), _next_run(schedule.cron_expression), utcnow(), schedule.id),
             )
 
-        submit_scan(scan_id, {"_scheduled": True, "_schedule_id": schedule.id})
+        if satellite_id:
+            queue_satellite_job(
+                satellite_id,
+                scan_id,
+                {
+                    "scan_type": schedule.scan_type,
+                    "target": schedule.target,
+                    "options": options,
+                },
+            )
+        else:
+            submit_scan(scan_id, {"_scheduled": True, "_schedule_id": schedule.id})
         logger.info("Queued scheduled scan %s for schedule %s", scan_id, schedule.id)
     except Exception as exc:  # pragma: no cover - defensive scheduler boundary
         logger.error("Scheduled scan %s failed: %s", schedule_id, exc)
@@ -233,12 +266,19 @@ def _scheduled_scan_tick() -> None:
 
 
 def _expire_agent_jobs_tick() -> None:
+    timeout = get_limit("agent_job_timeout", AGENT_JOB_TIMEOUT_SECONDS)
     try:
         from .agents import expire_stale_agent_jobs
 
-        expire_stale_agent_jobs(get_limit("agent_job_timeout", AGENT_JOB_TIMEOUT_SECONDS))
+        expire_stale_agent_jobs(timeout)
     except Exception as exc:  # pragma: no cover - defensive scheduler boundary
         logger.error("Agent job expiry tick failed: %s", exc)
+    try:
+        from .satellites import expire_stale_satellite_jobs
+
+        expire_stale_satellite_jobs(timeout)
+    except Exception as exc:  # pragma: no cover - defensive scheduler boundary
+        logger.error("Satellite job expiry tick failed: %s", exc)
 
 
 def stop_scheduler() -> None:

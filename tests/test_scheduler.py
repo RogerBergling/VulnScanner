@@ -109,3 +109,41 @@ def test_schedule_queues_a_scan(api_client, customer, monkeypatch):
     assert scan["requested_by"] == "schedule"
     assert updated["last_run"]
     assert updated["next_run"]
+
+
+def test_scheduled_scan_routes_to_matching_satellite(api_client, customer, monkeypatch):
+    response = api_client.post(
+        "/api/schedules",
+        json={
+            "customer_id": customer["id"],
+            "group_id": customer["group_id"],
+            "scan_type": "network",
+            "target": "10.30.5.10",
+            "cron_expression": "0 3 * * *",
+            "enabled": True,
+        },
+    )
+    assert response.status_code == 201, response.text
+    schedule = response.json()
+
+    jobs: list[tuple[str, int, dict]] = []
+    monkeypatch.setattr("app.satellites.matching_satellite", lambda target: "sat_test")
+    monkeypatch.setattr(
+        "app.satellites.queue_satellite_job",
+        lambda satellite_id, scan_id, payload: jobs.append((satellite_id, scan_id, payload)),
+    )
+    monkeypatch.setattr(
+        "app.jobs.submit_scan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not run locally")),
+    )
+
+    _job_target(schedule["id"])
+
+    assert jobs and jobs[0][0] == "sat_test"
+    satellite_id, scan_id, payload = jobs[0]
+    assert satellite_id == "sat_test"
+    assert payload["options"]["_schedule_id"] == schedule["id"]
+    with get_db() as conn:
+        scan = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    assert scan["status"] == "waiting_satellite"
+    assert scan["requested_by"] == "schedule"

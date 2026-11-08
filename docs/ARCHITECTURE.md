@@ -89,6 +89,10 @@ files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
 | `app/runtime_settings.py` | Mirrors database-backed listener/tool/admin values into `VS_ENV_FILE` for launchers and service managers. |
 | `app/build_info.py` | Resolves release version, build number/commit and build date/time from release env vars or Git, cached for the process. |
 | `app/net_guard.py` | SSRF-resistant URL validation and redirect-aware downloads. |
+| `app/scan_diagnostics.py` | Scan-readiness checks: APIs, tools, TLS trust, executor capabilities and skipped depth. |
+| `app/vulnerability_data.py` | Local NVD product cache, full EPSS table and KEV synchronisation for offline scanning. |
+| `app/tools_manager.py` | Per-tool source selection and checksum-verified managed downloads. |
+| `app/backup_crypto.py` | Optional AES-256-GCM passphrase encryption for database backups. |
 | `app/tool_policy.py` | Optional CLI tool minimum-version policy and scan enforcement. |
 | `app/jobs.py` | Small `ThreadPoolExecutor` that runs scan, AD import and agent-result tasks off the request thread. The pool size is `VS_SCAN_WORKERS` (default 4, range 1-32). |
 | `app/agents.py` | Creates agents and their assets, processes heartbeats and jobs, creates agent scans, renames/moves agents, rotates tokens and handles revocation. |
@@ -124,7 +128,9 @@ files for pip-based deployments. See [DEPENDENCIES.md](DEPENDENCIES.md).
 
 1. The worker re-reads the scan row and checks for an early cancellation.
 2. It marks the scan `running`, sets the start time and writes a `scan_events`
-   entry.
+   entry. `scan_diagnostics.py` records which vulnerability APIs, signature
+   engines, tools, TLS trust settings and executor capabilities are available;
+   skipped stages are logged and stored in `summary.metadata.diagnostics`.
 3. A `ScanContext` is created. It provides progress updates, event logging and
    cancellation checks to the engine.
 4. The engine returns a `ScanResult` containing findings and scan metadata.
@@ -215,8 +221,8 @@ directly.
 
 | Engine | Module | Approach |
 | --- | --- | --- |
-| Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, same-origin crawling, form and parameter inventory, safe SQL-error and reflected-input probes, optional Nuclei and testssl.sh. |
-| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, HTTP/HTTPS discovery with deep web checks (headers, exposed files, bounded crawl and injection probes), optional HTTP/TLS inspection, testssl.sh and Nmap XML parsing, optional ICMP reachability filtering, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results. |
+| Web | `scanners/web.py` | HTTP requests, header/cookie/TLS review, exposed-path checks, same-origin crawling, form and parameter inventory, safe SQL-error and reflected-input probes, optional authenticated Basic/bearer/cookie/header session, optional Nuclei (web and network templates) and testssl.sh. |
+| Network | `scanners/network.py` | Native Python TCP connect scanning with bounded concurrency, banner reads, dangerous-port rules, HTTP/HTTPS discovery with deep web checks (headers, exposed files, bounded crawl and injection probes), Nuclei network-protocol templates, optional HTTP/TLS inspection, testssl.sh and Nmap XML parsing, optional ICMP reachability filtering, plus authenticated host checks via `scanners/authenticated.py`. The same module normalises delegated agent results and enriches agent banners with CVE data. |
 | Authenticated host | `scanners/authenticated.py` | Chooses SSH or WinRM per host, performs one authentication attempt, collects OS/patch/package/user/configuration inventory, parses it and emits host findings and OSV package CVEs. |
 | Repository | `scanners/repository.py` | Local path or GitHub clone, then secrets, dependencies and source review, plus optional Trivy. Temporary clones are deleted in a `finally` block. |
 | Dependencies | `scanners/dependencies.py` | Manifest/lockfile parsers for npm, Python, Go, Rust, PHP, Ruby, Java and .NET; OSV.dev batch queries; optional `osv-scanner` supplement. |
@@ -236,11 +242,14 @@ severity that the server considers higher.
 
 ### 6.1 Optional tools
 
-`scanners/tools.py` resolves tool paths from `VS_*_PATH` or `PATH`, reports
-versions for Settings and launches tools with argument arrays (never a shell).
-Each integration is gated by the scan's **External tools** option and, where
-relevant, by the Settings toggles or `VS_ENABLE_EXTERNAL_APIS`. Tool failures are
-logged but do not fail the scan.
+`scanners/tools.py` resolves tool paths from the operator-selected source
+(system PATH, explicit path, managed download or disabled), then `VS_*_PATH`
+and `PATH`. `tools_manager.py` performs checksum-verified managed downloads
+under `$VS_DATA_DIR/tools`. The wrapper reports versions for Settings and
+launches tools with argument arrays (never a shell). Each integration is gated
+by the scan's **External tools** option and, where relevant, by the Settings
+toggles or `VS_ENABLE_EXTERNAL_APIS`. Tool failures are logged but do not fail
+the scan.
 
 ### 6.2 Authenticated host scanning
 
@@ -276,6 +285,11 @@ credentials and returns unauthenticated network results.
   Matching CVEs are annotated at persistence time with the KEV name, due date,
   ransomware flag and required action. Synchronisation is not scheduled
   automatically.
+- **Offline product cache:** Settings → Vulnerability data downloads
+  product-level NVD records for all fingerprinted products, the full EPSS table
+  and the KEV catalogue. `lookup_cves()` evaluates the cached NVD
+  `configurations` locally, so CVE matching works without internet access after
+  a sync. OSV remains a live/cached per-package lookup.
 - If enrichment fails, the original finding is still saved.
 
 ## 7. Endpoint agent architecture
@@ -319,23 +333,29 @@ permitted; the master never opens an inbound connection to a satellite.
 Flow:
 
 1. The operator creates a one-time pairing code (Settings-free; Satellites
-   page). The satellite enrolls with `python -m app.satellite enroll`, and
+   page). The dialog includes the master certificate SHA-256 fingerprint. The
+   satellite enrolls with `python -m app.satellite enroll --fingerprint ...`;
    the master issues a client certificate signed by the internal CA plus a
-   long-lived bearer token (stored SHA-256-hashed) and pins the certificate
-   fingerprint.
+   long-lived bearer token (stored SHA-256-hashed) and pins the client
+   certificate fingerprint. The satellite pins the master certificate, so a
+   default self-signed master works without `--insecure`.
 2. The satellite polls `POST /api/satellite/heartbeat`,
    `/api/satellite/jobs/next` and `/api/satellite/jobs/{id}/result` with the
-   bearer token. When `VS_SSL_CLIENT_CA` is configured, the listener also
-   verifies presented client certificates at the TLS layer (mTLS).
+   bearer token. **Settings → Advanced runtime → Satellite mTLS port** starts a
+   dedicated listener that requires the internal-CA client certificate and
+   serves only the satellite API; the main listener remains available to
+   browsers and agents.
 3. A network/web scan with `executor=auto` is routed to the first online
-   satellite whose advertised subnets overlap the target CIDR; `server`
+   satellite whose advertised subnets overlap the target. CIDRs, single IPs,
+   hostnames and web URLs are resolved to networks before matching; `server`
    forces local execution and an explicit satellite id forces that node.
-   Routed scans become `waiting_satellite` scans backed by a
-   `satellite_jobs` row.
-4. The satellite executes the job locally with a database-free
-   `SatelliteContext`, uploads normalized findings plus metadata, and the
-   master persists them through the same `persist_result` path as local
-   scans (dedup, KEV/ATT&CK/EPSS enrichment, inventory, history).
+   Routed scans become `waiting_satellite` scans backed by a `satellite_jobs`
+   row.
+4. The satellite executes the job locally with a `SatelliteContext`. The runner
+   initializes a local SQLite cache/settings database (findings are never
+   stored there), uploads normalized findings plus metadata/logs, and the master
+   persists them through the same `persist_result` path as local scans (dedup,
+   KEV/ATT&CK/EPSS enrichment, inventory, history).
 
 Satellite jobs are bounded by the agent job timeout guardrail, satellites can
 be revoked from the GUI (queued jobs are cancelled), and results are always
@@ -419,9 +439,10 @@ keeps installation simple. Consequences:
 - No multi-tenant server isolation: all data is visible to the single
   authenticated operator.
 - No role-based access control, per-user accounts or approval workflow.
-- No exploitation, credential brute forcing, authenticated web crawling or
-  post-exploitation. Authenticated host scans make a single login attempt per
-  host and never enumerate passwords.
+- No exploitation, credential brute forcing, form-login web macros or
+  post-exploitation. Authenticated web scans support Basic/bearer/cookie/custom
+  headers only; authenticated host scans make a single login attempt per host
+  and never enumerate passwords.
 - No arbitrary distributed scanning, horizontal worker scaling or external job
   queue. Network and web scans can be delegated to enrolled agents or to
   paired satellite servers (which poll the master outbound), but there is no

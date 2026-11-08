@@ -86,6 +86,22 @@ VERSION_ARGS = {
 
 
 def tool_path(name: str) -> str | None:
+    try:
+        from ..tools_manager import configured_tool_path, managed_tool_path, tool_mode
+
+        mode = tool_mode(name)
+        if mode == "disabled":
+            return None
+        if mode == "managed":
+            return managed_tool_path(name)
+        if mode == "path":
+            configured = configured_tool_path(name) or (TOOL_PATHS.get(name) or "").strip()
+            path = Path(configured).expanduser() if configured else None
+            return str(path) if path and path.is_file() else None
+    except Exception:
+        # Tool management is optional; fall back to the historical PATH
+        # resolution if its state cannot be read.
+        pass
     configured = (TOOL_PATHS.get(name) or "").strip()
     if configured:
         path = Path(configured).expanduser()

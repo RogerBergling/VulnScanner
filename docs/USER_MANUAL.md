@@ -16,9 +16,11 @@ intended for:
   inbound listener on every host.
 
 It is not a hosted service, an exploit framework, a password cracker, or a
-replacement for a qualified penetration tester. It does not authenticate to
-targets, brute force credentials, or modify scanned systems. Active Directory
-collection is read-only.
+replacement for a qualified penetration tester. It does not brute force
+credentials or modify scanned systems. Authenticated scans use an operator-
+supplied account and make at most one login attempt per host; authenticated web
+scans support Basic, bearer, cookie and custom-header sessions, not form-login
+macros. Active Directory collection is read-only.
 
 ## 2. Starting and stopping
 
@@ -94,8 +96,11 @@ restart and re-enrol. Restrict console access accordingly.
 VulnScanner does not bundle the optional command-line tools. Without them the
 built-in scanners still run; the missing integration is logged and skipped.
 Install only the tools you need, then check **Settings → Optional command-line
-tools**. That page shows the detected path and version and lets you set an
-absolute path.
+tools**. Each tool can use the system `PATH`, an explicit absolute path, a
+checksum-verified **Managed download** under `$VS_DATA_DIR/tools/`, or be
+disabled. That page shows the detected path and version. Managed installation is
+available for Nuclei, Subfinder, Trivy, Gitleaks and osv-scanner; other tools
+still use the OS package manager or an explicit path.
 
 The Settings toggles for Nmap, Nuclei, testssl.sh, Trivy and Subfinder can
 disable an installed tool. Gitleaks, Semgrep and `osv-scanner` are controlled by
@@ -165,8 +170,11 @@ Nuclei needs its templates once:
 nuclei -update-templates
 ```
 
-VulnScanner does not update Nuclei templates automatically. Review template
-changes before using them against production targets.
+VulnScanner updates Nuclei templates daily at 03:30 UTC when the integration and
+external APIs are enabled. You can also run **Settings → Scanning integrations →
+Update templates now**. Review template changes before using them against
+production targets, or disable the integration if you need a frozen template
+set.
 
 Trivy downloads its vulnerability database on first use when external APIs are
 enabled. Its cache is `VS_DATA_DIR/trivy-cache`. For an offline deployment,
@@ -380,8 +388,8 @@ Checks include, where applicable:
 - Mixed content and insecure transport references.
 - Reflected input and other non-destructive active checks when **Active checks**
   is enabled.
-- Optional Nuclei templates when **External tools** is enabled and Nuclei is
-  installed.
+- Nuclei templates when the **Nuclei signature engine** option is enabled
+  (default on) and Nuclei is installed.
 
 Options:
 
@@ -396,8 +404,10 @@ Options:
 | Ignore TLS certificate errors | off | Disable certificate verification for self-signed/lab targets. The scan event log records that verification was disabled. |
 | Allow HTTPS → HTTP fallback | off | Retry a failed HTTPS request over plain HTTP. The scan event log records the downgrade. |
 | Max pages to crawl | 10 | Same-origin HTML pages linked from the target (0-50). Set 0 to disable crawling. |
+| Authenticated web session | off | HTTP Basic, bearer token, raw Cookie header or custom headers for the crawl and active checks. Nuclei receives the same headers through a private temporary config file. Form-login macros are not implemented. |
+| OAST collaborator | off | Allow Nuclei to use the Interactsh server configured in Settings for blind SSRF/RCE/XXE templates. Requires an explicit per-scan opt-in. |
 
-Web scanning does not log in, submit destructive forms, brute force, or exploit
+Web scanning does not submit destructive forms, brute force, or exploit
 SQL injection/XSS. It reports indicators that require manual validation.
 
 ### 5.2 Network scan
@@ -482,10 +492,12 @@ Options:
 | Run from | VulnScanner server | Run on the server, or delegate to an enrolled agent from its network position. |
 | Port profile | `common` | `common`, `web`, `top1000` or `all` (1-10000). |
 | Ports | profile | Explicit list/ranges, for example `22,80,443,8000-8100`. Overrides the profile. |
-| Connect timeout | 0.45 s | Per-port TCP connect timeout, clamped to 0.1-3.0 s. |
+| Connect timeout | Settings (0.45 s) | Per-port TCP connect timeout, clamped to 0.1-3.0 s. The Settings guardrail supplies the default. |
 | External tools | off | Run Nmap service/version detection if installed (server-side scans only). |
 | Web vulnerability checks | on | Detect HTTP/HTTPS, then crawl, check headers/exposed files, run injection probes and optional Nuclei. |
 | Nuclei signature engine | on | Run CVE/misconfiguration/exposure templates against discovered web services when nuclei is installed. Tag filter tunable per scan or via Settings. |
+| Nuclei network templates | on | Run Nuclei network-protocol templates against open SMB/RDP/SSH/database/mail services. This is the main signature layer for non-HTTP services. |
+| OAST collaborator | off | Allow Nuclei to use the configured Interactsh server for blind SSRF/RCE/XXE templates. Explicit opt-in. |
 | sqlmap (dangerous) | off | Send real SQL injection payloads to parameters of discovered web services. Requires the Settings dangerous-tools switch AND this option. |
 | OpenVAS engine (external) | off | Run a Greenbone/OpenVAS task per host when the GVM stack is configured in Settings (also needs External tools). Slow; server scans only. |
 | Service security probes | on | Read-only active probes: SMB signing and SMBv1, default SNMP communities over UDP 161, unauthenticated Redis/MongoDB/Elasticsearch/Docker/Memcached/Kibana, RDP NLA support and VNC authentication (server scans only). |
@@ -505,9 +517,12 @@ and higher-severity findings for dangerous exposures.
 **Run from** when starting a network scan, or use **Scan now** on the agent
 detail page. The scan is queued as `waiting_agent` and an online agent starts it
 on its next poll; an offline agent holds it until it reconnects. Delegated scans
-use TCP connect probes from the endpoint and do not run Nmap. The agent must
+use TCP connect probes from the endpoint and do not run Nmap, web crawling or
+Nuclei. The server still applies dangerous-port rules, banner/CPE
+fingerprinting and NVD CVE enrichment to the uploaded banners. The agent must
 belong to the selected customer/group and advertise the `network` module. This
-is useful for private subnets that the VulnScanner server cannot reach.
+is useful for private subnets that the VulnScanner server cannot reach; use a
+satellite when you need full web/signature depth.
 
 ### 5.3 Authenticated host checks
 
@@ -734,18 +749,30 @@ The master owns all results and shows them in one GUI.
    command to run on the second server:
    ```bash
    python -m app.satellite enroll --server https://scanner.example.com \
-     --code vs_pair_... --name dmz-1 --subnets 10.30.0.0/16
+     --code vs_pair_... --fingerprint <sha256> \
+     --name dmz-1 --subnets 10.30.0.0/16
    ```
+   The fingerprint pins the master certificate, so a default self-signed
+   installation does not need insecure TLS. `--ca-cert /path/to/ca.pem` is an
+   alternative for CA-based verification, and `--insecure` is lab-only.
    The satellite downloads a client certificate signed by the internal CA and
    stores its token locally.
 2. Run `python -m app.satellite run` on the satellite (install it as a service
    for permanent use). It polls the master over outbound HTTPS; no inbound
-   firewall rule is needed.
+   firewall rule is needed. The runner initializes a local cache database for
+   tool settings and NVD/EPSS data; it never stores findings.
 3. Advertise the subnets the satellite can reach (at pairing or via
-   **Edit**). A network scan whose target CIDR overlaps an online satellite's
-   advertised subnets runs there automatically (`executor=auto`). The scan
-   dialog's **Executor** dropdown overrides this per scan: server, auto, or a
-   specific satellite.
+   **Edit**). A scan whose target CIDR, single IP, hostname or web URL resolves
+   inside an online satellite's advertised subnets runs there automatically
+   (`executor=auto`). The scan dialog's **Executor** dropdown overrides this per
+   scan: server, auto, or a specific satellite.
+4. For mTLS, set **Settings → Advanced runtime → Satellite mTLS port** to a
+   dedicated port. The master then requires the satellite client certificate
+   signed by the internal CA on that port; the main listener stays usable by
+   browsers and agents.
+5. **Edit** a satellite to rename it, change advertised subnets, rotate its
+   bearer token, or revoke it. Token rotation invalidates the old token
+   immediately; update `satellite.json` and restart the runner.
 
 Satellite findings flow through the same persistence path as local scans:
 deduplication, KEV/ATT&CK/EPSS enrichment, inventory and history. Revoking a
@@ -880,15 +907,15 @@ Agent modules:
 | Module | What it collects |
 | --- | --- |
 | `system` | OS, hardware, patch/update state, firewall, antivirus, disk encryption, local account and service configuration, platform-specific baseline checks. |
-| `packages` | Installed OS packages plus Python/npm/Windows program inventory, matched against OSV. Python agent only. |
+| `packages` | Installed OS packages plus Python/npm/Windows program inventory. Python/npm entries are matched against OSV; Windows registry software also gets local end-of-life checks. Both agents support it. |
 | `ports` | Listening TCP/UDP sockets and bind addresses. |
 | `network` | TCP connect scan of a host, IP or CIDR from the agent's network position. |
 | `secrets` | Secret patterns in selected local paths. Requires at least one path. Python agent only. |
 | `repo` | Manifest inventory from selected local paths. Requires at least one path. Python agent only. |
 | `ad` | Read-only AD collection on Windows. Requires a Windows agent and the `ad_audit.ps1` collector. |
 
-The native Windows agent advertises `system`, `ports`, `network` and `ad` (when
-the collector is installed). The Python agent adds `packages`, `secrets` and
+The native Windows agent advertises `system`, `packages`, `ports`, `network`
+and `ad` (when the collector is installed). The Python agent adds `secrets` and
 `repo`. The scan dialog disables modules the selected agent did not report in
 its latest heartbeat.
 
@@ -910,20 +937,32 @@ The Settings page shows:
   webhook** buttons. SMTP TLS certificates are verified by default; **Allow
   insecure SMTP TLS** is a lab-only opt-out and is logged.
 - **Scan guardrails** for web-host, worker, repository-size, source-file,
-  file-count, CIDR-host and agent-job-timeout limits.
-- Optional tool installation status, versions and editable absolute paths.
+  file-count, CIDR-host, agent-job-timeout, CVE-lookup, testssl-host,
+  OpenVAS-host, Nuclei-network-target and TCP-connect-timeout limits.
+- Optional tool installation status, versions and a per-tool source:
+  **System PATH**, **Explicit path**, **Managed download** or **Disabled**.
+  Managed downloads for Nuclei, Subfinder, Trivy, Gitleaks and osv-scanner are
+  checksum-verified and stored under `$VS_DATA_DIR/tools/`.
 - **Tool version policy** with warn-only or strict enforcement and per-tool
   minimum versions.
 - **Subdomain wordlist** editor with a **Load SecLists list** action.
+- **Vulnerability data** for local NVD product records, full EPSS scores and
+  CISA KEV, with a background **Sync NVD + EPSS + KEV** action. NVD sync covers
+  every product in the built-in fingerprint registry.
+- **Vulnerability intelligence and internal TLS** for the encrypted NVD API
+  key, a custom CA bundle for internal HTTPS targets and an optional
+  Interactsh/OAST collaborator.
 - KEV catalogue count and last sync time.
 - **Target credentials** for authenticated network scans, with encrypted
   passwords/SSH keys, customer/global scope and default flags.
 - **Advanced runtime** for scan workers, the deployment external-API master
   switch, SSH known_hosts and host-key policy, the subdomain wordlist path, the
   SecLists download URL, session lifetime/idle timeout, reverse-proxy trust,
-  the private-network outbound override and **Storage location**.
+  allowed Host headers, maximum request body, the dedicated satellite mTLS
+  bind address/port, the private-network outbound override and **Storage
+  location**.
 - **Security and access** for the bind address/port, HTTPS, admin username,
-  dashboard password and authenticator MFA.
+  dashboard password, authenticator MFA and **Rotate credential key**.
 - Database path, size and reports path.
 - The active and saved parallel worker count (`VS_SCAN_WORKERS`).
 
@@ -937,8 +976,8 @@ Integration toggles, SMTP, notifications, guardrails, tool paths, listener
 settings and the salted admin password hash are stored in SQLite and included in
 database backups. Listener and tool settings are mirrored to `.env` for the
 launcher. Tool paths, known_hosts, the wordlist path and the SecLists URL apply
-immediately. Listener, HTTPS, scan-worker and external-API-master changes need a
-restart.
+immediately. Listener, HTTPS, scan-worker, external-API-master, allowed-host,
+request-body and satellite-port changes need a restart.
 
 The bind address and port are edited under **Settings → Security**. The running
 listener keeps its current address; the new value is applied after restarting
@@ -956,8 +995,10 @@ backup API, verifies integrity, copies the credential key and supporting
 directories, updates the environment file and switches the running process. The
 old location is never deleted. Restart VulnScanner afterwards. Relocation is
 refused while scans are active unless explicitly forced, and an existing target
-database needs overwrite confirmation. Rotating `VS_CREDENTIAL_KEY` still
-requires a planned migration; changing the data directory copies the key
+database needs overwrite confirmation. **Settings → Security → Rotate credential
+key** re-encrypts every stored credential, web session and encrypted secret,
+keeps the previous key as `credential.key.old`, and requires typing `ROTATE`
+plus the current admin password. Changing the data directory copies the key
 automatically.
 
 For a systemd service, set `VS_ENV_FILE` to the service's `EnvironmentFile`
@@ -993,7 +1034,9 @@ Maintenance actions:
 
 - **Back up database** creates a consistent SQLite copy. Enter an absolute
   directory or `.db` file path, or leave the field empty to use
-  `$VS_DATA_DIR/reports/backups/`. The backup contains scans, customers,
+  `$VS_DATA_DIR/reports/backups/`. An optional passphrase encrypts the snapshot
+  with AES-256-GCM and writes a `.vsenc` file; the passphrase is never stored.
+  The backup contains scans, customers,
   assets, agents, credentials, schedules and the Settings-page configuration,
   including integration toggles, SMTP, notifications, guardrails, tool paths,
   listener/HTTPS choices and the salted admin password hash. Keep the matching
@@ -1092,6 +1135,34 @@ version that supports delegated network scans.
 Use a hostname without spaces. Only `http://` and `https://` are accepted.
 Credentials in URLs are not recommended; remove spaces and invalid ports.
 
+### A scan reports only open ports
+
+Open the scan and read the **Scan readiness** panel and events. Common causes:
+
+- `Nuclei not installed; using built-in checks only` — install Nuclei or choose
+  **Settings → Optional tools → Managed download**.
+- `CVE matching: no service versions could be fingerprinted` — the service does
+  not expose a version banner; enable Nmap, use Nuclei network templates, or
+  enable authenticated checks.
+- External APIs disabled or NVD unreachable — run **Settings → Vulnerability
+  data → Sync NVD + EPSS + KEV** for offline coverage.
+- The scan ran through an **agent** — agent network scans are unauthenticated
+  TCP discovery. The server enriches banners with CVE data, but web checks and
+  Nuclei do not run on the agent. Use a server or satellite for full depth.
+- The target is a satellite scan whose local cache database was never
+  initialized. The runner now initializes it automatically; update the
+  satellite code and restart `python -m app.satellite run`.
+- Web checks and/or service probes were unchecked in the scan dialog.
+
+### An HTTPS web service is skipped or shows only an open port
+
+The certificate is probably self-signed, issued by a private CA, or does not
+match the scanned hostname/IP. Add the private CA under **Settings →
+Vulnerability intelligence → Custom CA bundle**, scan by hostname instead of
+IP, or enable **Ignore TLS certificate errors** for that authorised lab target.
+The scan now records a **Web service on port N could not be inspected** finding
+with the TLS error instead of silently skipping the service.
+
 ### A network scan finds nothing
 
 The host may block TCP connects, the port profile may not include the service,
@@ -1119,11 +1190,13 @@ the **Allow external APIs** toggle is on, and the server can reach
 
 ### Nmap/Nuclei/testssl.sh/Trivy/Subfinder is not used
 
-Install the tool, ensure it is executable, and set the matching path variable
-or leave it empty so `PATH` is used. Confirm the scan option and Settings toggle
-are enabled. The Settings page shows availability and version and accepts an
-absolute path. For Trivy offline, ensure a database is already cached under
-`data/trivy-cache`. For Subfinder, external APIs must be enabled.
+Install the tool, ensure it is executable, and choose its source under
+**Settings → Optional command-line tools**: system `PATH`, an explicit absolute
+path, a checksum-verified managed download, or disabled. Confirm the scan option
+and Settings toggle are enabled. For Nuclei, also check the template update
+status and whether **Nuclei network templates** is enabled for network scans.
+For Trivy offline, ensure a database is already cached under `data/trivy-cache`.
+For Subfinder, external APIs must be enabled.
 
 ### GitHub clone fails
 

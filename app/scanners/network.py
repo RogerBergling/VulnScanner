@@ -19,8 +19,8 @@ from urllib.parse import urlparse
 import requests
 from requests.packages import urllib3
 
-from ..config import DANGEROUS_PORTS, MAX_CIDR_HOSTS, SERVICE_NAMES, get_limit
-from ..database import get_setting
+from ..config import DANGEROUS_PORTS, MAX_CIDR_HOSTS, SERVICE_NAMES, get_limit, tls_ca_bundle
+from ..database import setting_or_default
 from ..utils import (
     parse_ports,
     parse_target_list,
@@ -329,18 +329,59 @@ def _http_service(
     schemes = ["https", "http"] if port in TLS_PORTS else ["http", "https"]
     response = None
     used_scheme = schemes[0]
-    session = web_session(verify_tls=not ctx.option_bool("ignore_tls_errors", False))
+    verify_tls = not ctx.option_bool("ignore_tls_errors", False)
+    session = web_session(
+        verify_tls=verify_tls,
+        ca_bundle=tls_ca_bundle(),
+        web_auth=ctx.option("_web_auth") or None,
+    )
+    errors: list[str] = []
     try:
         for scheme in schemes:
             try:
                 response = safe_get(session, f"{scheme}://{host}:{port}/", timeout=probe_timeout)
                 used_scheme = scheme
                 break
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                errors.append(f"{scheme}: {exc}")
                 continue
     finally:
         session.close()
     if response is None:
+        detail = "; ".join(errors[-2:]) or "no HTTP/HTTPS response"
+        ctx.log(f"HTTP probe failed on {host}:{port}: {detail}", "warning")
+        tls_like_error = any(
+            token in detail.lower()
+            for token in ("certificate", "ssl", "tls", "handshake")
+        )
+        if port in HTTP_PORTS or port in TLS_PORTS or tls_like_error:
+            result.add(
+                Finding(
+                    severity="low" if port in TLS_PORTS or tls_like_error else "info",
+                    title=f"Web service on port {port} could not be inspected",
+                    category="network",
+                    description=(
+                        "The port is a likely HTTP/HTTPS service, but the scanner "
+                        "could not complete a web request. Common causes are a "
+                        "self-signed/private-CA certificate, a hostname mismatch "
+                        "when scanning by IP, or a service that expects another "
+                        "protocol."
+                    ),
+                    evidence=(
+                        f"Target: {host}:{port}\n"
+                        f"TLS verification: {'on' if verify_tls else 'off'}\n"
+                        f"CA bundle: {tls_ca_bundle() or '(system trust store)'}\n"
+                        f"Errors: {truncate(detail, 800)}"
+                    ),
+                    remediation=(
+                        "Use the target hostname instead of an IP, add the private "
+                        "CA to VS_TLS_CA_BUNDLE/Settings, or enable 'Ignore TLS "
+                        "certificate errors' only for an authorised lab target."
+                    ),
+                    location=f"{host}:{port}",
+                    key=f"web-probe-failed:{host}:{port}",
+                )
+            )
         return None
     body = (response.content or b"")[:200_000].decode(response.encoding or "utf-8", errors="replace")
     title = _title(body)
@@ -388,7 +429,11 @@ def _web_vulnerability_checks(
     body: str,
 ) -> int:
     """Run the reusable web checks against a discovered HTTP service."""
-    session = web_session(verify_tls=not ctx.option_bool("ignore_tls_errors", False))
+    session = web_session(
+        verify_tls=not ctx.option_bool("ignore_tls_errors", False),
+        ca_bundle=tls_ca_bundle(),
+        web_auth=ctx.option("_web_auth") or None,
+    )
     pages_crawled = 0
     try:
         _add_header_findings(result, url, response, body, ctx)
@@ -586,7 +631,7 @@ def _run_nmap(
 ) -> list[dict[str, Any]]:
     if not ctx.option_bool("external_tools", False) or not open_ports:
         return []
-    if get_setting("nmap_enabled", "true") != "true":
+    if setting_or_default("nmap_enabled", "true") != "true":
         return []
     path = tool_path("nmap")
     if not path:
@@ -746,13 +791,56 @@ def scan(ctx: ScanContext) -> ScanResult:
     result = ScanResult()
     ports = parse_ports(ctx.option("ports"), ctx.option("profile", "common"))
     entries = parse_target_list(ctx.target)
+    wildcard_entries = [entry for entry in entries if entry.startswith("*.")]
     plain_entries, discovered_hosts, wildcard_meta = _expand_wildcards(ctx, entries)
+    if not plain_entries and not discovered_hosts and wildcard_entries:
+        # Discovery found nothing. Do not try to resolve the wildcard string
+        # itself (``*.example.com``); finish with an explanatory finding.
+        result.metadata = {
+            "hosts": [],
+            "host_count": 0,
+            "ports_scanned": len(ports),
+            "wildcard_expansion": wildcard_meta,
+            "no_hosts_discovered": wildcard_entries,
+        }
+        result.add(
+            Finding(
+                severity="info",
+                title="No hosts discovered for wildcard target",
+                category="network",
+                description=(
+                    "Subdomain discovery found no hosts for the wildcard target. "
+                    "Check the domain, the Subfinder integration, the subdomain "
+                    "wordlist and the external-API setting. The scan did not fall "
+                    "back to resolving the literal wildcard name."
+                ),
+                evidence=(
+                    "Wildcard target(s): " + ", ".join(wildcard_entries)
+                    + "\nSubfinder: " + ("enabled" if ctx.option_bool("subfinder", True) else "disabled")
+                    + "\nWordlist discovery: " + ("enabled" if ctx.option_bool("bruteforce", True) else "disabled")
+                ),
+                remediation=(
+                    "Load the SecLists wordlist under Settings, install Subfinder, "
+                    "or use an explicit host/CIDR target instead."
+                ),
+                location=", ".join(wildcard_entries),
+                key="wildcard-no-hosts:" + ",".join(wildcard_entries),
+                raw={"wildcards": wildcard_entries, "expansion": wildcard_meta},
+            )
+        )
+        ctx.progress(100, "No wildcard hosts discovered")
+        return result
     if discovered_hosts:
         target = "\n".join(plain_entries + discovered_hosts)
     else:
         target = ctx.target
     hosts = _expand_hosts(target)
-    timeout = float(ctx.option("connect_timeout", 0.45))
+    default_timeout = 0.45
+    try:
+        default_timeout = float(setting_or_default("network_connect_timeout", "0.45"))
+    except (TypeError, ValueError):
+        pass
+    timeout = float(ctx.option("connect_timeout", default_timeout))
     timeout = max(0.1, min(timeout, 3.0))
     workers = _bounded_int(
         ctx.option("workers", get_limit("workers", 300)), 300, 10, 600
@@ -814,7 +902,16 @@ def scan(ctx: ScanContext) -> ScanResult:
     web_budget = _bounded_int(
         ctx.option("max_web_hosts", get_limit("max_web_hosts", 20)), 20, 1, 10_000
     )
-    testssl_budget = _bounded_int(ctx.option("max_testssl_hosts", 5), 5, 0, 50)
+    try:
+        default_testssl_budget = int(setting_or_default("max_testssl_hosts", "5"))
+    except (TypeError, ValueError):
+        default_testssl_budget = 5
+    testssl_budget = _bounded_int(
+        ctx.option("max_testssl_hosts", default_testssl_budget),
+        default_testssl_budget,
+        0,
+        50,
+    )
     testssl_enabled = (
         ctx.option_bool("external_tools", False) and ctx.option_bool("testssl", False)
     )
@@ -881,6 +978,23 @@ def scan(ctx: ScanContext) -> ScanResult:
                     "warning",
                 )
 
+    # Nuclei network-protocol templates add signature coverage for SMB, RDP,
+    # SSH, databases and similar non-HTTP services.
+    if all_open and ctx.option_bool("nuclei_network", True):
+        ctx.progress(84, "Running Nuclei network templates")
+        try:
+            from .nuclei import run_nuclei_network
+
+            run_nuclei_network(
+                result,
+                [f"{item.host}:{item.port}" for item in all_open],
+                ctx,
+            )
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"Nuclei network templates failed: {exc}", "warning")
+
     # Nmap is optional and only used to enrich hosts with open services.
     nmap_hints: list[tuple[str, str]] = []
     if ctx.option_bool("external_tools", False):
@@ -929,7 +1043,16 @@ def scan(ctx: ScanContext) -> ScanResult:
     # Greenbone/OpenVAS: optional external feed-based engine.
     if ctx.option_bool("openvas", False):
         ctx.progress(88, "Running OpenVAS engine (optional)")
-        openvas_budget = _bounded_int(ctx.option("max_openvas_hosts", 5), 5, 1, 50)
+        try:
+            default_openvas_budget = int(setting_or_default("max_openvas_hosts", "5"))
+        except (TypeError, ValueError):
+            default_openvas_budget = 5
+        openvas_budget = _bounded_int(
+            ctx.option("max_openvas_hosts", default_openvas_budget),
+            default_openvas_budget,
+            1,
+            50,
+        )
         openvas_checked = 0
         from .openvas import run_openvas
 
@@ -996,6 +1119,14 @@ def process_agent_network_payload(ctx: ScanContext, payload: dict[str, Any]) -> 
             ctx.log(truncate(str(warning), 400), "warning")
     ctx.progress(60, "Evaluating agent network results")
     _add_port_findings(result, ports, ctx)
+    if ctx.option_bool("cve_lookup", True) and ports:
+        ctx.progress(70, "Matching agent service banners against CVE data")
+        try:
+            _run_cve_matching(result, ctx, ports, {}, [], {})
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            ctx.log(f"Agent CVE matching failed: {exc}", "warning")
     raw_hosts = network.get("hosts")
     hosts = raw_hosts[:500] if isinstance(raw_hosts, list) else []
     result.metadata = {

@@ -76,8 +76,8 @@ Nessus-class vulnerability scanner with:
    and advertised subnets routes to the satellite; per-scan Executor
    dropdown: auto / server / specific satellite).
 4. Satellite health, offline queueing, job timeout, revocation and key
-   rotation from the master GUI. — health/offline/revocation/timeout done;
-   token rotation from the GUI remains open.
+   rotation from the master GUI. — **done** (health/offline/revocation/timeout
+   plus one-click token rotation from the satellite edit dialog).
 5. Multi-hop support later (satellite → satellite) if needed. (open)
 
 ### Phase 3 — AD report import and intelligence
@@ -101,6 +101,35 @@ Nessus-class vulnerability scanner with:
    mapping; gated by a Settings toggle plus a per-scan option, encrypted
    GVM credentials, per-scan host cap). Requires a working GVM stack
    (PostgreSQL, gvmd, ospd-openvas, community feed).
+
+### Phase 5 — Scan depth, offline operation and usability
+
+1. **Scan readiness diagnostics** — done (`app/scan_diagnostics.py` and the scan
+   dialog/detail panels show missing tools, disabled stages, offline APIs, TLS
+   trust and executor limitations).
+2. **Offline vulnerability data** — done (`app/vulnerability_data.py`: NVD
+   product cache, full EPSS table, KEV sync; Settings → Vulnerability data).
+3. **Nuclei network-protocol templates** — done (`app/scanners/nuclei.py` runs
+   `network` templates against open non-HTTP services; per-scan opt-out).
+4. **Agent depth** — done for banner/CPE → NVD CVE enrichment and Windows
+   package inventory/EOL checks; web/Nuclei remain server/satellite-only.
+5. **Satellite correctness** — done (local cache DB init, certificate
+   fingerprint pinning, dedicated mTLS listener, IP/hostname/URL routing).
+6. **Custom CA and self-signed UX** — done (custom CA bundle setting; visible
+   finding when a web service cannot be inspected).
+7. **Authenticated web sessions** — done for Basic/bearer/cookie/custom headers;
+   form-login macros remain open.
+8. **Tool source manager** — done (system/path/managed/disabled, checksum-
+   verified managed installs for five tools).
+9. **Encrypted backups and key rotation** — done (AES-256-GCM backup
+   passphrase; credential-key rotation keeps the old key).
+10. **OAST support** — done (per-scan Interactsh opt-in and Settings).
+11. **RBAC/multi-user** — open; deliberately skipped for the current
+    single-analyst deployment.
+12. **Purple Knight native import** — skipped per operator decision.
+13. **Signed agent/satellite auto-updates**, a signed custom plugin-pack format
+    and form-login web macros — open; the current web session support covers
+    Basic, bearer, cookie and custom-header authentication.
 
 ## 4. Suggested next-level features (candidates, not yet committed)
 

@@ -138,9 +138,12 @@ def allowed_hosts() -> list[str]:
     if configured:
         return [item.strip() for item in configured.split(",") if item.strip()]
     hosts = {"localhost", "127.0.0.1", "::1", "[::1]", "testserver"}
-    host = os.getenv("VS_HOST", "127.0.0.1").strip()
-    if host and host not in {"0.0.0.0", "::"}:
-        hosts.add(host)
+    for host in (
+        os.getenv("VS_HOST", "127.0.0.1").strip(),
+        os.getenv("VS_SATELLITE_HOST", "").strip(),
+    ):
+        if host and host not in {"0.0.0.0", "::"}:
+            hosts.add(host)
     return sorted(hosts)
 
 
@@ -246,8 +249,56 @@ def ssh_host_key_policy() -> str:
     return value if value in {"enforce", "warn"} else "enforce"
 
 
+def tls_ca_bundle() -> str:
+    """Return a custom CA bundle used for scan targets and service probes.
+
+    Internal scanners frequently meet private CAs rather than public ones.
+    Keeping the bundle as a path (instead of disabling verification) allows
+    HTTPS discovery and service probes to stay verified.
+    """
+    value = os.getenv("VS_TLS_CA_BUNDLE", "").strip()
+    if not value:
+        try:
+            from .database import get_setting
+
+            value = get_setting("tls_ca_bundle", "").strip()
+        except Exception:
+            value = ""
+    return value
+
+
+def interactsh_server() -> str:
+    value = os.getenv("VS_INTERACTSH_SERVER", "").strip()
+    if value:
+        return value
+    try:
+        from .database import get_setting
+
+        return get_setting("interactsh_server", "").strip()
+    except Exception:
+        return ""
+
+
+def interactsh_token() -> str:
+    value = os.getenv("VS_INTERACTSH_TOKEN", "").strip()
+    if value:
+        return value
+    try:
+        from .database import get_setting
+        from .credentials import decrypt_secret
+
+        stored = get_setting("interactsh_token", "").strip()
+        return decrypt_secret(stored) if stored else ""
+    except Exception:
+        return ""
+
+
 HOST = os.getenv("VS_HOST", "127.0.0.1")
 PORT = _env_int("VS_PORT", 8765, low=1, high=65_535)
+# Optional dedicated satellite listener with mandatory client certificates.
+# 0 disables it and keeps satellite polling on the main listener.
+SATELLITE_PORT = _env_int("VS_SATELLITE_PORT", 0, low=0, high=65_535)
+SATELLITE_HOST = os.getenv("VS_SATELLITE_HOST", HOST).strip() or HOST
 
 # Guardrails for scans.
 MAX_REPO_BYTES = _env_int("VS_MAX_REPO_BYTES", 512 * 1024 * 1024, low=1_048_576)

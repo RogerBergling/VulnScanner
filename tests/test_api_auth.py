@@ -82,3 +82,31 @@ def test_manual_and_agent_scripts_are_served(client):
         assert filename in response.headers["content-disposition"]
 
     assert client.get("/agent/download/../../etc/passwd").status_code == 404
+
+
+def test_satellite_endpoints_are_public_only_with_their_own_token(client, monkeypatch):
+    monkeypatch.setenv("VS_ADMIN_PASSWORD", "s3cret")
+
+    pairing = client.post(
+        "/api/satellites/pairing", auth=("admin", "s3cret")
+    )
+    assert pairing.status_code == 200
+    code = pairing.json()["code"]
+
+    enrolled = client.post(
+        "/api/satellite/pair",
+        json={
+            "pairing_code": code,
+            "name": "dmz",
+            "hostname": "dmz.example",
+            "platform": "linux",
+            "version": "1.3.0",
+            "subnets": ["10.30.0.0/16"],
+        },
+    )
+    assert enrolled.status_code == 200, enrolled.text
+
+    # Missing satellite token is rejected by the endpoint, not redirected to
+    # dashboard Basic auth.
+    heartbeat = client.post("/api/satellite/heartbeat", json={})
+    assert heartbeat.status_code == 401

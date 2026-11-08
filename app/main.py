@@ -5,6 +5,8 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import ssl
+import threading
 from contextlib import asynccontextmanager
 from urllib.parse import quote, urlparse
 
@@ -27,6 +29,8 @@ from .config import (
     BASE_DIR,
     HOST,
     PORT,
+    SATELLITE_HOST,
+    SATELLITE_PORT,
     allowed_hosts,
     data_dir,
     migrate_env_tool_paths,
@@ -143,6 +147,7 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts())
 _PUBLIC_PREFIXES = (
     "/api/health",
     "/api/agent/",
+    "/api/satellite/",
     "/agent/",
     "/static/",
     "/api/auth/login",
@@ -222,6 +227,22 @@ def _origin_allowed(request: Request) -> bool:
 @app.middleware("http")
 async def security_and_auth(request: Request, call_next):
     path = request.url.path
+    # The dedicated satellite listener is mTLS-only and exposes just the
+    # satellite API. Do not serve the UI or management API on that port.
+    if SATELLITE_PORT:
+        server = request.scope.get("server") or ("", 0)
+        try:
+            request_port = int(server[1] or 0)
+        except (TypeError, ValueError):
+            request_port = 0
+        if request_port == SATELLITE_PORT and not (
+            path.startswith("/api/satellite/") or path == "/api/health"
+        ):
+            return _secure_response(
+                JSONResponse({"detail": "Not found"}, status_code=404),
+                path,
+                request,
+            )
     public = any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES)
     auth = authenticate_request(request)
     request.state.auth = auth
@@ -308,6 +329,7 @@ async def security_and_auth(request: Request, call_next):
         and request.method.upper() in _UNSAFE_METHODS
         and not path.startswith("/api/auth/login")
         and not path.startswith("/api/agent/")
+        and not path.startswith("/api/satellite/")
     ):
         record_request(
             request,
@@ -364,9 +386,69 @@ def download_agent(filename: str) -> FileResponse:
 app.mount("/agent", StaticFiles(directory=AGENT_DIR), name="agent")
 
 
+def _start_satellite_listener(
+    cert_path: str,
+    key_path: str,
+    log_level: str,
+) -> threading.Thread | None:
+    """Start the optional mTLS-only satellite listener.
+
+    The main listener stays usable by browsers and agents. Satellites can be
+    required to connect to a separate port that requests a client certificate
+    signed by the internal CA. The same ASGI app is used, but the middleware
+    rejects every path except ``/api/satellite/*`` and ``/api/health`` on that
+    port.
+    """
+    if not SATELLITE_PORT:
+        return None
+    if SATELLITE_PORT == PORT:
+        logger.error(
+            "VS_SATELLITE_PORT must differ from VS_PORT; the mTLS satellite "
+            "listener was not started."
+        )
+        return None
+    import uvicorn
+
+    from .certs import satellite_client_ca_path
+
+    ca_path = satellite_client_ca_path()
+
+    def _serve() -> None:
+        config = uvicorn.Config(
+            app,
+            host=SATELLITE_HOST,
+            port=SATELLITE_PORT,
+            log_level=log_level,
+            lifespan="off",
+            ssl_keyfile=key_path,
+            ssl_certfile=cert_path,
+            ssl_ca_certs=ca_path,
+            ssl_cert_reqs=ssl.CERT_REQUIRED,
+        )
+        server = uvicorn.Server(config)
+        server.run()
+
+    thread = threading.Thread(
+        target=_serve,
+        name="vulnscanner-satellite-listener",
+        daemon=True,
+    )
+    thread.start()
+    logger.info(
+        "Satellite mTLS listener enabled on https://%s:%s (client CA: %s)",
+        SATELLITE_HOST,
+        SATELLITE_PORT,
+        ca_path,
+    )
+    return thread
+
+
 def run() -> None:
     import uvicorn
 
+    # Initialize the schema before the optional satellite listener starts; the
+    # main lifespan repeats this idempotently.
+    init_db()
     ssl_enabled = os.getenv("VS_SSL", "true").lower() in {"1", "true", "yes", "on"}
     log_level = os.getenv("VS_LOG_LEVEL", "info").lower()
     if ssl_enabled:
@@ -374,6 +456,7 @@ def run() -> None:
 
         cert_path, key_path = get_cert_paths()
         logger.info("SSL enabled: cert=%s key=%s", cert_path, key_path)
+        _start_satellite_listener(cert_path, key_path, log_level)
         uvicorn.run(
             app,
             host=HOST,
@@ -384,6 +467,11 @@ def run() -> None:
             log_level=log_level,
         )
     else:
+        if SATELLITE_PORT:
+            logger.warning(
+                "VS_SATELLITE_PORT is set but VS_SSL is disabled; the mTLS "
+                "satellite listener needs TLS and was not started."
+            )
         uvicorn.run(app, host=HOST, port=PORT, reload=False, log_level=log_level)
 
 

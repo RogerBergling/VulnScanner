@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 
 from typing import Any
 
@@ -100,6 +101,53 @@ def _add_checks(result: ScanResult, payload: dict[str, Any]) -> None:
         result.findings.append(finding)
 
 
+WINDOWS_SOFTWARE_EOL = [
+    (r"internet explorer", "Internet Explorer", "critical",
+     "Remove Internet Explorer and use a supported browser."),
+    (r"adobe flash", "Adobe Flash", "critical",
+     "Uninstall Adobe Flash; it is end-of-life and unsupported."),
+    (r"microsoft silverlight", "Microsoft Silverlight", "high",
+     "Remove Silverlight or upgrade to a supported platform."),
+    (r"python 2(\.|$)", "Python 2", "high",
+     "Upgrade Python 2 applications to Python 3."),
+    (r"apache tomcat (6|7)(\.|$)", "Apache Tomcat 6/7", "high",
+     "Upgrade Apache Tomcat to a supported release."),
+    (r"openssl 1\.0", "OpenSSL 1.0", "high",
+     "Upgrade software that bundles OpenSSL 1.0."),
+    (r"microsoft sql server (2008|2012|2014)", "SQL Server 2008/2012/2014", "high",
+     "Upgrade SQL Server to a supported version."),
+]
+
+
+def _add_windows_software_eol(result: ScanResult, packages: list[dict[str, Any]]) -> None:
+    for item in packages[:6000]:
+        if str(item.get("source") or "") != "windows-registry":
+            continue
+        label = f"{item.get('name', '')} {item.get('version', '')}".strip()
+        lowered = label.lower()
+        for pattern, product, severity, remediation in WINDOWS_SOFTWARE_EOL:
+            if not re.search(pattern, lowered):
+                continue
+            result.add(
+                Finding(
+                    severity=severity,
+                    title=f"Unsupported software on the endpoint: {product}",
+                    category="host",
+                    description=(
+                        f"The endpoint reports {label}, which is no longer supported "
+                        "or no longer receives security updates."
+                    ),
+                    evidence=f"Software: {label}\nPublisher: {item.get('publisher', '')}",
+                    remediation=remediation,
+                    location=str(item.get("name") or "endpoint"),
+                    key=f"agent-software-eol:{product.lower().replace(' ', '-')}",
+                    cwe="CWE-1104",
+                    raw={"name": item.get("name"), "version": item.get("version")},
+                )
+            )
+            break
+
+
 def _add_secrets(result: ScanResult, payload: dict[str, Any], category: str = "secret") -> None:
     items = payload.get("secrets") or payload.get("source") or []
     if not isinstance(items, list):
@@ -162,6 +210,7 @@ def process_agent_payload(ctx: ScanContext, payload: dict[str, Any]) -> ScanResu
                     bool(item.get("dev")),
                 )
             )
+    _add_windows_software_eol(result, packages)
     result.metadata["inventory_packages"] = len(package_refs)
     if package_refs:
         ctx.progress(65, "Matching installed packages against OSV")

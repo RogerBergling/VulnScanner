@@ -23,18 +23,21 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import secrets
+import socket
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-from .database import get_db, json_dump, json_load, utcnow
+from .agents import is_online
+from .database import get_db, json_dump, json_load, transaction, utcnow
 from .security import constant_time_equal, hash_token, new_agent_token
 
 PAIRING_TTL_SECONDS = 3600
@@ -173,7 +176,9 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
         "version": row["version"],
         "subnets": json_load(row.get("subnets"), []),
         "status": row["status"],
-        "online": bool(row["online"]),
+        # Do not trust the stored flag alone: a satellite that stopped polling
+        # must stop receiving routed jobs.
+        "online": bool(row["online"]) and is_online(row.get("last_seen")),
         "last_seen": row["last_seen"],
         "enrolled_at": row["enrolled_at"],
     }
@@ -234,6 +239,19 @@ def heartbeat(satellite_id: str, platform: str, version: str,
         conn.commit()
 
 
+def rotate_satellite_token(satellite_id: str) -> str | None:
+    """Issue a new bearer token and invalidate the previous one."""
+    token = new_agent_token()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE satellites SET token_hash = ?, updated_at = ? WHERE id = ? "
+            "AND status != 'revoked'",
+            (hash_token(token), utcnow(), satellite_id),
+        )
+        conn.commit()
+    return token if cursor.rowcount else None
+
+
 def revoke_satellite(satellite_id: str) -> bool:
     now = utcnow()
     with get_db() as conn:
@@ -259,6 +277,7 @@ def revoke_satellite(satellite_id: str) -> bool:
             update_scan(
                 int(row["scan_id"]),
                 status="cancelled",
+                progress=100,
                 stage="Cancelled (satellite revoked)",
                 completed_at=utcnow(),
                 error="The executing satellite was revoked",
@@ -314,7 +333,7 @@ def queue_satellite_job(satellite_id: str, scan_id: int, payload: dict[str, Any]
 
 
 def claim_next_job(satellite_id: str) -> dict[str, Any] | None:
-    with get_db() as conn:
+    with transaction() as conn:
         row = conn.execute(
             "SELECT * FROM satellite_jobs WHERE satellite_id = ? AND status = 'queued' "
             "ORDER BY created_at LIMIT 1",
@@ -322,11 +341,13 @@ def claim_next_job(satellite_id: str) -> dict[str, Any] | None:
         ).fetchone()
         if not row:
             return None
-        conn.execute(
-            "UPDATE satellite_jobs SET status = 'running', claimed_at = ? WHERE id = ?",
+        updated = conn.execute(
+            "UPDATE satellite_jobs SET status = 'running', claimed_at = ? "
+            "WHERE id = ? AND status = 'queued'",
             (utcnow(), row["id"]),
         )
-        conn.commit()
+        if updated.rowcount != 1:
+            return None
         job = dict(row)
         job["status"] = "running"
     payload = json_load(job.get("payload"), {})
@@ -344,30 +365,100 @@ def complete_job(job_id: str, status: str = "completed", error: str = "") -> boo
     return cursor.rowcount > 0
 
 
-def _cidrs_overlap(subnets: list[str], target_cidrs: list[str]) -> bool:
+def _networks_for_entry(entry: str) -> list[ipaddress._BaseNetwork]:
+    """Return the network(s) represented by a target entry.
+
+    Supports CIDRs, single IPv4/IPv6 addresses, ``host:port`` entries,
+    ``http(s)://`` URLs and hostnames. Hostnames are resolved with the same
+    system resolver the scanner uses. A hostname can legitimately return
+    several addresses, so all of them are considered for routing.
+    """
+    value = (entry or "").strip()
+    if not value or value.startswith("*."):
+        return []
+    if "://" in value:
+        host = urlparse(value).hostname or ""
+        value = host
+    elif "/" not in value and not _looks_like_ip(value):
+        # Strip an optional host:port without breaking IPv6 literals.
+        try:
+            host = urlparse("//" + value).hostname or ""
+            if host:
+                value = host
+        except ValueError:
+            pass
+    if not value:
+        return []
+    if "/" in value:
+        try:
+            return [ipaddress.ip_network(value, strict=False)]
+        except ValueError:
+            return []
     try:
-        networks = [ipaddress.ip_network(item, strict=False) for item in subnets]
-        targets = [ipaddress.ip_network(item, strict=False) for item in target_cidrs]
+        address = ipaddress.ip_address(value.strip("[]"))
+        return [ipaddress.ip_network(f"{address}/{address.max_prefixlen}", strict=False)]
+    except ValueError:
+        pass
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(value, None, proto=socket.IPPROTO_TCP)
+            if item[4]
+        }
+    except (OSError, socket.gaierror):
+        return []
+    networks: list[ipaddress._BaseNetwork] = []
+    for address_text in addresses:
+        try:
+            address = ipaddress.ip_address(address_text.split("%", 1)[0])
+        except ValueError:
+            continue
+        networks.append(
+            ipaddress.ip_network(f"{address}/{address.max_prefixlen}", strict=False)
+        )
+    return networks
+
+
+def _looks_like_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip("[]"))
+        return True
     except ValueError:
         return False
-    return any(any(target.overlaps(network) for network in networks) for target in targets)
+
+
+def _cidrs_overlap(subnets: list[str], target_networks: list[ipaddress._BaseNetwork]) -> bool:
+    try:
+        networks = [ipaddress.ip_network(item, strict=False) for item in subnets]
+    except ValueError:
+        return False
+    return any(
+        any(target.version == network.version and target.overlaps(network) for network in networks)
+        for target in target_networks
+    )
 
 
 def matching_satellite(target: str) -> str | None:
-    """Find an online satellite whose advertised subnets overlap the target."""
+    """Find an online satellite whose advertised subnets overlap the target.
+
+    Single IPs, hostnames and web URLs are resolved to networks, so a target
+    such as ``10.30.5.10`` or ``https://app.dmz.example`` routes to a satellite
+    advertising ``10.30.0.0/16`` just like an explicit CIDR does.
+    """
     entries = [line.strip() for line in target.replace(",", "\n").splitlines() if line.strip()]
-    target_cidrs = []
+    target_networks: list[ipaddress._BaseNetwork] = []
     for entry in entries:
-        if "/" in entry and not entry.startswith("*."):
-            target_cidrs.append(entry)
-    if not target_cidrs:
+        target_networks.extend(_networks_for_entry(entry))
+    if not target_networks:
         return None
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM satellites WHERE status = 'active' AND online = 1"
+            "SELECT * FROM satellites WHERE status = 'active'"
         ).fetchall()
     for row in rows:
+        if not row["online"] or not is_online(row["last_seen"]):
+            continue
         subnets = json_load(row["subnets"], [])
-        if subnets and _cidrs_overlap(subnets, target_cidrs):
+        if subnets and _cidrs_overlap(subnets, target_networks):
             return row["id"]
     return None

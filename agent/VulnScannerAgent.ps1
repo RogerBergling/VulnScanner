@@ -48,7 +48,7 @@
     With Run, poll once and exit.
 
 .PARAMETER Modules
-    Comma-separated modules for an offline Scan: system,ports,network,ad.
+    Comma-separated modules for an offline Scan: system,packages,ports,network,ad.
 
 .PARAMETER Target
     Network target for the network module (host, IP or IPv4 CIDR).
@@ -81,7 +81,7 @@ param(
     [switch]$VerifyTls,
     [switch]$Enroll,
     [switch]$Once,
-    [string]$Modules = "system,ports",
+    [string]$Modules = "system,packages,ports",
     [string]$Target = "",
     [string]$Ports = "",
     [string]$Profile = "common",
@@ -290,10 +290,93 @@ function Get-SystemInformation {
 }
 
 function Get-Capabilities {
-    $capabilities = @("system", "ports", "network")
+    $capabilities = @("system", "packages", "ports", "network")
     $adPath = Join-Path $script:AgentRoot "ad_audit.ps1"
     if (Test-Path -LiteralPath $adPath) { $capabilities += "ad" }
     return $capabilities
+}
+
+function Get-InstalledPackages {
+    $packages = New-Object System.Collections.ArrayList
+    $seen = @{}
+
+    $registryPaths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    foreach ($path in $registryPaths) {
+        try {
+            Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -and $_.DisplayVersion } |
+                ForEach-Object {
+                    $name = [string]$_.DisplayName
+                    $version = [string]$_.DisplayVersion
+                    $key = ("windows-registry|{0}|{1}" -f $name, $version).ToLowerInvariant()
+                    if (-not $seen.ContainsKey($key)) {
+                        $seen[$key] = $true
+                        [void]$packages.Add([ordered]@{
+                            name = $name
+                            version = $version
+                            ecosystem = ""
+                            source = "windows-registry"
+                            publisher = [string]$_.Publisher
+                        })
+                    }
+                }
+        } catch { }
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) {
+        try {
+            $json = & $python.Source -m pip list --format=json --disable-pip-version-check 2>$null
+            if ($json) {
+                $items = @($json | ConvertFrom-Json)
+                foreach ($item in $items) {
+                    if (-not $item.name -or -not $item.version) { continue }
+                    $key = ("pypi|{0}|{1}" -f $item.name, $item.version).ToLowerInvariant()
+                    if (-not $seen.ContainsKey($key)) {
+                        $seen[$key] = $true
+                        [void]$packages.Add([ordered]@{
+                            name = [string]$item.name
+                            version = [string]$item.version
+                            ecosystem = "PyPI"
+                            source = "python"
+                        })
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    $npm = Get-Command npm -ErrorAction SilentlyContinue
+    if ($npm) {
+        try {
+            $json = & $npm.Source ls -g --json --depth=0 2>$null
+            if ($json) {
+                $data = $json | ConvertFrom-Json
+                if ($data.dependencies) {
+                    foreach ($prop in $data.dependencies.PSObject.Properties) {
+                        $version = [string]$prop.Value.version
+                        if (-not $version) { continue }
+                        $key = ("npm|{0}|{1}" -f $prop.Name, $version).ToLowerInvariant()
+                        if (-not $seen.ContainsKey($key)) {
+                            $seen[$key] = $true
+                            [void]$packages.Add([ordered]@{
+                                name = [string]$prop.Name
+                                version = $version
+                                ecosystem = "npm"
+                                source = "npm-global"
+                            })
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    return @($packages)
 }
 
 function New-LocalCheck {
@@ -808,6 +891,10 @@ function Invoke-AgentJob {
     if ($modules -contains "system") {
         try { $result["checks"] = @(Get-LocalChecks) }
         catch { [void]$warnings.Add("System checks failed: $($_.Exception.Message)") }
+    }
+    if ($modules -contains "packages") {
+        try { $result["packages"] = @(Get-InstalledPackages) }
+        catch { [void]$warnings.Add("Package inventory failed: $($_.Exception.Message)") }
     }
     if ($modules -contains "ports") {
         try { $result["listening_ports"] = @(Get-ListeningPorts) }

@@ -72,6 +72,24 @@ no separate database server and no Node.js build step.
 - Active Directory configuration from a read-only JSON report produced by the
   bundled PowerShell collector or the Windows agent.
 
+Every web and network scan also produces a **scan readiness** report: which
+signature engines, vulnerability APIs, tools, TLS trust settings and executor
+capabilities were available, and which checks were skipped. This makes a
+port-only result explain itself instead of looking like a silent failure.
+
+### Vulnerability depth and offline operation
+
+Nuclei is the default-on signature engine for web services, and Nuclei
+network-protocol templates add signature coverage for SMB, RDP, SSH, mail,
+databases and other non-HTTP services. The built-in banner/CPE engine matches
+service versions against NVD, and EPSS/KEV annotate exploitation likelihood.
+
+**Settings → Vulnerability data** builds a local cache of NVD product records,
+the full EPSS table and the CISA KEV catalogue. After a sync, CVE matching and
+risk scoring continue to work during an internet outage or on an air-gapped
+network. OSV package lookups reuse their existing response cache; live OSV and
+Nuclei template updates still need outbound access.
+
 It is designed for a single analyst workstation or a small authorised team. It
 does not require a separate database server, a Node.js build step, or any
 inbound firewall rules on scanned endpoints.
@@ -142,6 +160,14 @@ missing, the scan continues with the built-in checks and logs a warning. The
 Settings page shows whether each tool is available, its version and its path.
 For a service installation, use an absolute `VS_*_PATH` when the service user
 cannot see your shell `PATH`.
+
+**Settings → Optional command-line tools** lets each tool use the system
+`PATH`, an explicit absolute path, a checksum-verified managed download under
+`$VS_DATA_DIR/tools/`, or be disabled. Managed installation is available for
+Nuclei, Subfinder, Trivy, Gitleaks and osv-scanner; the release checksum is
+verified before the binary is installed. Tools without a published checksum
+remain manual/system-managed. Nmap, testssl.sh, sqlmap, Semgrep and gvm-cli can
+still be installed with the OS package manager or an explicit path.
 
 ### Ubuntu and Fedora prerequisites
 
@@ -270,8 +296,8 @@ persisted in SQLite.
 
 | Type | Target | Main checks |
 | --- | --- | --- |
-| Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, Nuclei signature engine (default on), NVD CVE matching and optional testssl.sh |
-| Network | Hostname, IP address, CIDR (`/30` to `/24` by default), or a newline/comma-separated target list imported from `.txt`/`.csv` | TCP ports, dangerous services, banners, HTTP/HTTPS discovery with deep web checks (same-origin crawl, headers, exposed files, injection probes), service security probes (SMB signing, SNMP defaults, unauthenticated data services, RDP NLA, VNC), Nuclei signature engine on discovered web services, NVD CVE matching, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
+| Web | `https://example.com` or a hostname | HTTP security headers, cookies, TLS/redirect behaviour, exposed paths, forms, optional active payload checks, Nuclei signature engine (default on), Nuclei network/OAST options, NVD CVE matching, optional testssl.sh, optional Basic/bearer/cookie/custom-header authenticated session |
+| Network | Hostname, IP address, CIDR (`/30` to `/24` by default), or a newline/comma-separated target list imported from `.txt`/`.csv` | TCP ports, dangerous services, banners, HTTP/HTTPS discovery with deep web checks (same-origin crawl, headers, exposed files, injection probes), service security probes (SMB signing, SNMP defaults, unauthenticated data services, RDP NLA, VNC), Nuclei web and network-protocol templates, NVD CVE matching, optional Nmap service/version detection and NSE CVEs, optional testssl.sh; optional SSH/WinRM authenticated patch, package-CVE, configuration and inventory checks |
 | Local repository | Absolute path on the server | Secrets, dependency manifests/OSV, source review, optional Gitleaks/Semgrep/osv-scanner and Trivy |
 | GitHub repository | `https://github.com/owner/repo` or `owner/repo` | Clone plus the same repository checks; private repositories can use a scan-only token |
 | Domain | `example.com` | Passive Subfinder enumeration plus local DNS wordlist discovery from an editable SecLists list; discovered hosts are reported, not scanned |
@@ -327,12 +353,19 @@ position and uploads findings; the master owns all results in one GUI.
 
 - Open **Satellites → Pair satellite** and run the shown one-time command on
   the second server: `python -m app.satellite enroll ...`, then
-  `python -m app.satellite run` (or install it as a service).
+  `python -m app.satellite run` (or install it as a service). The dialog
+  includes the master certificate SHA-256 fingerprint so a self-signed install
+  can be pinned without `--insecure`.
 - Pairing issues a client certificate signed by the internal CA plus a
-  hashed bearer token.
+  hashed bearer token. Set **Settings → Advanced runtime → Satellite mTLS
+  port** to expose a dedicated listener that requires that client certificate;
+  only `/api/satellite/*` and `/api/health` are served there.
 - Network scans auto-route to an online satellite whose advertised subnets
-  overlap the target CIDR; the scan dialog's **Executor** dropdown overrides
-  this per scan.
+  overlap the target. CIDRs, single IPs, hostnames and web URLs are resolved,
+  so `10.30.5.10` and `app.dmz.example` route just like `10.30.0.0/16`; the
+  scan dialog's **Executor** dropdown overrides this per scan.
+- **Edit** a satellite to rename it, change subnets, rotate its bearer token
+  (shown once) or revoke it.
 
 ## Configuration
 
@@ -362,7 +395,12 @@ deployment-level values that remain outside the GUI.
 | `VS_DATABASE` | `$VS_DATA_DIR/vulnscanner.db` | Explicit SQLite database path. Editable in Settings → Advanced runtime → Storage location. |
 | `VS_CREDENTIAL_KEY` | generated in `$VS_DATA_DIR/credential.key` | Fernet key for encrypting saved scan credentials and the SMTP password. Back it up with the database. |
 | `VS_ENABLE_EXTERNAL_APIS` | `true` | Process-level master switch for OSV.dev, CISA KEV, GitHub, Nuclei, Semgrep, osv-scanner, Subfinder, Trivy database updates and the SecLists download. Editable in Settings → Advanced runtime; restart required. |
-| `VS_NVD_API_KEY` | empty | Optional NVD API key for CVE matching (raises the rate limit from 5 to 50 requests per 30 seconds). Not stored in the GUI; keep it in `.env`. |
+| `VS_NVD_API_KEY` | empty | Optional NVD API key for CVE matching (raises the rate limit from 5 to 50 requests per 30 seconds). Also editable and encrypted in Settings → Vulnerability intelligence. |
+| `VS_TLS_CA_BUNDLE` | empty | Custom PEM CA bundle for HTTPS scan targets and service probes. Editable in Settings; keeps verification on for private CAs. |
+| `VS_INTERACTSH_SERVER` | empty | Optional self-hosted Interactsh/OAST collaborator. Used only when a scan enables OAST. |
+| `VS_INTERACTSH_TOKEN` | empty | Optional collaborator token; encrypted when stored in Settings. |
+| `VS_SATELLITE_PORT` | `0` | Dedicated mTLS-only satellite listener. `0` uses the main listener. Requires a client certificate signed by the internal CA. |
+| `VS_SATELLITE_HOST` | `VS_HOST` | Bind address for the dedicated satellite listener. |
 | `VS_SQLMAP_PATH` | empty | Path for the optional sqlmap binary (dangerous tool; double-gated via Settings + per-scan option). |
 | `VS_GVM_CLI_PATH` | empty | Path for the optional gvm-cli binary used by the OpenVAS engine (off by default in Settings). |
 | `VS_NMAP_PATH` etc. | empty | Absolute paths for optional CLI tools (`nmap`, `nuclei`, `testssl`, `trivy`, `subfinder`, `osv-scanner`, `gitleaks`, `semgrep`, `git`); empty searches `PATH`. Editable in Settings and stored in SQLite. |
@@ -419,7 +457,9 @@ separately.
 
 Use **Server → Back up database** in the UI for a consistent online copy. The
 destination can be an absolute directory or a `.db` file path; leave it empty
-to use `$VS_DATA_DIR/reports/backups/`. The database contains the scan history,
+to use `$VS_DATA_DIR/reports/backups/`. Set a backup passphrase to encrypt the
+snapshot with AES-256-GCM (`.vsenc`); the passphrase is never stored, so keep it
+separate from the backup. The database contains the scan history,
 customers/assets, agents, credentials, schedules and the Settings-page
 configuration, including integration toggles, SMTP, notifications, guardrails,
 tool paths, listener/HTTPS choices and a salted admin password hash.
@@ -495,9 +535,13 @@ confirmed.
   mutating API request. The Audit page supports filtering and CSV export.
 - Agent tokens are stored as SHA-256 hashes. Enrolment tokens are one-time and
   expire.
-- Saved target credentials are encrypted with Fernet and never returned by the
-  API. Each host receives at most one authentication attempt per scan to reduce
-  account-lockout risk.
+- Saved target credentials, authenticated web sessions and SMTP/GVM/NVD/OAST
+  secrets are encrypted with Fernet and never returned by the API. Each host
+  receives at most one authentication attempt per scan to reduce account-lockout
+  risk. **Settings → Security → Rotate credential key** re-encrypts every stored
+  secret and keeps the previous key as `credential.key.old`.
+- Backups can be encrypted with an operator-supplied passphrase using
+  AES-256-GCM; the passphrase is never stored in the database or environment.
 - Authenticated SSH scans enforce known_hosts verification by default. WinRM
   Basic and CredSSP authentication require HTTPS.
 - SMTP TLS certificates are verified by default; the lab-only insecure opt-out
@@ -534,6 +578,7 @@ environment.
 - [API reference](docs/API.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
+- [Release notes 1.3.0](docs/RELEASE_NOTES_1.3.0.md)
 - [Dependency and supply-chain policy](docs/DEPENDENCIES.md)
 - [Upgrading safely](docs/UPGRADING.md)
 - [Security and deployment](docs/SECURITY_AND_DEPLOYMENT.md)

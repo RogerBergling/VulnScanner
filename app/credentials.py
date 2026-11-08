@@ -15,7 +15,9 @@ Resolution order for a network target:
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 from functools import lru_cache
 from typing import Any
 
@@ -111,6 +113,101 @@ def decrypt_secret(value: str) -> str:
             "Could not decrypt a stored credential. The credential key changed or the "
             "data directory was copied without credential.key. Re-enter the credential."
         ) from exc
+
+
+def rotate_credential_key() -> dict[str, Any]:
+    """Re-encrypt every stored secret with a new Fernet key.
+
+    The old key is copied to ``credential.key.old`` and the new key is written
+    atomically after all database rows have been re-encrypted. An environment
+    ``VS_CREDENTIAL_KEY`` is not supported because the process environment
+    would still contain the old key; use the file-backed key.
+    """
+    from cryptography.fernet import Fernet
+
+    if os.getenv(KEY_ENV, "").strip():
+        raise CredentialError(
+            "Key rotation requires the file-backed credential.key; "
+            "VS_CREDENTIAL_KEY is set in the process environment"
+        )
+    old_key = _load_key()
+    old_cipher = _fernet_for_key(old_key)
+    new_key = Fernet.generate_key()
+    new_cipher = _fernet_for_key(new_key)
+    path = _key_path()
+    new_path = path.with_name(path.name + ".new")
+    old_backup = path.with_name(path.name + ".old")
+    try:
+        new_path.write_bytes(new_key)
+        os.chmod(new_path, 0o600)
+    except OSError as exc:
+        raise CredentialError(f"Could not write the new credential key: {exc}") from exc
+
+    def reencrypt(value: str) -> str:
+        if not value:
+            return ""
+        plain = old_cipher.decrypt(value.encode("ascii")).decode("utf-8")
+        return new_cipher.encrypt(plain.encode("utf-8")).decode("ascii")
+
+    counts: dict[str, int] = {}
+    try:
+        with transaction() as conn:
+            for table in ("credentials", "scan_credentials"):
+                rows = conn.execute(
+                    f"SELECT rowid AS rid, secret, passphrase FROM {table}"
+                ).fetchall()
+                for row in rows:
+                    conn.execute(
+                        f"UPDATE {table} SET secret = ?, passphrase = ? WHERE rowid = ?",
+                        (
+                            reencrypt(row["secret"]),
+                            reencrypt(row["passphrase"]),
+                            row["rid"],
+                        ),
+                    )
+                counts[table] = len(rows)
+            secret_settings = (
+                "smtp_password",
+                "gvm_password",
+                "nvd_api_key",
+                "interactsh_token",
+            )
+            updated = 0
+            for key in secret_settings:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key = ?", (key,)
+                ).fetchone()
+                if not row or not row["value"]:
+                    continue
+                conn.execute(
+                    "UPDATE settings SET value = ? WHERE key = ?",
+                    (reencrypt(row["value"]), key),
+                )
+                updated += 1
+            counts["settings"] = updated
+    except Exception:
+        new_path.unlink(missing_ok=True)
+        raise
+
+    try:
+        if path.exists():
+            shutil.copy2(path, old_backup)
+            os.chmod(old_backup, 0o600)
+        os.replace(new_path, path)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        raise CredentialError(
+            "The database was re-encrypted but the new key could not be installed. "
+            f"The new key is at {new_path}; do not start a scan until it is moved to "
+            f"{path}. Error: {exc}"
+        ) from exc
+    _fernet.cache_clear()
+    return {
+        "ok": True,
+        "rotated": counts,
+        "key_path": str(path),
+        "backup_key": str(old_backup),
+    }
 
 
 def _clean(value: Any, limit: int) -> str:
@@ -501,6 +598,74 @@ def store_scan_credentials(scan_id: int, entries: dict[str, dict[str, Any]]) -> 
                     now,
                 ),
             )
+
+
+def store_scan_web_auth(scan_id: int, auth: dict[str, Any]) -> None:
+    """Persist per-scan web authentication as one encrypted JSON document.
+
+    Supports HTTP Basic, bearer token, a raw Cookie header and custom headers.
+    Form-login macros are intentionally not implemented; they require a much
+    stricter scope and secret-handling model.
+    """
+    payload = {
+        "auth_type": str(auth.get("auth_type") or "basic").lower(),
+        "username": str(auth.get("username") or ""),
+        "password": str(auth.get("password") or ""),
+        "token": str(auth.get("token") or ""),
+        "cookie": str(auth.get("cookie") or ""),
+        "headers": {
+            str(key): str(value)
+            for key, value in (auth.get("headers") or {}).items()
+            if str(key).strip()
+        },
+    }
+    if payload["auth_type"] not in {"basic", "bearer", "cookie", "header"}:
+        raise CredentialError("Unsupported web authentication type")
+    if payload["auth_type"] == "basic" and not payload["username"]:
+        raise CredentialError("HTTP Basic authentication requires a username")
+    if payload["auth_type"] == "bearer" and not payload["token"]:
+        raise CredentialError("Bearer authentication requires a token")
+    if payload["auth_type"] == "cookie" and not payload["cookie"]:
+        raise CredentialError("Cookie authentication requires a Cookie header")
+    if payload["auth_type"] == "header" and not payload["headers"]:
+        raise CredentialError("Header authentication requires at least one header")
+    serialized = json.dumps(payload, ensure_ascii=False)
+    if len(serialized) > 60_000:
+        raise CredentialError("The web authentication data is too large")
+    with transaction() as conn:
+        if not conn.execute("SELECT 1 FROM scans WHERE id = ?", (scan_id,)).fetchone():
+            raise CredentialError("Scan not found")
+        conn.execute("DELETE FROM scan_credentials WHERE scan_id = ? AND os = 'web'", (scan_id,))
+        conn.execute(
+            "INSERT INTO scan_credentials("
+            "scan_id, os, username, domain, account_type, auth_type, secret, passphrase, created_at"
+            ") VALUES (?, 'web', ?, '', '', ?, ?, '', ?)",
+            (
+                scan_id,
+                payload["username"],
+                payload["auth_type"],
+                encrypt_secret(serialized),
+                utcnow(),
+            ),
+        )
+
+
+def resolve_scan_web_auth(scan_id: int) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT auth_type, secret FROM scan_credentials WHERE scan_id = ? AND os = 'web'",
+            (scan_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(decrypt_secret(row["secret"]))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["auth_type"] = str(data.get("auth_type") or row["auth_type"] or "basic")
+    return data
 
 
 def scan_credentials_public(scan_id: int) -> list[dict[str, Any]]:

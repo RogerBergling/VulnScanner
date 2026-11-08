@@ -23,7 +23,7 @@ from typing import Any, Callable
 import requests
 
 from ..config import ENABLE_EXTERNAL_APIS
-from ..database import get_db, json_dump, setting_or_default, utcnow
+from ..database import get_db, get_setting, json_dump, setting_or_default, utcnow
 from .base import Finding, ScanResult
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -249,14 +249,33 @@ def fingerprint_text(text: str, source: str) -> list[ProductMatch]:
 
 _nvd_lock = threading.Lock()
 _nvd_last_request = 0.0
-_NVD_KEY = os.getenv("VS_NVD_API_KEY", "").strip()
+
+
+def nvd_api_key() -> str:
+    """Return the NVD API key from the environment or encrypted Settings.
+
+    Settings is preferred for GUI-managed installs; the environment variable
+    remains a deployment-level override.
+    """
+    value = os.getenv("VS_NVD_API_KEY", "").strip()
+    if value:
+        return value
+    try:
+        stored = get_setting("nvd_api_key", "").strip()
+        if stored:
+            from ..credentials import decrypt_secret
+
+            return decrypt_secret(stored)
+    except Exception:
+        pass
+    return ""
 
 
 def _nvd_throttle() -> None:
     """Space NVD requests to stay within the published rate limits."""
     global _nvd_last_request
     with _nvd_lock:
-        gap = 0.75 if _NVD_KEY else 6.5
+        gap = 0.75 if nvd_api_key() else 6.5
         wait = gap - (time.monotonic() - _nvd_last_request)
         if wait > 0:
             time.sleep(min(wait, 60.0))
@@ -429,12 +448,17 @@ def cve_record(cve: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fetch_nvd_pages(params: dict[str, str], log: Callable[[str], None] | None) -> list[dict[str, Any]]:
+def _fetch_nvd_pages(
+    params: dict[str, str],
+    log: Callable[[str], None] | None,
+    max_pages: int = MAX_NVD_PAGES,
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     headers = {"User-Agent": USER_AGENT}
-    if _NVD_KEY:
-        headers["apiKey"] = _NVD_KEY
-    for page in range(MAX_NVD_PAGES):
+    api_key = nvd_api_key()
+    if api_key:
+        headers["apiKey"] = api_key
+    for page in range(max(1, max_pages)):
         page_params = dict(params)
         page_params["startIndex"] = str(page * NVD_PAGE_SIZE)
         for attempt in range(2):
@@ -479,18 +503,99 @@ def _fetch_nvd_pages(params: dict[str, str], log: Callable[[str], None] | None) 
     return items
 
 
+def product_cache_key(vendor: str, product: str) -> str:
+    return f"nvd:product:{vendor}:{product}"
+
+
+def sync_product_cves(
+    vendor: str,
+    product: str,
+    log: Callable[[str], None] | None = None,
+    *,
+    max_pages: int = 20,
+) -> int:
+    """Download and cache every CVE that mentions a vendor/product.
+
+    The response keeps the full NVD ``configurations`` block so versions can be
+    evaluated locally later, including while the machine is offline.
+    """
+    vendor = (vendor or "").strip().lower()
+    product = (product or "").strip().lower()
+    if not vendor or not product:
+        return 0
+    params = {
+        "virtualMatchString": f"cpe:2.3:a:{vendor}:{product}",
+        "resultsPerPage": str(NVD_PAGE_SIZE),
+    }
+    raw = _fetch_nvd_pages(params, log, max_pages=max_pages)
+    if not raw:
+        return 0
+    _cache_put(
+        product_cache_key(vendor, product),
+        {
+            "vulnerabilities": raw,
+            "source": "virtualMatchString",
+            "vendor": vendor,
+            "product": product,
+            "synced_at": utcnow(),
+        },
+        24 * 7,
+    )
+    if log:
+        log(f"NVD: cached {len(raw)} product-level CVE record(s) for {vendor}/{product}")
+    return len(raw)
+
+
+def fingerprinted_products() -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in FINGERPRINTS:
+        candidates = [(entry.get("vendor"), entry.get("product"))]
+        candidates.extend(entry.get("fallbacks") or [])
+        for vendor, product in candidates:
+            if not vendor or not product:
+                continue
+            key = (str(vendor).lower(), str(product).lower())
+            if key not in seen:
+                seen.add(key)
+                pairs.append(key)
+    return pairs
+
+
 def lookup_cves(match: ProductMatch, log: Callable[[str], None] | None = None) -> list[dict[str, Any]]:
-    """Resolve applicable CVEs for a fingerprinted product version."""
+    """Resolve applicable CVEs for a fingerprinted product version.
+
+    Lookup order:
+    1. exact version cache (fast, from the previous online query),
+    2. product-level offline cache (all versions, evaluated locally),
+    3. live NVD query when external APIs are enabled.
+    """
     if not match.vendor or not match.product or not match.version:
         return []
-    if not ENABLE_EXTERNAL_APIS or setting_or_default("allow_external_apis", "true") != "true":
-        return []
+    external = ENABLE_EXTERNAL_APIS and setting_or_default(
+        "allow_external_apis", "true"
+    ) == "true"
     attempts: list[tuple[str, str]] = [(match.vendor, match.product)]
     for fallback in FINGERPRINTS:
         if fallback.get("vendor") == match.vendor and fallback.get("product") == match.product:
             attempts.extend(fallback.get("fallbacks") or [])
             break
     for vendor, product in attempts:
+        # Product-level cache works offline and covers versions that were
+        # never queried individually.
+        product_data = _cache_get(
+            product_cache_key(vendor, product), allow_expired=True
+        )
+        if product_data:
+            cves = filter_cves_for_product(
+                product_data, vendor, product, match.version
+            )
+            if cves:
+                records = [cve_record(cve) for cve in cves]
+                return sorted(records, key=lambda item: item["cvss"] or 0.0, reverse=True)
+
+        if not external:
+            continue
         cache_key = f"nvd:cpe:{vendor}:{product}:{match.version}"
         data = _cache_get(cache_key)
         if data is None:

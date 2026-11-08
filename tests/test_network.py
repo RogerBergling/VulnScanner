@@ -278,3 +278,33 @@ def test_scan_tolerates_invalid_workers_option(monkeypatch):
         DummyContext({"ports": "80", "workers": "not-a-number"}, target="127.0.0.1")
     )
     assert result.findings == []
+
+
+def test_http_probe_failure_on_self_signed_port_is_visible(monkeypatch):
+    import requests
+    from app.scanners import network as network_module
+    from app.scanners.base import ScanResult
+
+    class DummySession:
+        def close(self):
+            return None
+
+    def fail_get(*args, **kwargs):
+        raise requests.exceptions.SSLError(
+            "certificate verify failed: self-signed certificate"
+        )
+
+    monkeypatch.setattr(network_module, "web_session", lambda **kwargs: DummySession())
+    monkeypatch.setattr(network_module, "safe_get", fail_get)
+    monkeypatch.setattr(network_module, "tls_ca_bundle", lambda: "")
+
+    result = ScanResult()
+    assert (
+        network_module._http_service(
+            result, "192.0.2.10", 8899, [8899], DummyContext({})
+        )
+        is None
+    )
+    assert any(
+        "could not be inspected" in finding.title for finding in result.findings
+    )

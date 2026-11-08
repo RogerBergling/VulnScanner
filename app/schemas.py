@@ -152,6 +152,31 @@ class AssetCredentialUpdate(BaseModel):
     windows: int | None = None
 
 
+class WebAuthInput(BaseModel):
+    auth_type: Literal["basic", "bearer", "cookie", "header"] = "basic"
+    username: str = Field(default="", max_length=200)
+    password: str = Field(default="", max_length=4000)
+    token: str = Field(default="", max_length=8000)
+    cookie: str = Field(default="", max_length=16000)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("headers")
+    @classmethod
+    def validate_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 40:
+            raise ValueError("At most 40 custom headers are allowed")
+        cleaned: dict[str, str] = {}
+        for key, item in value.items():
+            name = str(key).strip()
+            if not name or any(char in name for char in "\r\n:"):
+                raise ValueError("Custom header names must be valid HTTP token names")
+            text = str(item)
+            if "\r" in text or "\n" in text:
+                raise ValueError("Custom header values may not contain CR/LF")
+            cleaned[name] = text[:4000]
+        return cleaned
+
+
 class ScanCreate(BaseModel):
     customer_id: int
     group_id: int | None = None
@@ -166,6 +191,9 @@ class ScanCreate(BaseModel):
     # Per-scan credential overrides keyed by "linux"/"windows". The values are
     # encrypted into the per-scan credential table and never returned.
     credentials: dict[CredentialOS, ScanCredentialInput] | None = None
+    # Optional HTTP authentication for web scans. Stored encrypted with the
+    # same credential key as SSH/WinRM credentials and never returned.
+    web_auth: WebAuthInput | None = None
     github_token: str | None = Field(default=None, max_length=500)
     requested_by: str = Field(default="local", max_length=120)
     # Optional execution agent for network scans. When set, the job is queued
@@ -189,7 +217,17 @@ class ScanCreate(BaseModel):
             raise ValueError("This scan type requires a target or an asset_id")
         if self.credentials and self.scan_type != "network":
             raise ValueError("Credentials can only be supplied for network scans")
+        if self.web_auth and self.scan_type != "web":
+            raise ValueError("Web authentication can only be supplied for web scans")
         return self
+
+
+class ScanDiagnosticsRequest(BaseModel):
+    scan_type: ScanType
+    target: str = Field(default="", max_length=100_000)
+    options: dict[str, Any] = Field(default_factory=dict)
+    agent_id: str | None = Field(default=None, max_length=80)
+    executor: str | None = Field(default=None, max_length=80)
 
 
 class FindingStatusUpdate(BaseModel):
@@ -280,12 +318,20 @@ class SettingsUpdate(BaseModel):
     max_cve_lookups: int | None = Field(default=None, ge=0, le=200)
     max_cves_per_service: int | None = Field(default=None, ge=1, le=500)
     max_cves_per_scan: int | None = Field(default=None, ge=1, le=5_000)
+    network_connect_timeout: float | None = Field(default=None, ge=0.1, le=3.0)
+    max_testssl_hosts: int | None = Field(default=None, ge=0, le=50)
+    max_openvas_hosts: int | None = Field(default=None, ge=1, le=50)
+    max_nuclei_network_targets: int | None = Field(default=None, ge=1, le=2000)
     nuclei_default_tags: str | None = Field(default=None, max_length=200)
     dangerous_tools_enabled: bool | None = None
     openvas_enabled: bool | None = None
     gvm_socket_path: str | None = Field(default=None, max_length=4096)
     gvm_username: str | None = Field(default=None, max_length=320)
     gvm_password: str | None = Field(default=None, max_length=1024)
+    nvd_api_key: str | None = Field(default=None, max_length=512)
+    tls_ca_bundle: str | None = Field(default=None, max_length=4096)
+    interactsh_server: str | None = Field(default=None, max_length=512)
+    interactsh_token: str | None = Field(default=None, max_length=1024)
 
     @field_validator("smtp_port")
     @classmethod
@@ -303,6 +349,16 @@ class SettingsUpdate(BaseModel):
             return value
         if not value.lower().startswith(("http://", "https://")):
             raise ValueError("Webhook URL must start with http:// or https://")
+        return value
+
+    @field_validator("interactsh_server")
+    @classmethod
+    def validate_interactsh_server(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return ""
+        value = value.strip()
+        if not value.lower().startswith(("http://", "https://")):
+            raise ValueError("Interactsh server URL must start with http:// or https://")
         return value
 
 
@@ -334,6 +390,22 @@ class RuntimeSettingsUpdate(BaseModel):
     session_ttl_hours: int | None = Field(default=None, ge=1, le=168)
     session_idle_minutes: int | None = Field(default=None, ge=5, le=1440)
     trust_proxy: bool | None = None
+    allowed_hosts: str | None = Field(default=None, max_length=4096)
+    max_request_bytes: int | None = Field(default=None, ge=1_048_576, le=536_870_912)
+    satellite_port: int | None = Field(default=None, ge=0, le=65_535)
+    satellite_host: str | None = Field(default=None, max_length=64)
+
+    @field_validator("satellite_host")
+    @classmethod
+    def validate_satellite_host(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return ""
+        value = value.strip()
+        try:
+            ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValueError("Satellite bind address must be a valid IP address") from exc
+        return value
 
     @field_validator("ssh_known_hosts", "wordlist_path")
     @classmethod
@@ -418,11 +490,13 @@ class BindAddressUpdate(BaseModel):
 class DatabaseBackupRequest(BaseModel):
     destination: str | None = Field(default=None, max_length=4096)
     overwrite: bool = False
+    passphrase: str | None = Field(default=None, max_length=1024)
 
 
 class DatabaseRestoreRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
     mode: Literal["all", "scans", "settings"] = "all"
+    passphrase: str | None = Field(default=None, max_length=1024)
 
     @field_validator("path")
     @classmethod

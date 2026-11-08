@@ -163,9 +163,9 @@ Public health check.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.1.3",
+  "version": "1.3.0",
   "build": {
-    "version": "1.1.3",
+    "version": "1.3.0",
     "number": "42",
     "commit": "abc1234",
     "time": "2026-11-01T11:14:00+00:00",
@@ -185,7 +185,7 @@ Lists scan types and agent modules.
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.1.3",
+  "version": "1.3.0",
   "build": {
     "number": "42",
     "commit": "abc1234",
@@ -557,7 +557,8 @@ Query parameters:
   "github_token": null,
   "requested_by": "local",
   "agent_id": null,
-  "credentials": null
+  "credentials": null,
+  "web_auth": null
 }
 ```
 
@@ -580,6 +581,14 @@ Notes:
   `options.authenticated = true`. Sending them with `agent_id` returns `400`
   because delegated scans never receive credentials. Secrets are stored
   encrypted and are never returned.
+- `web_auth` is accepted only for `web` scans and only when no satellite executor
+  is selected. It supplies an authenticated HTTP session:
+  `{"auth_type": "basic", "username": "...", "password": "..."}`,
+  `{"auth_type": "bearer", "token": "..."}`,
+  `{"auth_type": "cookie", "cookie": "session=..."}`, or
+  `{"auth_type": "header", "headers": {"X-API-Key": "..."}}`. Custom `headers`
+  may accompany any type. Secrets are encrypted with the scan credential key
+  and are never returned.
 - `agent_id` is accepted only for `network` scans. It delegates the scan to an
   enrolled agent that belongs to the same customer/group, is not revoked, and
   advertises the `network` capability. The scan is created with
@@ -621,7 +630,11 @@ Options are filtered per scan type:
     "testssl": false,
     "ignore_tls_errors": false,
     "allow_http_fallback": false,
-    "max_web_pages": 10
+    "max_web_pages": 10,
+    "nuclei": true,
+    "oast": false,
+    "cve_lookup": true,
+    "sqlmap": false
   },
   "network": {
     "ports": "22,80,443,8000-8100",
@@ -633,8 +646,17 @@ Options are filtered per scan type:
     "web_checks": true,
     "max_web_pages": 10,
     "max_web_hosts": 20,
+    "nuclei": true,
+    "nuclei_network": true,
+    "oast": false,
+    "cve_lookup": true,
+    "service_probes": true,
+    "sqlmap": false,
+    "openvas": false,
     "testssl": false,
     "max_testssl_hosts": 5,
+    "max_openvas_hosts": 5,
+    "max_nuclei_network_targets": 200,
     "authenticated": true,
     "target_os": "auto",
     "max_auth_hosts": 32,
@@ -676,7 +698,9 @@ Options are filtered per scan type:
 Invalid port profiles, non-numeric timeouts, missing targets and invalid URLs
 return `400`/`422`. Numeric network options are clamped to safe ranges
 (`max_auth_hosts` 1-256, `auth_timeout` 3-90, `max_web_hosts` 1-200,
-`max_web_pages` 0-50, `max_testssl_hosts` 0-50, ports 1-65535); invalid
+`max_web_pages` 0-50, `max_testssl_hosts` 0-50,
+`max_openvas_hosts` 1-50, `max_nuclei_network_targets` 1-2000, ports
+1-65535); invalid
 `target_os` or `winrm_transport` values return `400`. Domain options are clamped
 to `max_words` 1-50000, `workers` 1-100 and `max_subdomains` 1-5000. Domain
 targets must be bare domains, not URLs, IP addresses or wildcards.
@@ -1163,6 +1187,95 @@ Returns total events, failures and events in the last 24 hours.
 
 Exports the filtered audit trail as CSV (`text/csv`).
 
+## 9c. Satellites
+
+Satellite management is authenticated like any other dashboard endpoint:
+
+- `POST /api/satellites/pairing` — create a one-time pairing code. The response
+  includes `enroll_url` (main listener), `server_url` (dedicated mTLS listener
+  when configured), `server_fingerprint` and `mtls_port`.
+- `GET /api/satellites`, `PATCH /api/satellites/{id}` and
+  `DELETE /api/satellites/{id}` — list, rename/edit subnets, or revoke.
+- `POST /api/satellites/{id}/rotate-token` — issue a new bearer token and
+  invalidate the old one. The token is returned once; update the satellite
+  configuration and restart the runner.
+- `POST /api/satellite/pair` — public enrolment using the one-time code.
+- `POST /api/satellite/heartbeat`, `POST /api/satellite/jobs/next` and
+  `POST /api/satellite/jobs/{id}/result` — satellite-facing; authenticated by
+  the satellite bearer token, never by dashboard Basic auth. On the dedicated
+  mTLS port the TLS listener additionally requires the internal-CA client
+  certificate.
+
+## 9d. Scan diagnostics, tool management and vulnerability data
+
+### `POST /api/scan-diagnostics`
+
+Returns readiness checks for a planned scan: external APIs, local vulnerability
+cache, NVD key, Nuclei/Nmap/testssl/OpenVAS availability, TLS trust, and the
+selected server/agent/satellite executor. The scan dialog calls this
+automatically. Body:
+
+```json
+{
+  "scan_type": "network",
+  "target": "10.30.0.0/24",
+  "options": {"web_checks": true, "cve_lookup": true, "nuclei": true},
+  "agent_id": null,
+  "executor": "auto"
+}
+```
+
+### `GET /api/tools`
+
+Returns every optional tool with its selected mode (`system`, `path`, `managed`,
+`disabled`), resolved path, managed version and manual-install guidance.
+
+### `PATCH /api/tools/{name}`
+
+Set the source for one tool:
+
+```json
+{"mode": "managed", "path": ""}
+```
+
+Supported modes are `system`, `path`, `managed` and `disabled`. Managed mode is
+only available for tools with a catalog entry (Nuclei, Subfinder, Trivy,
+Gitleaks, osv-scanner).
+
+### `POST /api/tools/{name}/install`
+
+Start a background checksum-verified download of the latest managed release.
+The release checksum file is mandatory. Poll `GET /api/tools` for status.
+
+### `GET /api/vulnerability-data`
+
+Returns NVD product/version cache counts, EPSS/KEV/OSV cache counts, last sync
+status and whether the installation is offline-ready.
+
+### `POST /api/vulnerability-data/sync`
+
+Start a background sync:
+
+```json
+{"targets": ["nvd", "epss", "kev"]}
+```
+
+NVD sync downloads product-level records for every product in the fingerprint
+registry; EPSS downloads the full score table; KEV refreshes the CISA
+catalogue. Requires external APIs to be enabled.
+
+### Encrypted backups and key rotation
+
+`POST /api/server/database/backup` accepts an optional `passphrase`; the
+resulting file is encrypted with AES-256-GCM and has the `.vsenc` suffix.
+`POST /api/server/database/restore` accepts the same `passphrase`.
+`GET /api/server/database/inspect` accepts the passphrase in the
+`X-Backup-Passphrase` header so it does not appear in URLs or logs.
+
+`POST /api/settings/rotate-credential-key` requires `{"confirm": "ROTATE"}` and,
+when dashboard auth is enabled, the current admin `password`. It re-encrypts all
+Fernet-protected secrets and keeps the previous key as `credential.key.old`.
+
 ## 10. Server status and maintenance
 
 ### `GET /api/server/status`
@@ -1175,7 +1288,7 @@ be downloaded as a diagnostics snapshot.
 {
   "status": "ok",
   "product": "VulnScanner",
-  "version": "1.1.3",
+  "version": "1.3.0",
   "started_at": "2026-01-02T03:04:05+00:00",
   "uptime_seconds": 3600,
   "uptime_human": "1h",
@@ -1376,7 +1489,7 @@ The database may be locked briefly; run it when scans are idle. Errors return
 ```json
 {
   "product": "VulnScanner",
-  "version": "1.1.3",
+  "version": "1.3.0",
   "allow_external_apis": true,
   "nuclei_enabled": true,
   "nmap_enabled": true,

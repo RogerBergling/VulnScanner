@@ -13,6 +13,13 @@ database, backup/restore, deployment scripts, CI, tests and documentation.
 > 10 (dependency audit/secret scanning in CI) are implemented. The remaining
 > findings and the P0/P1 roadmap are unchanged.
 >
+> **Additional hardening (2026-11-08):** encrypted AES-256-GCM backups and
+> credential-key rotation are implemented; the satellite has a dedicated
+> internal-CA mTLS listener; per-tool source management supports
+> checksum-verified managed downloads; scan-readiness diagnostics and offline
+> NVD/EPSS/KEV data are available. RBAC, tenant isolation and signed agent
+> updates remain open.
+>
 > **Additional hardening (2026-11-03):** SMTP TLS certificate verification,
 > restrictive data/database permissions, SSH host-key enforcement by default,
 > rejection of embedded target credentials, minimal external-tool environments,
@@ -158,8 +165,14 @@ operator can approve it once; a changed key is treated as a security event.
 
 ### 3.5 Encrypt and rotate backups and the credential key
 
-**Current state:** `app/backup.py` writes a plaintext SQLite snapshot. The
-credential key is a local Fernet key file or `VS_CREDENTIAL_KEY`; there is no
+**Status: resolved for operator-supplied passphrases and file-backed keys
+(2026-11-08).** `app/backup_crypto.py` adds AES-256-GCM backup encryption with a
+passphrase that is never stored; **Settings → Security → Rotate credential key**
+re-encrypts every secret and keeps the previous key as `credential.key.old`.
+KMS/HSM integration and automatic backup retention/offsite copy remain open.
+
+**Original state:** `app/backup.py` wrote a plaintext SQLite snapshot. The
+credential key was a local Fernet key file or `VS_CREDENTIAL_KEY`; there was no
 rotation workflow. Backups contain credentials, MFA secrets, audit history and
 findings.
 
@@ -272,8 +285,10 @@ configurable.
 
 ### 4.2 Agent security
 
-- The internal CA/certificate UI claims mTLS, but the agent API authenticates
-  with bearer tokens only. Either implement mTLS or remove the claim.
+- The **satellite** API now has a dedicated optional mTLS listener that requires
+  an internal-CA client certificate (`VS_SATELLITE_PORT`). The **endpoint agent**
+  API still authenticates with bearer tokens only; do not describe agent
+  transport as mTLS until it is implemented.
 - Sign agent installers and update payloads; add an agent version policy and a
   controlled auto-update path.
 - Add replay protection/timestamps and request signing for agent results.

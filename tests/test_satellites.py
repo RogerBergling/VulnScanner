@@ -101,8 +101,10 @@ def test_subnet_matching(data_dir):
     heartbeat(registration["satellite_id"], "linux", "1.1.3")
     assert matching_satellite("10.30.5.0/24") is not None
     assert matching_satellite("10.31.0.0/24") is None
-    assert matching_satellite("host.example.com") is None  # no CIDR -> no auto-match
-    assert matching_satellite("10.30.0.5") is None  # single host -> no auto-match
+    # Single addresses and hostnames are resolved to /32 (or /128) networks so
+    # a subnet-registered satellite handles them too.
+    assert matching_satellite("10.30.0.5") is not None
+    assert matching_satellite("10.30.0.999") is None
 
 
 def test_stale_satellite_job_expiry(data_dir):
@@ -171,7 +173,11 @@ def test_satellite_execute_rejects_unknown_type():
 def test_satellites_api(api_client):
     pairing = api_client.post("/api/satellites/pairing")
     assert pairing.status_code == 200
-    code = pairing.json()["code"]
+    pairing_data = pairing.json()
+    assert pairing_data["server_fingerprint"]
+    assert pairing_data["enroll_url"]
+    assert pairing_data["server_url"]
+    code = pairing_data["code"]
 
     enrolled = api_client.post(
         "/api/satellite/pair",
@@ -264,3 +270,85 @@ def test_scan_rejects_satellite_for_other_types(api_client):
         },
     )
     assert created.status_code == 400
+
+
+def test_hostname_and_url_targets_route_to_subnet(data_dir, monkeypatch):
+    pairing = create_pairing()
+    registration = _register(data_dir, pairing["code"], subnets=["10.30.0.0/16"])
+    from app.satellites import heartbeat
+
+    heartbeat(registration["satellite_id"], "linux", "1.1.3")
+    monkeypatch.setattr(
+        "app.satellites.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("10.30.7.8", 0))],
+    )
+    assert matching_satellite("app.dmz.example") is not None
+    assert matching_satellite("https://app.dmz.example/login") is not None
+
+
+def test_satellite_runner_initializes_local_database(tmp_path, monkeypatch):
+    from app.satellite import ensure_local_database
+    from app.database import get_db
+
+    data = tmp_path / "satellite-data"
+    monkeypatch.setenv("VS_DATA_DIR", str(data))
+    monkeypatch.setenv("VS_DATABASE", str(data / "vulnscanner.db"))
+    ensure_local_database()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='settings'"
+        ).fetchone()
+    assert row is not None
+
+
+def test_certificate_fingerprint_adapter_uses_pin_as_trust_anchor():
+    import ssl
+    from app.satellite import FingerprintAdapter
+
+    class _Conn:
+        cert_reqs = None
+        ca_certs = "old"
+        ca_cert_dir = "old"
+        assert_fingerprint = None
+
+    conn = _Conn()
+    adapter = FingerprintAdapter("a" * 64)
+    adapter.cert_verify(conn, "https://master.example", True, None)
+    assert conn.assert_fingerprint == "a" * 64
+    assert conn.cert_reqs == ssl.CERT_NONE
+    assert conn.ca_certs is None
+
+    import pytest
+    with pytest.raises(ValueError):
+        FingerprintAdapter("not-a-fingerprint")
+
+
+def test_rotate_satellite_token_invalidates_old_token(data_dir):
+    from app.satellites import rotate_satellite_token
+
+    pairing = create_pairing()
+    registration = _register(data_dir, pairing["code"])
+    old_token = registration["token"]
+    new_token = rotate_satellite_token(registration["satellite_id"])
+    assert new_token and new_token != old_token
+    assert authenticate_satellite(old_token) is None
+    assert authenticate_satellite(new_token) is not None
+
+
+def test_stale_satellite_is_not_routed(data_dir):
+    from app.database import get_db
+
+    pairing = create_pairing()
+    registration = _register(data_dir, pairing["code"], subnets=["10.30.0.0/16"])
+    from app.satellites import heartbeat
+
+    heartbeat(registration["satellite_id"], "linux", "1.3.0")
+    assert matching_satellite("10.30.5.10") is not None
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE satellites SET last_seen = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+            (registration["satellite_id"],),
+        )
+        conn.commit()
+    assert matching_satellite("10.30.5.10") is None
+    assert get_satellite(registration["satellite_id"])["online"] is False

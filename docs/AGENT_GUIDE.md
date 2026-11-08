@@ -191,7 +191,7 @@ acceptable.
 & "C:\Program Files\VulnScanner Agent\VulnScannerAgent.ps1" -Action Status
 & "C:\Program Files\VulnScanner Agent\VulnScannerAgent.ps1" -Action Run
 & "C:\Program Files\VulnScanner Agent\VulnScannerAgent.ps1" -Action Configure -PollInterval 60
-& "C:\Program Files\VulnScanner Agent\VulnScannerAgent.ps1" -Action Scan -Modules system,ports
+& "C:\Program Files\VulnScanner Agent\VulnScannerAgent.ps1" -Action Scan -Modules system,packages,ports
 ```
 
 `-Action Run -Once` performs one heartbeat/poll cycle. `-Action Scan` runs
@@ -320,10 +320,13 @@ Native PowerShell agent: see [3.4](#34-windows-installer-native-powershell-agent
 | `network` | TCP connect scan from the endpoint's network position. | All platforms | Windows |
 | `ad` | Runs the read-only AD collector through PowerShell. | Windows | Windows with RSAT |
 
-The native Windows agent advertises `system`, `ports`, `network` and, when the
-AD collector is installed, `ad`. The Python agent additionally advertises
-`packages`, `secrets` and `repo`. The UI disables modules an agent has not
-reported in its last heartbeat.
+The native Windows agent advertises `system`, `packages`, `ports`, `network`
+and, when the AD collector is installed, `ad`. Its `packages` module collects
+the registry uninstall inventory plus Python and npm packages when those runtimes
+exist; Python/npm entries are matched against OSV, and known end-of-life Windows
+software is flagged locally. The Python agent additionally advertises `secrets`
+and `repo`. The UI disables modules an agent has not reported in its last
+heartbeat.
 
 `secrets` and `repo` require at least one path. Paths must be readable by the
 agent account. The server rejects these modules without paths to avoid an
@@ -346,8 +349,10 @@ example a private subnet behind a jump host.
   until it reconnects.
 - The agent performs TCP connect probes (no raw sockets, no Nmap) and uploads
   open ports, service guesses and banners. The server applies the same
-  dangerous-port rules, severity grading and fingerprinting as a server-side
-  scan.
+  dangerous-port rules, severity grading, banner/CPE fingerprinting and NVD CVE
+  enrichment as a server-side scan. Web crawling and Nuclei still run only
+  on the server or a satellite; the UI and scan readiness panel state this
+  explicitly.
 - The target must be a host, IP address, CIDR or a newline/comma-separated
   list of those entries. The UI can import a `.txt`/`.csv` with one target per
   row. The server rejects lists above `VS_MAX_CIDR_HOSTS` (default 256), and both

@@ -63,7 +63,8 @@ def test_execute_scan_persists_findings_and_summary(api_client, customer, monkey
     assert detail["summary"]["high"] == 1
     assert detail["summary"]["total"] == 1
     assert detail["summary"]["risk_score"] > 0
-    assert detail["summary"]["metadata"] == {"source": "test"}
+    assert detail["summary"]["metadata"]["source"] == "test"
+    assert "diagnostics" in detail["summary"]["metadata"]
     assert detail["started_at"] and detail["completed_at"]
     assert detail["findings"][0]["cve"] == "CVE-2026-0001"
     assert detail["findings"][0]["fingerprint"]

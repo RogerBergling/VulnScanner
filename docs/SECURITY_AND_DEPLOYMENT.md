@@ -112,6 +112,9 @@ The following paths remain public even when authentication is enabled:
 - `/api/health`
 - `/api/auth/login` and `/api/auth/status`
 - `/api/agent/*` (these require an agent token where appropriate)
+- `/api/satellite/*` (pairing uses a one-time code; job endpoints require a
+  satellite bearer token and, on the dedicated port, an internal-CA client
+  certificate)
 - `/agent/*` (agent scripts and installers)
 - `/static/*`
 - `/login`
@@ -417,15 +420,19 @@ sqlite3 /var/lib/vulnscanner/vulnscanner.db \
 The **Server** page exposes the same online backup API. It writes a consistent
 copy to the chosen absolute directory/file path, or to
 `<data>/reports/backups/` when no path is given, and records the last backup
-time. The database contains all application settings, including tool paths,
-listener/HTTPS choices, a salted admin password hash, the encrypted TOTP secret
-and recovery code hashes. Move backups to encrypted, access-controlled storage
-on a schedule; the application does not rotate or encrypt them.
+time. Supplying a passphrase encrypts the snapshot with AES-256-GCM and writes a
+`.vsenc` file; the passphrase is never stored. The database contains all
+application settings, including tool paths, listener/HTTPS choices, a salted
+admin password hash, the encrypted TOTP secret and recovery code hashes. Move
+backups to access-controlled storage on a schedule and keep an offline copy of
+the backup passphrase.
 
-Encrypt backups at rest and restrict who can restore them. A backup contains
-secrets, MFA material, audit history and AD findings. The credential key is a
-separate file; a restored database without it cannot decrypt saved credentials
-or the SMTP password.
+Even with an encrypted backup, restrict who can restore it and protect the
+credential key. A backup contains secrets, MFA material, audit history and AD
+findings. The credential key is a separate file; a restored database without it
+cannot decrypt saved credentials or the SMTP password. Rotate the key with
+**Settings → Security → Rotate credential key**; the previous key is kept as
+`credential.key.old` for rollback.
 
 ### Storage relocation
 

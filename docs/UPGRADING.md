@@ -62,7 +62,10 @@ VS_DATABASE=/var/lib/vulnscanner/vulnscanner.db
 Certificates now live under `VS_DATA_DIR/certs`, alongside the database. If
 `VS_CREDENTIAL_KEY` is stored in the environment, back that up separately; if it
 is not set, back up `VS_DATA_DIR/credential.key`. Without it, encrypted target
-credentials cannot be decrypted.
+credentials cannot be decrypted. To rotate the key, use **Settings → Security →
+Rotate credential key**; the previous key is kept as `credential.key.old`.
+Database backups can be encrypted with a passphrase under **Server → Back up
+database**; the passphrase is never stored, so keep it separately.
 
 ## Before every update
 

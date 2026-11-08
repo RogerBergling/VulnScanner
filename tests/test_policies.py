@@ -176,3 +176,35 @@ def test_scan_rejects_policy_type_mismatch(api_client, customer):
         },
     )
     assert created.status_code == 400
+
+
+def test_default_policy_does_not_break_other_scan_types(api_client, customer):
+    policy = create_policy("default-network", "network", {"nuclei": True})
+    set_default_policy(policy["id"])
+    try:
+        web = api_client.post(
+            "/api/scans",
+            json={
+                "customer_id": customer["id"],
+                "group_id": customer["group_id"],
+                "scan_type": "web",
+                "target": "https://example.com",
+            },
+        )
+        assert web.status_code == 201, web.text
+        assert web.json()["options"].get("policy_id") is None
+
+        network = api_client.post(
+            "/api/scans",
+            json={
+                "customer_id": customer["id"],
+                "group_id": customer["group_id"],
+                "scan_type": "network",
+                "target": "127.0.0.1",
+                "options": {"ports": "1"},
+            },
+        )
+        assert network.status_code == 201, network.text
+        assert network.json()["options"]["policy_id"] == policy["id"]
+    finally:
+        set_default_policy(None)

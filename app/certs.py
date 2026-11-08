@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import tempfile
@@ -154,6 +155,34 @@ def get_cert_paths() -> tuple[str, str]:
 def get_web_cert_paths() -> tuple[str, str]:
     _ensure_private_key(WEB_KEY_FILE)
     return str(WEB_CERT_FILE), str(WEB_KEY_FILE)
+
+
+def certificate_fingerprint(cert_path: str | Path | None = None) -> str:
+    """Return the SHA-256 fingerprint of a PEM certificate.
+
+    Used by satellite pairing so the operator can pin the exact master
+    certificate in the enrolment command instead of disabling TLS
+    verification on a self-signed installation.
+    """
+    path = Path(cert_path) if cert_path else Path(get_cert_paths()[0])
+    cert = x509.load_pem_x509_certificate(path.read_bytes())
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+
+
+def normalize_fingerprint(value: str) -> str:
+    """Normalise a SHA-256 certificate fingerprint for comparison."""
+    return "".join(char for char in (value or "").lower() if char in "0123456789abcdef")
+
+
+def satellite_client_ca_path() -> str:
+    """Return the internal CA certificate used to verify satellite clients.
+
+    The CA is generated on demand. It is only used when the dedicated
+    satellite listener is enabled with client-certificate verification.
+    """
+    if not INTERNAL_CERT_FILE.is_file():
+        _generate_internal_ca()
+    return str(INTERNAL_CERT_FILE)
 
 
 def get_internal_cert_paths() -> tuple[str, str, str]:

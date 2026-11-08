@@ -102,3 +102,29 @@ def test_scan_uses_discovered_hosts(monkeypatch):
     assert result.metadata.get("wildcard_expansion") == {
         "example.com": ["www.example.com"]
     }
+
+
+def test_wildcard_with_no_hosts_completes_without_resolving_literal(monkeypatch):
+    monkeypatch.setattr(
+        "app.scanners.subdomains.discover_subdomains", lambda *args, **kwargs: set()
+    )
+    monkeypatch.setattr(
+        "app.scanners.subdomains.normalize_domain", lambda value: value.strip()
+    )
+    ctx = DummyContext(
+        {
+            "subfinder": False,
+            "bruteforce": False,
+            "profile": "common",
+            "web_checks": False,
+            "cve_lookup": False,
+            "service_probes": False,
+            "nuclei": False,
+            "scan_unresponsive_hosts": True,
+        },
+        target="*.example.invalid",
+    )
+    result = network.scan(ctx)
+    assert result.metadata["host_count"] == 0
+    assert result.metadata["no_hosts_discovered"] == ["*.example.invalid"]
+    assert any("No hosts discovered" in finding.title for finding in result.findings)

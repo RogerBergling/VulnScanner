@@ -15,15 +15,19 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
+import ssl
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from . import __version__
 
@@ -63,6 +67,87 @@ def local_hostname() -> str:
     return socket.gethostname()
 
 
+def ensure_local_database() -> None:
+    """Create the local cache/settings database used by scanner engines.
+
+    A satellite is a disposable executor and never stores findings, but the
+    shared scan engines use SQLite for tool settings and for the NVD/OSV/EPSS
+    caches. Without this the documented "database-free" runner fails with
+    ``no such table: settings`` as soon as CVE matching or Nmap is enabled.
+    """
+    from .database import init_db
+
+    init_db()
+
+
+def _clean_fingerprint(value: str) -> str:
+    return "".join(char for char in (value or "").lower() if char in "0123456789abcdef")
+
+
+class FingerprintAdapter(HTTPAdapter):
+    """Pin a SHA-256 certificate fingerprint for requests/urllib3.
+
+    ``requests`` has no public certificate-pinning API. urllib3 supports
+    ``assert_fingerprint`` on its HTTPS connection pool, so this adapter sets it
+    after the normal CA verification has been configured.
+    """
+
+    def __init__(self, fingerprint: str, *args: Any, **kwargs: Any) -> None:
+        self.fingerprint = _clean_fingerprint(fingerprint)
+        if len(self.fingerprint) != 64:
+            raise ValueError("A certificate fingerprint must be a SHA-256 hex digest")
+        super().__init__(*args, **kwargs)
+
+    def cert_verify(self, conn: Any, url: str, verify: Any, cert: Any) -> None:
+        super().cert_verify(conn, url, verify, cert)
+        # The pinned fingerprint is the trust anchor. Public-CA validation
+        # would reject the default self-signed master before the pin is
+        # checked, so disable CA verification and keep the pin.
+        conn.cert_reqs = ssl.CERT_NONE
+        conn.ca_certs = None
+        conn.ca_cert_dir = None
+        conn.assert_fingerprint = self.fingerprint
+
+
+def _server_certificate_fingerprint(server_url: str, timeout: float = 15.0) -> str:
+    """Fetch the TLS certificate fingerprint without trusting it yet.
+
+    This is only used to show the operator the value to pin or to diagnose a
+    failed verification. It must never be treated as proof of identity by
+    itself.
+    """
+    parsed = urlparse(server_url if "://" in server_url else f"https://{server_url}")
+    host = parsed.hostname
+    if not host:
+        raise SystemExit("The satellite server URL does not contain a hostname")
+    port = parsed.port or 443
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                der = tls.getpeercert(binary_form=True) or b""
+    except OSError as exc:
+        raise SystemExit(f"Could not read the server certificate from {host}:{port}: {exc}") from exc
+    if not der:
+        raise SystemExit(f"The server at {host}:{port} did not present a TLS certificate")
+    return hashlib.sha256(der).hexdigest()
+
+
+def _enrollment_session(args: argparse.Namespace) -> requests.Session:
+    session = requests.Session()
+    if args.insecure:
+        session.verify = False
+    elif args.ca_cert:
+        session.verify = args.ca_cert
+    else:
+        session.verify = True
+    if args.fingerprint:
+        session.mount("https://", FingerprintAdapter(args.fingerprint))
+    return session
+
+
 def enroll(args: argparse.Namespace) -> None:
     config_path = Path(args.config).expanduser() if args.config else default_config_path()
     payload: dict[str, Any] = {
@@ -74,13 +159,26 @@ def enroll(args: argparse.Namespace) -> None:
     }
     if args.subnets:
         payload["subnets"] = [item.strip() for item in args.subnets.split(",") if item.strip()]
-    response = requests.post(
-        f"{args.server.rstrip('/')}/api/satellite/pair",
-        json=payload,
-        timeout=60,
-        verify=not args.insecure,
-        headers={"User-Agent": f"VulnScanner-satellite/{__version__}"},
-    )
+    session = _enrollment_session(args)
+    try:
+        response = session.post(
+            f"{args.server.rstrip('/')}/api/satellite/pair",
+            json=payload,
+            timeout=60,
+            headers={"User-Agent": f"VulnScanner-satellite/{__version__}"},
+        )
+    except requests.exceptions.SSLError as exc:
+        fingerprint = _server_certificate_fingerprint(args.server)
+        raise SystemExit(
+            "TLS verification of the master failed.\n"
+            f"  Server certificate SHA-256: {fingerprint}\n"
+            "Re-run with one of:\n"
+            f"  --fingerprint {fingerprint}\n"
+            "  --ca-cert /path/to/master-server-or-ca.pem\n"
+            "Use --insecure only on an isolated lab network."
+        ) from exc
+    finally:
+        session.close()
     if response.status_code != 200:
         raise SystemExit(f"Pairing failed: HTTP {response.status_code} {response.text[:400]}")
     data = response.json()
@@ -93,22 +191,48 @@ def enroll(args: argparse.Namespace) -> None:
     try:
         os.chmod(key_path, 0o600)
         os.chmod(cert_path, 0o600)
+        os.chmod(ca_path, 0o644)
     except OSError:
         pass
+
+    # Pin the certificate observed during enrolment unless the operator asked
+    # for CA-only verification. This makes the documented command work against
+    # the default self-signed master without disabling TLS verification later.
+    fingerprint = _clean_fingerprint(args.fingerprint or "")
+    if not args.no_pin and not args.insecure:
+        try:
+            fingerprint = _clean_fingerprint(
+                args.fingerprint or _server_certificate_fingerprint(args.server)
+            )
+        except SystemExit:
+            # The pairing request already succeeded, so a later TLS probe
+            # failure should not discard the enrollment. CA/system trust still
+            # applies.
+            fingerprint = _clean_fingerprint(args.fingerprint or "")
+
     config = {
-        "server": args.server.rstrip("/"),
+        # Enrolment happens on the main listener; subsequent polling uses the
+        # dedicated mTLS listener when the master advertises one.
+        "server": str(data.get("server_url") or args.server).rstrip("/"),
         "satellite_id": data["satellite_id"],
         "token": data["token"],
         "name": args.name or local_hostname(),
         "cert_path": str(cert_path),
         "key_path": str(key_path),
+        # ca_path is the client-certificate CA issued by the master. It is not
+        # the trust anchor for the master's own TLS certificate.
         "ca_path": str(ca_path),
+        "client_ca_path": str(ca_path),
+        "server_ca_path": str(Path(args.ca_cert).expanduser()) if args.ca_cert else "",
+        "server_fingerprint": fingerprint,
         "verify_tls": not args.insecure,
         "poll_interval": 30,
         "subnets": payload.get("subnets", []),
     }
     save_config(config_path, config)
     print(f"Satellite {config['satellite_id']} enrolled with {config['server']}")
+    if fingerprint and not args.insecure:
+        print(f"Pinned master certificate SHA-256: {fingerprint}")
     print(f"Configuration stored at {config_path}")
 
 
@@ -145,6 +269,7 @@ class SatelliteContext:
 
 def execute_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run a scan job locally and return the upload payload."""
+    ensure_local_database()
     scan_type = job.get("scan_type")
     target = str(job.get("target") or "")
     options = job.get("options") or {}
@@ -180,13 +305,25 @@ def _session(config: dict[str, Any]) -> requests.Session:
     if config.get("cert_path") and Path(config["cert_path"]).is_file():
         session.cert = (config["cert_path"], config.get("key_path", ""))
     session.verify = True if config.get("verify_tls", True) else False
-    if config.get("ca_path") and Path(config["ca_path"]).is_file() and config.get("verify_tls", True):
-        session.verify = config["ca_path"]
+    if config.get("verify_tls", True):
+        server_ca = str(config.get("server_ca_path") or "").strip()
+        if not server_ca and not config.get("server_fingerprint"):
+            # Backwards compatibility for configurations created before the
+            # client CA and server CA were separated.
+            legacy_ca = str(config.get("ca_path") or "").strip()
+            if legacy_ca and Path(legacy_ca).is_file():
+                server_ca = legacy_ca
+        if server_ca and Path(server_ca).is_file():
+            session.verify = server_ca
+        fingerprint = _clean_fingerprint(str(config.get("server_fingerprint") or ""))
+        if fingerprint:
+            session.mount("https://", FingerprintAdapter(fingerprint))
     return session
 
 
 def run(config_path: Path) -> None:
     config = load_config(config_path)
+    ensure_local_database()
     session = _session(config)
     server = config["server"].rstrip("/")
     poll_interval = max(10, int(config.get("poll_interval") or 30))
@@ -241,6 +378,21 @@ def main() -> None:
     enroll_parser.add_argument("--code", required=True, help="one-time pairing code from the master GUI")
     enroll_parser.add_argument("--name", default="", help="friendly satellite name")
     enroll_parser.add_argument("--subnets", default="", help="comma-separated subnets this satellite can reach")
+    enroll_parser.add_argument(
+        "--fingerprint",
+        default="",
+        help="SHA-256 fingerprint of the master certificate to pin (recommended)",
+    )
+    enroll_parser.add_argument(
+        "--ca-cert",
+        default="",
+        help="PEM file with the master certificate or CA to trust",
+    )
+    enroll_parser.add_argument(
+        "--no-pin",
+        action="store_true",
+        help="use CA/system trust only and do not pin the observed certificate",
+    )
     enroll_parser.add_argument("--insecure", action="store_true", help="disable TLS verification (lab only)")
     enroll_parser.add_argument("--config", default="", help="config file path (default ~/.config/vulnscanner/satellite.json)")
     enroll_parser.set_defaults(func=enroll)

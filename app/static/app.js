@@ -602,7 +602,7 @@
         '<div class="stat-card"><div class="stat-label">Customers</div><div class="stat-value">' + num(counts.customers) + '</div>' +
           '<div class="stat-foot">' + num(counts.groups) + ' groups · ' + num(counts.assets) + ' assets</div></div>' +
         '<div class="stat-card"><div class="stat-label">Scans stored</div><div class="stat-value">' + num(counts.scans) + '</div>' +
-          '<div class="stat-foot">' + num(counts.running_scans) + ' running · ' + num(counts.waiting_agent_scans) + ' waiting for agent</div></div>' +
+          '<div class="stat-foot">' + num(counts.running_scans) + ' running · ' + num(counts.waiting_agent_scans) + ' waiting for agent · ' + num(counts.waiting_satellite_scans) + ' waiting for satellite</div></div>' +
         '<div class="stat-card stat-ok"><div class="stat-label">Agents online</div><div class="stat-value">' + num(counts.agents_online) + '</div>' +
           '<div class="stat-foot">' + num(counts.agents) + ' enrolled endpoints</div></div>' +
         '<div class="stat-card stat-warn"><div class="stat-label">Assessed assets</div><div class="stat-value">' + num(counts.assessed_assets) + '</div>' +
@@ -1076,12 +1076,26 @@
         '<label class="check"><input type="checkbox" id="opt-active" checked><span><strong>Active checks</strong> — test SQL injection, XSS, traversal and common misconfigurations.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE, misconfiguration and exposure templates when nuclei is installed (default tag set from Settings).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-sqlmap"><span><strong>sqlmap (dangerous)</strong> — send real SQL injection payloads to discovered parameters. Requires the Settings dangerous-tools switch AND this option; authorised penetration tests only.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-oast"><span><strong>OAST collaborator</strong> — allow Nuclei to use the configured Interactsh server for blind SSRF/RCE/XXE templates. Sends callbacks to that collaborator only.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match software versions against CVEs</strong> — fingerprint the web stack (Server header, X-Powered-By, generator meta) and compare it with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-external"><span><strong>External tools</strong> — allows testssl.sh below.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-testssl"><span><strong>Use testssl.sh</strong> — deep TLS review of HTTPS targets when installed.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-ignore-tls"><span><strong>Ignore TLS certificate errors</strong> — self-signed/lab targets only. This disables certificate verification and is recorded in the scan event log.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-http-fallback"><span><strong>Allow HTTPS → HTTP fallback</strong> — retry over plain HTTP if HTTPS fails. Use only for authorised lab targets; recorded in the scan event log.</span></label>' +
-        '</div><div class="form-grid" style="margin-top:12px">' +
+        '</div>' +
+        '<div class="form-section"><h3>Authenticated web session <span class="muted small">(optional)</span></h3>' +
+        '<div class="form-grid">' +
+        '<label class="field"><span>Authentication type</span><select class="select" id="opt-web-auth-type">' +
+          '<option value="">No authentication</option><option value="basic">HTTP Basic</option>' +
+          '<option value="bearer">Bearer token</option><option value="cookie">Cookie header</option>' +
+          '<option value="header">Custom headers</option></select></label>' +
+        '<label class="field"><span>Username</span><input class="input" id="opt-web-username" autocomplete="off"></label>' +
+        '<label class="field"><span>Password</span><input class="input" id="opt-web-password" type="password" autocomplete="new-password"></label>' +
+        '<label class="field"><span>Bearer token</span><input class="input" id="opt-web-token" type="password" autocomplete="new-password"></label>' +
+        '<label class="field full"><span>Cookie header</span><input class="input mono" id="opt-web-cookie" placeholder="session=...; csrftoken=..." autocomplete="off"></label>' +
+        '<label class="field full"><span>Custom headers (JSON object)</span><textarea class="textarea mono" id="opt-web-headers" rows="3" spellcheck="false" placeholder="{ &quot;X-API-Key&quot;: &quot;...&quot; }"></textarea></label>' +
+        '</div><p class="muted small" style="margin:6px 0 0">Secrets are encrypted with the scan credential key and are not returned by the API. Form-login macros are not implemented; use Basic, bearer, cookie or custom headers.</p></div>' +
+        '<div class="form-grid" style="margin-top:12px">' +
         '<label class="field"><span>Max pages to crawl</span><input class="input" id="opt-max-web-pages" type="number" min="0" max="50" value="10">' +
           '<span class="hint">Same-origin HTML pages linked from the target. Set 0 to disable crawling.</span></label>' +
         '<label class="field"><span>Nuclei template tags <span class="muted">(optional)</span></span>' +
@@ -1121,6 +1135,8 @@
         '<label class="check"><input type="checkbox" id="opt-vulners"><span>Run the Nmap <span class="mono">vulners</span> NSE script (server scans only).</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-web-checks" checked><span><strong>Web vulnerability checks</strong> — detect HTTP/HTTPS on discovered ports, then crawl, check headers, exposed files, injection and Nuclei.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-nuclei" checked><span><strong>Nuclei signature engine</strong> — run CVE/misconfiguration/exposure templates against discovered web services when nuclei is installed.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-nuclei-network" checked><span><strong>Nuclei network templates</strong> — run network-protocol templates against open SMB/RDP/SSH/database/mail services. Adds signature coverage beyond ports.</span></label>' +
+        '<label class="check"><input type="checkbox" id="opt-oast"><span><strong>OAST collaborator</strong> — allow Nuclei to use the configured Interactsh server for blind SSRF/RCE/XXE templates. Sends callbacks to that collaborator only.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-sqlmap"><span><strong>sqlmap (dangerous)</strong> — send real SQL injection payloads to parameters of discovered web services. Requires the Settings dangerous-tools switch AND this option.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-cve-lookup" checked><span><strong>Match service versions against CVEs</strong> — fingerprint detected services (banners, Server headers, Nmap results) and compare them with the NVD database. Requires external APIs.</span></label>' +
         '<label class="check"><input type="checkbox" id="opt-service-probes" checked><span><strong>Service security probes</strong> — test SMB signing, SNMP default communities, unauthenticated Redis/MongoDB/Elasticsearch/Docker, RDP NLA and VNC authentication. Read-only probes.</span></label>' +
@@ -1235,6 +1251,7 @@
           '<input class="input" id="scan-github-token" type="password" maxlength="500" placeholder="ghp_… (read-only token for private repositories)">' +
           '<span class="hint">The token is used for this clone only and is never written to the database.</span></label>' +
         '<div class="field full" id="scan-type-options"></div>' +
+        '<div class="field full" id="scan-readiness"></div>' +
         '</div><div class="form-error"></div></form>',
       actions: [
         { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
@@ -1264,6 +1281,7 @@
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
                 payload.options.cve_lookup = !!($('#opt-cve-lookup', ctx.overlay) || {}).checked;
                 payload.options.nuclei = !!($('#opt-nuclei', ctx.overlay) || {}).checked;
+                payload.options.oast = !!($('#opt-oast', ctx.overlay) || {}).checked;
                 payload.options.sqlmap = !!($('#opt-sqlmap', ctx.overlay) || {}).checked;
                 payload.options.testssl = !!($('#opt-testssl', ctx.overlay) || {}).checked;
                 payload.options.ignore_tls_errors = !!($('#opt-ignore-tls', ctx.overlay) || {}).checked;
@@ -1274,6 +1292,26 @@
                 if (sqlmapTargets) payload.options.max_sqlmap_targets = Number(sqlmapTargets);
                 const webPagesValue = ($('#opt-max-web-pages', ctx.overlay) || {}).value;
                 payload.options.max_web_pages = webPagesValue === undefined || webPagesValue === '' ? 10 : Number(webPagesValue);
+                const webAuthType = (($('#opt-web-auth-type', ctx.overlay) || {}).value || '').trim();
+                if (webAuthType) {
+                  let webHeaders = {};
+                  const headersText = (($('#opt-web-headers', ctx.overlay) || {}).value || '').trim();
+                  if (headersText) {
+                    try { webHeaders = JSON.parse(headersText); }
+                    catch (parseError) { throw new Error('Custom web headers are not valid JSON: ' + parseError.message); }
+                    if (!webHeaders || typeof webHeaders !== 'object' || Array.isArray(webHeaders)) {
+                      throw new Error('Custom web headers must be a JSON object');
+                    }
+                  }
+                  payload.web_auth = {
+                    auth_type: webAuthType,
+                    username: (($('#opt-web-username', ctx.overlay) || {}).value || '').trim(),
+                    password: ($('#opt-web-password', ctx.overlay) || {}).value || '',
+                    token: ($('#opt-web-token', ctx.overlay) || {}).value || '',
+                    cookie: ($('#opt-web-cookie', ctx.overlay) || {}).value || '',
+                    headers: webHeaders
+                  };
+                }
               } else if (type === 'network') {
                 payload.options.profile = ($('#opt-profile', ctx.overlay) || {}).value || 'common';
                 payload.options.external_tools = !!($('#opt-external', ctx.overlay) || {}).checked;
@@ -1283,6 +1321,8 @@
                 payload.options.service_probes = !!($('#opt-service-probes', ctx.overlay) || {}).checked;
                 payload.options.scan_unresponsive_hosts = !!($('#opt-scan-unresponsive', ctx.overlay) || {}).checked;
                 payload.options.nuclei = !!($('#opt-nuclei', ctx.overlay) || {}).checked;
+                payload.options.nuclei_network = !!($('#opt-nuclei-network', ctx.overlay) || {}).checked;
+                payload.options.oast = !!($('#opt-oast', ctx.overlay) || {}).checked;
                 const nucleiTags = (($('#opt-nuclei-tags', ctx.overlay) || {}).value || '').trim();
                 if (nucleiTags) payload.options.nuclei_tags = nucleiTags;
                 payload.options.sqlmap = !!($('#opt-sqlmap', ctx.overlay) || {}).checked;
@@ -1502,7 +1542,76 @@
             }
           }
           updateTargetCount();
+          scheduleReadiness();
         }
+
+        let readinessTimer = null;
+        function readinessOptions(type) {
+          const options = {};
+          if (type === 'web' || type === 'network') {
+            options.nuclei = !!($('#opt-nuclei', overlay) || {}).checked;
+            options.oast = !!($('#opt-oast', overlay) || {}).checked;
+            options.cve_lookup = !!($('#opt-cve-lookup', overlay) || {}).checked;
+            options.external_tools = !!($('#opt-external', overlay) || {}).checked;
+            options.testssl = !!($('#opt-testssl', overlay) || {}).checked;
+            if (type === 'network') {
+              options.web_checks = !!($('#opt-web-checks', overlay) || {}).checked;
+              options.service_probes = !!($('#opt-service-probes', overlay) || {}).checked;
+              options.nuclei_network = !!($('#opt-nuclei-network', overlay) || {}).checked;
+              options.openvas = !!($('#opt-openvas', overlay) || {}).checked;
+            } else {
+              options.active = !!($('#opt-active', overlay) || {}).checked;
+            }
+          }
+          return options;
+        }
+        function renderReadiness(data) {
+          const target = $('#scan-readiness', overlay);
+          if (!target) return;
+          const checks = (data && data.checks) || [];
+          const warnings = (data && data.warnings) || [];
+          if (!checks.length) { target.innerHTML = ''; return; }
+          const badge = function (status) {
+            if (status === 'ready') return 'sev-info';
+            if (status === 'missing') return 'sev-critical';
+            if (status === 'disabled') return 'sev-none';
+            return 'sev-medium';
+          };
+          target.innerHTML = '<div class="form-section"><h3>Scan readiness</h3>' +
+            '<div class="checkbox-row" style="display:block">' +
+            checks.map(function (check) {
+              return '<div class="tool-row"><span class="badge ' + badge(check.status) + '">' + esc(check.status) + '</span>' +
+                '<span class="tool-name">' + esc(check.label) + '</span>' +
+                '<span class="tool-path" title="' + esc(check.detail) + '">' + esc(check.detail) + '</span></div>';
+            }).join('') +
+            '</div>' +
+            (warnings.length ? '<div class="info-banner info-banner-warn" style="margin-top:10px"><div><strong>Coverage warning:</strong> ' +
+              warnings.map(function (warning) { return esc(warning); }).join(' ') + '</div></div>' : '') +
+            '</div>';
+        }
+        async function refreshReadiness() {
+          const type = typeSelect.value;
+          if (type !== 'web' && type !== 'network') {
+            const target = $('#scan-readiness', overlay);
+            if (target) target.innerHTML = '';
+            return;
+          }
+          try {
+            const data = await post('/scan-diagnostics', {
+              scan_type: type,
+              target: targetInput.value.trim(),
+              options: readinessOptions(type),
+              agent_id: ($('#opt-agent', overlay) || {}).value || null,
+              executor: ($('#opt-executor', overlay) || {}).value || 'auto'
+            });
+            renderReadiness(data);
+          } catch (ignore) { /* readiness is advisory; do not block the dialog */ }
+        }
+        function scheduleReadiness() {
+          clearTimeout(readinessTimer);
+          readinessTimer = setTimeout(refreshReadiness, 250);
+        }
+        overlay.addEventListener('change', scheduleReadiness);
         function renderAssets() {
           const groupId = groupSelect.value ? Number(groupSelect.value) : null;
           const groups = (detail && detail.groups) || [];
@@ -1558,7 +1667,7 @@
           assetSelect.value = String(found.id);
         }
 
-        targetInput.addEventListener('input', updateTargetCount);
+        targetInput.addEventListener('input', function () { updateTargetCount(); scheduleReadiness(); });
         const importButton = $('#scan-import-targets', overlay);
         const importFile = $('#scan-target-file', overlay);
         if (importButton && importFile) {
@@ -1833,6 +1942,8 @@
     const summary = scan.summary || {};
     const findings = scan.findings || [];
     const agent = scan.agent;
+    const diagnostics = ((summary.metadata || {}).diagnostics) || {};
+    const readinessWarnings = diagnostics.warnings || [];
     const findingsHtml = findings.length
       ? '<div class="table-wrap findings-table"><table class="data-table"><thead><tr>' +
           '<th>Severity</th><th>Finding</th><th>Category</th><th>Location</th><th>Status</th><th></th>' +
@@ -1887,6 +1998,8 @@
       (scan.error ? '<div class="agent-callout" style="background:var(--critical-bg);color:var(--critical)"><strong>Error:</strong> ' + esc(scan.error) + '</div>' : '') +
       (agent ? '<div class="agent-callout"><strong>Agent:</strong> ' + esc(agent.name || agent.id) + ' · ' +
         esc(agent.platform || 'unknown platform') + ' · ' + esc(agent.hostname || '') + ' · seen ' + esc(relTime(agent.last_seen)) + '</div>' : '') +
+      (readinessWarnings.length ? '<div class="agent-callout info-banner-warn"><strong>Coverage:</strong> ' +
+        readinessWarnings.map(function (warning) { return esc(warning); }).join(' ') + '</div>' : '') +
       '</section>' +
       '<div style="display:grid;grid-template-columns:minmax(0,1.65fr) minmax(280px,1fr);gap:16px;align-items:start">' +
         '<section class="panel"><div class="panel-head"><h2>Findings</h2><span class="tag">' + findings.length + '</span>' +
@@ -1901,6 +2014,13 @@
             '<option value="fixed">Fixed</option></select></div>' +
           '<div id="findings-body">' + findingsHtml + '</div></section>' +
         '<div style="display:flex;flex-direction:column;gap:16px">' +
+          ((diagnostics.checks || []).length ? '<section class="panel"><div class="panel-head"><h2>Scan readiness</h2></div><div class="panel-body tight">' +
+            (diagnostics.checks || []).map(function (check) {
+              return '<div class="tool-row"><span class="badge ' +
+                (check.status === 'ready' ? 'sev-info' : check.status === 'missing' ? 'sev-critical' : check.status === 'disabled' ? 'sev-none' : 'sev-medium') +
+                '">' + esc(check.status) + '</span><span class="tool-name">' + esc(check.label) +
+                '</span><span class="tool-path" title="' + esc(check.detail) + '">' + esc(check.detail) + '</span></div>';
+            }).join('') + '</div></section>' : '') +
           '<section class="panel"><div class="panel-head"><h2>Scan events</h2></div>' +
             '<div class="event-list" data-events>' + eventsHtml(scan.events) + '</div></section>' +
           '<section class="panel"><div class="panel-head"><h2>Scan data</h2></div>' +
@@ -2075,7 +2195,7 @@
         '<label class="field"><span>Asset <span class="muted">(optional)</span></span><select class="select" id="ad-asset"><option value="">No specific asset</option></select></label>' +
         '<label class="field"><span>Report file</span><input class="input" id="ad-file" type="file" accept="application/json,.json,application/xml,.xml,text/xml"></label>' +
         '<label class="field full"><span>Report content</span><textarea class="textarea mono" id="ad-json" rows="12" placeholder="{ &quot;domain&quot;: { &quot;name&quot;: &quot;corp.example&quot; }, ... }"></textarea>' +
-          '<span class="hint">Paste the JSON produced by the VulnScanner AD collector, Purple Knight or a compatible report, or choose a PingCastle HealthcheckData XML file. Collection is read-only.</span></label>' +
+          '<span class="hint">Paste the JSON produced by the VulnScanner AD collector or a compatible report, or choose a PingCastle HealthcheckData XML file. Purple Knight values can be mapped to the documented JSON shape; native Purple Knight HTML/PDF import is not implemented. Collection is read-only.</span></label>' +
         '</div><div class="form-error"></div></form>' +
         '<div class="info-banner" style="margin:14px 0 0"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5" stroke-linecap="round"/></svg>' +
         '<div><strong>Authorized use:</strong> only audit directories you own or are contracted to assess. The supplied collector never changes AD objects.</div></div>',
@@ -2783,7 +2903,7 @@
         '<thead><tr><th>Name</th><th>Hostname</th><th>Status</th><th>Advertised subnets</th><th>Version</th><th></th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div></div>' +
       '<div class="info-banner" style="margin-top:14px"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5" stroke-linecap="round"/></svg>' +
-        '<div><strong>Auto-routing:</strong> a network scan whose target CIDR overlaps an online satellite\'s advertised subnets runs on that satellite automatically. Override per scan with the Executor dropdown.</div></div>';
+        '<div><strong>Auto-routing:</strong> a scan whose target CIDR, IP, hostname or web URL resolves inside an online satellite\'s advertised subnets runs on that satellite automatically. Override per scan with the Executor dropdown.</div></div>';
 
     $('#pair-satellite').addEventListener('click', async function () {
       try {
@@ -2791,9 +2911,13 @@
         openModal({
           title: 'Pair satellite',
           size: 'wide',
-          content: '<p style="margin:0 0 12px" class="muted">Run this command on the second VulnScanner server (the code expires in one hour):</p>' +
-            '<pre class="evidence-block mono">python -m app.satellite enroll --server ' + esc(location.origin) + ' --code ' + esc(pairing.code) + ' --name dmz-1 --subnets 10.30.0.0/16</pre>' +
-            '<p style="margin:12px 0 0" class="muted small">The satellite downloads a client certificate signed by the internal CA, stores it locally and starts polling. Advertise the subnets it can reach so scans are routed automatically, then run <span class="mono">python -m app.satellite run</span> (or install it as a service).</p>',
+          content: '<p style="margin:0 0 12px" class="muted">Run this command on the second VulnScanner server (the code expires in one hour). The certificate fingerprint pins the master certificate, so a self-signed installation does not need insecure TLS:</p>' +
+            '<pre class="evidence-block mono">python -m app.satellite enroll --server ' + esc(pairing.enroll_url || pairing.satellite_url || location.origin) +
+            ' --code ' + esc(pairing.code) + ' --fingerprint ' + esc(pairing.server_fingerprint || '') +
+            ' --name dmz-1 --subnets 10.30.0.0/16</pre>' +
+            '<p style="margin:12px 0 0" class="muted small">The satellite downloads a client certificate signed by the internal CA, stores it locally and starts polling. Advertise the subnets it can reach so scans are routed automatically, then run <span class="mono">python -m app.satellite run</span> (or install it as a service).' +
+            (pairing.mtls_port && Number(pairing.mtls_port) !== Number(location.port || (location.protocol === 'https:' ? 443 : 80)) ? ' The master exposes a dedicated mTLS satellite port on <span class="mono">' + esc(pairing.mtls_port) + '</span>.' : '') +
+            '</p>',
           actions: [{ label: 'Close', onClick: function (ctx) { ctx.close(); router(); } }]
         });
       } catch (error) { toast(errorText(error), 'error'); }
@@ -2810,10 +2934,25 @@
           content: '<form id="satellite-edit-form"><div class="form-grid">' +
             '<label class="field"><span>Name</span><input class="input" id="satellite-name" value="' + esc(satellite.name) + '" maxlength="160"></label>' +
             '<label class="field full"><span>Advertised subnets (one per line)</span><textarea class="textarea mono" id="satellite-subnets" rows="5" spellcheck="false">' + esc((satellite.subnets || []).join('\n')) + '</textarea>' +
-            '<span class="hint">CIDR ranges this satellite can reach. Network scans targeting overlapping ranges run here automatically.</span></label>' +
+            '<span class="hint">CIDR ranges this satellite can reach. Scans whose target CIDR, IP, hostname or web URL resolves into these ranges run here automatically.</span></label>' +
             '</div><div class="form-error"></div></form>',
           actions: [
             { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+            { label: 'Rotate token', class: 'btn-danger', onClick: function (ctx) {
+              confirmAction('Rotate the satellite token? The current token stops working immediately; update the satellite configuration and restart it.', 'Rotate token').then(function (ok) {
+                if (!ok) return;
+                post('/satellites/' + encodeURIComponent(id) + '/rotate-token', {}).then(function (result) {
+                  ctx.close();
+                  openModal({
+                    title: 'New satellite token',
+                    content: '<p class="muted">Update the satellite configuration with this token, then restart <span class="mono">python -m app.satellite run</span>:</p>' +
+                      '<pre class="evidence-block mono">' + esc(result.token) + '</pre>' +
+                      '<p class="muted small">The token is shown once and stored only as a hash on the master.</p>',
+                    actions: [{ label: 'Close', onClick: function (ctx) { ctx.close(); router(); } }]
+                  });
+                }).catch(function (error) { toast(errorText(error), 'error'); });
+              });
+            } },
             { label: 'Save', class: 'btn-primary', onClick: function (ctx) {
               runWithButton(ctx.button, async function () {
                 try {
@@ -2857,7 +2996,7 @@
         '<button class="btn btn-primary" data-action="import-ad">Import report</button></div></div>' +
       '<div class="info-banner"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 4.8-3.2 8.8-8 10-4.8-1.2-8-5.2-8-10V7l8-4z"/></svg>' +
         '<div><strong>Authorization required.</strong> Use a domain account with read-only directory access. The collector reads LDAP/AD configuration and never changes objects. ' +
-        'Reports can be imported from the PowerShell collector, a Windows agent, a native PingCastle XML report, Purple Knight or any compatible JSON document. Collection is read-only.</div></div>' +
+        'Reports can be imported from the PowerShell collector, a Windows agent, a native PingCastle XML report or a compatible JSON document. Purple Knight values can be mapped to that JSON shape; native Purple Knight HTML/PDF import is not implemented. Collection is read-only.</div></div>' +
       '<div class="dash-grid-2" style="margin-bottom:16px">' +
         '<section class="panel"><div class="panel-head"><h2>What is assessed</h2></div><div class="panel-body">' +
           '<div class="setting-copy" style="margin-bottom:12px"><strong>Kerberos and delegation</strong><span>Unconstrained delegation, Kerberoastable and AS-REP-roastable accounts, krbtgt age.</span></div>' +
@@ -2960,6 +3099,7 @@
           '<div class="kv"><span>Running scans</span><span>' + num(queue.scans_running) + '</span></div>' +
           '<div class="kv"><span>Parallel scan workers</span><span>' + num(queue.scan_workers || 4) + ' <span class="muted">(VS_SCAN_WORKERS)</span></span></div>' +
           '<div class="kv"><span>Waiting for agents</span><span>' + num(queue.scans_waiting_agent) + '</span></div>' +
+          '<div class="kv"><span>Waiting for satellites</span><span>' + num(queue.scans_waiting_satellite) + '</span></div>' +
           '<div class="kv"><span>Agent jobs queued</span><span>' + num(queue.jobs_queued) + '</span></div>' +
           '<div class="kv"><span>Agent jobs running</span><span>' + num(queue.jobs_running) + '</span></div>' +
           '<div class="kv"><span>Failed agent jobs</span><span>' + num(queue.jobs_failed) + '</span></div>' +
@@ -3005,6 +3145,8 @@
           '<p class="muted small" style="margin-top:0">Back up the SQLite database before upgrades. Settings, credentials and scan history are inside the database. The copy is excluded from normal report exports.</p>' +
           '<label class="field full" style="margin-top:8px"><span>Backup destination <span class="muted">(absolute directory or .db file; empty uses the default)</span></span>' +
           '<input class="input mono" id="backup-destination" placeholder="' + esc((data.paths || {}).backup_dir || '') + '" spellcheck="false" autocomplete="off"></label>' +
+          '<label class="field full"><span>Backup passphrase <span class="muted">(optional; encrypts the backup with AES-256-GCM)</span></span>' +
+          '<input class="input" id="backup-passphrase" type="password" autocomplete="new-password" placeholder="Leave empty for a plaintext .db backup"></label>' +
           '<div class="kv"><span>Last backup</span><span>' + esc(data.last_backup_at ? fmtDate(data.last_backup_at) : 'never') + '</span></div>' +
           '<div class="kv"><span>Backup path</span><span class="mono">' + esc(data.last_backup_path || '—') + '</span></div>' +
           '<div class="row-actions" style="margin-top:14px">' +
@@ -3025,6 +3167,8 @@
             '<option value="scans">Scan data only — keep current settings, agents and credentials</option>' +
             '<option value="settings">Settings only — keep current scans</option>' +
           '</select></label>' +
+          '<label class="field full"><span>Backup passphrase <span class="muted">(only for encrypted .vsenc backups)</span></span>' +
+          '<input class="input" id="restore-passphrase" type="password" autocomplete="off" placeholder="Leave empty for an unencrypted .db backup"></label>' +
         '</div>' +
         '<div class="info-banner info-banner-warn" style="margin:10px 0"><strong>Restore replaces data.</strong> Scan-data restore replaces the current scan history and merges customers/assets by name. A database restore may also change the admin password or listener settings; sign in again or restart when prompted.</div>' +
         '<div class="kv"><span>Last restore</span><span>' + esc(data.last_restore_at ? fmtDate(data.last_restore_at) : 'never') + (data.last_restore_mode ? ' · ' + esc(data.last_restore_mode) : '') + '</span></div>' +
@@ -3064,7 +3208,10 @@
           try {
             const input = $('#backup-destination');
             const destination = input ? input.value.trim() : '';
-            const result = await post('/server/database/backup', destination ? { destination: destination } : {});
+            const passphrase = (($('#backup-passphrase') || {}).value || '').trim();
+            const payload = destination ? { destination: destination } : {};
+            if (passphrase) payload.passphrase = passphrase;
+            const result = await post('/server/database/backup', payload);
             toast('Database backed up to ' + result.path + ' (' + bytes(result.size) + ')');
             router();
           } catch (error) { toast(errorText(error), 'error'); }
@@ -3079,7 +3226,10 @@
         if (!path) { toast('Enter the absolute path to a backup file', 'error'); return; }
         runWithButton(action, async function () {
           try {
-            const info = await get('/server/database/inspect' + queryString({ path: path, mode: mode }));
+            const passphrase = (($('#restore-passphrase') || {}).value || '').trim();
+            const info = await api('/server/database/inspect' + queryString({ path: path, mode: mode }), {
+              headers: passphrase ? { 'X-Backup-Passphrase': passphrase } : {}
+            });
             const missing = (info.missing_optional || []).length ? ' Missing optional tables: ' + info.missing_optional.join(', ') + '.' : '';
             $('#restore-inspect-result').textContent =
               'Source schema ' + info.source_version + ' / current ' + info.current_version +
@@ -3107,7 +3257,10 @@
           if (!ok) return;
           runWithButton(action, async function () {
             try {
-              const result = await post('/server/database/restore', { path: path, mode: mode });
+              const passphrase = (($('#restore-passphrase') || {}).value || '').trim();
+              const payload = { path: path, mode: mode };
+              if (passphrase) payload.passphrase = passphrase;
+              const result = await post('/server/database/restore', payload);
               toast('Restore complete. Safety backup: ' + result.safety_backup);
               if (result.restart_required) {
                 toast('Restart VulnScanner to apply restored listener settings', 'error');
@@ -3367,16 +3520,33 @@
     }).join('') : '<p class="muted small" style="margin:0">No saved credentials. Add a Linux or Windows account to enable authenticated network scans.</p>';
     const tools = settings.tools || {};
     const toolPaths = settings.tool_paths || {};
-    const toolRows = ['nmap', 'nuclei', 'testssl', 'trivy', 'subfinder', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].map(function (name) {
+    const toolManagement = settings.tool_management || [];
+    const toolRows = toolManagement.map(function (item) {
+      const name = item.name;
       const tool = tools[name] || { available: false, path: '', version: '' };
-      const configured = toolPaths[name] || '';
+      const configured = toolPaths[name] || item.path || '';
       const policy = tool.policy_status === 'outdated' ? ' <span class="badge sev-high" title="Minimum ' + esc(tool.minimum_version) + '">outdated</span>' : '';
-      return '<div class="tool-row"><span class="tool-name">' + esc(name) + '</span>' +
+      const managed = !!item.catalog;
+      const options = [
+        ['system', 'System PATH'],
+        ['path', 'Explicit path'],
+        ...(managed ? [['managed', 'Managed download']] : []),
+        ['disabled', 'Disabled']
+      ].map(function (entry) {
+        return '<option value="' + entry[0] + '"' + (item.mode === entry[0] ? ' selected' : '') + '>' + entry[1] + '</option>';
+      }).join('');
+      return '<div class="tool-row" data-tool-source="' + esc(name) + '">' +
+        '<span class="tool-name">' + esc(name) + '</span>' +
         '<span class="badge ' + (tool.available ? 'sev-info' : 'sev-none') + '">' + (tool.available ? 'available' : 'not found') + '</span>' +
+        '<select class="select select-sm" data-tool-mode="' + esc(name) + '">' + options + '</select>' +
         '<input class="input mono" id="tool-path-' + esc(name) + '" value="' + esc(configured) + '" spellcheck="false" autocomplete="off" ' +
           'style="flex:1;min-width:180px;font-size:11.5px;padding:5px 8px" placeholder="' +
-          esc(tool.path || 'Auto-detect from PATH') + '" title="Absolute path; leave empty to search PATH">' +
-        '<span class="tool-version">' + esc(tool.version || '') + policy + '</span></div>';
+          esc(tool.path || 'Auto-detect from PATH') + '" title="Absolute path for explicit-path mode">' +
+        '<span class="tool-version">' + esc(tool.version || '') + policy +
+          (item.installed_version ? ' · managed ' + esc(item.installed_version) : '') +
+          (item.last_error ? ' · <span class="danger-text">' + esc(item.last_error) + '</span>' : '') + '</span>' +
+        (managed ? '<button class="btn btn-sm" data-tool-install="' + esc(name) + '" type="button">Install / update</button>' : '') +
+        '</div>';
     }).join('');
     let wordlist = null;
     try { wordlist = await get('/settings/wordlist'); }
@@ -3443,6 +3613,10 @@
           '<span class="hint">How many detected services are compared with the NVD CVE database. 0 disables CVE matching entirely.</span></label>' +
         '<label class="field"><span>Max CVEs per service</span><input class="input" id="guard-cves-service" type="number" min="1" max="500" value="' + num(settings.max_cves_per_service) + '"></label>' +
         '<label class="field"><span>Max CVE findings per scan</span><input class="input" id="guard-cves-scan" type="number" min="1" max="5000" value="' + num(settings.max_cves_per_scan) + '"></label>' +
+        '<label class="field"><span>Default TCP connect timeout (seconds)</span><input class="input" id="guard-connect-timeout" type="number" min="0.1" max="3" step="0.05" value="' + esc(settings.network_connect_timeout || 0.45) + '"><span class="hint">Per-scan values override this. Lower is faster but misses slow hosts.</span></label>' +
+        '<label class="field"><span>Max testssl.sh hosts per scan</span><input class="input" id="guard-testssl-hosts" type="number" min="0" max="50" value="' + num(settings.max_testssl_hosts) + '"></label>' +
+        '<label class="field"><span>Max OpenVAS hosts per scan</span><input class="input" id="guard-openvas-hosts" type="number" min="1" max="50" value="' + num(settings.max_openvas_hosts) + '"></label>' +
+        '<label class="field"><span>Max Nuclei network targets per scan</span><input class="input" id="guard-nuclei-network" type="number" min="1" max="2000" value="' + num(settings.max_nuclei_network_targets) + '"><span class="hint">Open services passed to Nuclei network-protocol templates. Large ranges can be slow.</span></label>' +
       '</div>' +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-guardrails">Save guardrails</button>' +
       '<span class="muted small">Changes apply to subsequent scans without a restart.</span></div>' +
@@ -3477,6 +3651,10 @@
         '<label class="field full"><span>SecLists download URL</span><input class="input mono" id="adv-seclists-url" value="' + esc(settings.seclists_download_url || '') + '"></label>' +
         '<label class="field"><span>Session lifetime (hours)</span><input class="input" id="adv-session-ttl" type="number" min="1" max="168" value="' + num(settings.session_ttl_hours) + '"></label>' +
         '<label class="field"><span>Session idle timeout (minutes)</span><input class="input" id="adv-session-idle" type="number" min="5" max="1440" value="' + num(settings.session_idle_minutes) + '"></label>' +
+        '<label class="field"><span>Allowed Host headers</span><input class="input mono" id="adv-allowed-hosts" value="' + esc(settings.allowed_hosts || '') + '" placeholder="scanner.example.com,10.0.0.5"><span class="hint">Comma-separated. Required when the app is reached through a DNS name or reverse proxy.</span></label>' +
+        '<label class="field"><span>Max request body (bytes)</span><input class="input" id="adv-max-request" type="number" min="1048576" max="536870912" value="' + num(settings.max_request_bytes) + '"></label>' +
+        '<label class="field"><span>Satellite mTLS bind address</span><input class="input mono" id="adv-satellite-host" value="' + esc(settings.satellite_host_saved || '') + '" placeholder="127.0.0.1"></label>' +
+        '<label class="field"><span>Satellite mTLS port</span><input class="input" id="adv-satellite-port" type="number" min="0" max="65535" value="' + num(settings.satellite_port_saved) + '"><span class="hint">0 uses the main listener. A dedicated port requires a client certificate signed by the internal CA. Active: ' + num(settings.satellite_port) + '.</span></label>' +
       '</div>' +
       switchRow('adv-trust-proxy', 'Trust reverse-proxy headers',
         'Trust X-Forwarded-For and X-Forwarded-Proto. Enable only when VulnScanner is reachable exclusively through a trusted TLS proxy.', settings.trust_proxy) +
@@ -3486,7 +3664,7 @@
       switchRow('adv-allow-private', 'Allow private-network outbound URLs',
         'Permit webhooks and SecLists downloads to resolve to loopback, RFC1918, link-local or reserved addresses. Leave off unless an internal service requires it. This weakens SSRF protection.', settings.allow_private_outbound) +
       '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn btn-primary" id="save-advanced">Save advanced settings</button>' +
-      '<span class="muted small">Wordlist, known_hosts, SecLists URL, session settings, proxy trust and the private-network switch apply immediately; worker and master-switch changes need a restart.</span></div>' +
+      '<span class="muted small">Wordlist, known_hosts, SecLists URL, session settings, proxy trust and the private-network switch apply immediately; worker, master-switch, allowed-host, request-body and satellite-listener changes need a restart.</span></div>' +
     '</div></section>';
 
     const policy = settings.tool_policy || { enabled: false, warn_only: true, minimums: {} };
@@ -3548,6 +3726,16 @@
             '<span class="hint">Comma-separated Nuclei tags used when a scan does not specify its own. Empty or "all" runs every tag.</span></label>' +
           '<label class="field"><span>Template updates</span><button class="btn" id="update-nuclei-templates">Update templates now</button></label>' +
           '</div></div>' +
+          '<div class="form-section"><h3>Vulnerability intelligence and internal TLS</h3>' +
+          '<div class="form-grid">' +
+          '<label class="field"><span>NVD API key</span><input class="input" id="set-nvd-key" type="password" placeholder="' + (settings.nvd_api_key_configured ? 'Stored; leave blank to keep current' : 'Optional; raises the NVD rate limit') + '" autocomplete="new-password"><span class="hint">Encrypted at rest. Without a key NVD allows 5 requests per 30 seconds.</span></label>' +
+          '<label class="check"><input type="checkbox" id="clear-nvd-key"><span>Clear the stored NVD API key</span></label>' +
+          '<label class="field"><span>Custom CA bundle</span><input class="input mono" id="set-tls-ca" value="' + esc(settings.tls_ca_bundle || '') + '" placeholder="/etc/ssl/certs/internal-ca.pem"><span class="hint">PEM bundle used for HTTPS scan targets and service probes. Keeps verification on for private CAs.</span></label>' +
+          '<label class="field"><span>Interactsh/OAST server</span><input class="input mono" id="set-interactsh-server" value="' + esc(settings.interactsh_server || '') + '" placeholder="https://oast.example.com"><span class="hint">Optional self-hosted collaborator for blind SSRF/RCE/XXE templates.</span></label>' +
+          '<label class="field"><span>Interactsh token</span><input class="input" id="set-interactsh-token" type="password" placeholder="' + (settings.interactsh_token_set ? 'Stored; leave blank to keep current' : 'Optional token') + '" autocomplete="new-password"></label>' +
+          '<label class="check"><input type="checkbox" id="clear-interactsh-token"><span>Clear the stored Interactsh token</span></label>' +
+          '</div>' +
+          '<p class="muted small">Nuclei uses the collaborator only when the per-scan OAST option is enabled. It never sends callbacks without that explicit opt-in.</p></div>' +
           '<div style="display:flex;align-items:center;gap:10px;margin-top:16px"><button class="btn btn-primary" id="save-settings">Save settings</button>' +
           '<span class="muted small">Environment-level external API access: ' + (settings.external_apis_available ? 'enabled' : 'disabled') + '</span></div>' +
         '</div></section>' +
@@ -3561,11 +3749,20 @@
           'Each host receives at most one authentication attempt.</p>' +
           credentialRows +
         '</div></section>' +
-        '<section class="panel"><div class="panel-head"><h2>CISA KEV catalogue</h2></div><div class="panel-body">' +
-          '<p class="muted small" style="margin-top:0">Known Exploited Vulnerabilities data is cached in SQLite and used to flag findings that are actively exploited.</p>' +
-          '<div class="kv"><span>CVEs in catalogue</span><span>' + num(settings.kev_count) + '</span></div>' +
-          '<div class="kv"><span>Last sync</span><span>' + esc(settings.kev_last_sync ? fmtDate(settings.kev_last_sync) : 'never') + '</span></div>' +
-          '<div style="margin-top:14px"><button class="btn" id="sync-kev">Sync catalogue now</button></div>' +
+        '<section class="panel settings-wide"><div class="panel-head"><h2>Vulnerability data</h2></div><div class="panel-body">' +
+          '<p class="muted small" style="margin-top:0">Local NVD/EPSS/KEV data makes CVE matching and risk scoring work during an internet outage or in an air-gapped network. NVD product sync covers every product in the built-in fingerprint registry.</p>' +
+          '<div class="kv"><span>NVD product caches</span><span>' + num((settings.vulnerability_data || {}).cache ? (settings.vulnerability_data || {}).cache.nvd_products : 0) + '</span></div>' +
+          '<div class="kv"><span>NVD version caches</span><span>' + num((settings.vulnerability_data || {}).cache ? (settings.vulnerability_data || {}).cache.nvd_versions : 0) + '</span></div>' +
+          '<div class="kv"><span>EPSS scores</span><span>' + num((settings.vulnerability_data || {}).cache ? (settings.vulnerability_data || {}).cache.epss : 0) + '</span></div>' +
+          '<div class="kv"><span>CISA KEV entries</span><span>' + num((settings.vulnerability_data || {}).cache ? (settings.vulnerability_data || {}).cache.kev : 0) + '</span></div>' +
+          '<div class="kv"><span>OSV cache entries</span><span>' + num((settings.vulnerability_data || {}).cache ? (settings.vulnerability_data || {}).cache.osv : 0) + '</span></div>' +
+          '<div class="kv"><span>Last sync</span><span>' + esc((settings.vulnerability_data || {}).last_sync ? fmtDate((settings.vulnerability_data || {}).last_sync) : 'never') + '</span></div>' +
+          '<div class="kv"><span>Status</span><span>' + esc((settings.vulnerability_data || {}).last_sync_status || 'not synced') + '</span></div>' +
+          '<div class="kv"><span>Offline ready</span><span>' + ((settings.vulnerability_data || {}).offline_ready ? 'yes' : 'no') + '</span></div>' +
+          '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px">' +
+          '<button class="btn btn-primary" id="sync-vulnerability-data">Sync NVD + EPSS + KEV</button>' +
+          '<button class="btn" id="sync-kev">Sync KEV only</button>' +
+          '<span class="muted small">NVD sync can take several minutes; it runs in the background.</span></div>' +
         '</div></section>' +
         '<section class="panel"><div class="panel-head"><h2>SSL/TLS Certificates</h2></div><div class="panel-body">' +
           '<p class="muted small" style="margin-top:0">Manage the certificates used by the built-in HTTPS listener. ' +
@@ -3593,8 +3790,8 @@
         '<section class="panel settings-wide"><div class="panel-head"><h2>Optional command-line tools</h2><span class="spacer"></span>' +
           '<span class="muted small">Built-in fallbacks remain available when a tool is missing.</span></div><div class="panel-body">' + toolRows +
           '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px">' +
-          '<button class="btn btn-primary" id="save-tool-paths">Save tool paths</button>' +
-          '<span class="muted small">Absolute paths are stored in the database and mirrored to <span class="mono">.env</span>, then applied immediately. Leave a field empty to search <span class="mono">PATH</span>.</span></div>' +
+          '<button class="btn btn-primary" id="save-tool-paths">Save tool sources</button>' +
+          '<span class="muted small">Choose System PATH, Explicit path, Managed download or Disabled per tool. The path field is used by Explicit path mode; Managed releases are checksum-verified under <span class="mono">$VS_DATA_DIR/tools/</span>.</span></div>' +
         '</div></section>' +
         toolPolicyPanel +
         wordlistPanel +
@@ -3651,6 +3848,9 @@
                   : '<span class="muted small">Set a dashboard password first.</span>')) +
             '</div>' +
           '</div>' +
+          '<div class="form-section"><h3>Credential encryption key</h3>' +
+            '<p class="muted small" style="margin-top:0">Rotate the Fernet key that protects saved SSH/WinRM credentials, web sessions and SMTP/GVM/NVD secrets. The old key is kept as <span class="mono">credential.key.old</span>. Back up the database and key before rotating.</p>' +
+            '<button class="btn btn-sm" id="rotate-credential-key">Rotate credential key…</button></div>' +
           '<div class="kv"><span>Agent tokens</span><span>SHA-256 hashed at rest</span></div>' +
           '<div class="kv"><span>Enrollment tokens</span><span>One-time use, 1–168 hour expiry</span></div>' +
           '<p class="modal-note" style="margin-top:12px">Bind to <span class="mono">0.0.0.0</span> only behind a trusted network or reverse proxy with TLS. ' +
@@ -3678,6 +3878,17 @@
           if (gvmPassword) {
             await patch('/settings', { gvm_password: gvmPassword });
           }
+          const nvdKey = $('#set-nvd-key').value.trim();
+          const interactshToken = $('#set-interactsh-token').value.trim();
+          const extra = {
+            tls_ca_bundle: $('#set-tls-ca').value.trim(),
+            interactsh_server: $('#set-interactsh-server').value.trim()
+          };
+          if (($('#clear-nvd-key') || {}).checked) extra.nvd_api_key = '';
+          else if (nvdKey) extra.nvd_api_key = nvdKey;
+          if (($('#clear-interactsh-token') || {}).checked) extra.interactsh_token = '';
+          else if (interactshToken) extra.interactsh_token = interactshToken;
+          await patch('/settings', extra);
           toast('Settings saved');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
@@ -3765,7 +3976,11 @@
             agent_job_timeout: Number($('#guard-agent-timeout').value),
             max_cve_lookups: Number($('#guard-cve-lookups').value),
             max_cves_per_service: Number($('#guard-cves-service').value),
-            max_cves_per_scan: Number($('#guard-cves-scan').value)
+            max_cves_per_scan: Number($('#guard-cves-scan').value),
+            network_connect_timeout: Number($('#guard-connect-timeout').value),
+            max_testssl_hosts: Number($('#guard-testssl-hosts').value),
+            max_openvas_hosts: Number($('#guard-openvas-hosts').value),
+            max_nuclei_network_targets: Number($('#guard-nuclei-network').value)
           });
           toast('Scan guardrails saved');
           router();
@@ -3795,7 +4010,11 @@
             seclists_subdomain_url: $('#adv-seclists-url').value.trim(),
             session_ttl_hours: Number($('#adv-session-ttl').value),
             session_idle_minutes: Number($('#adv-session-idle').value),
-            trust_proxy: $('#adv-trust-proxy').checked
+            trust_proxy: $('#adv-trust-proxy').checked,
+            allowed_hosts: $('#adv-allowed-hosts').value.trim(),
+            max_request_bytes: Number($('#adv-max-request').value),
+            satellite_port: Number($('#adv-satellite-port').value),
+            satellite_host: $('#adv-satellite-host').value.trim()
           });
           await patch('/settings', { allow_private_outbound: $('#adv-allow-private').checked });
           toast(result.restart_required ? 'Advanced settings saved. Restart VulnScanner to apply worker/master-switch changes.' : 'Advanced settings saved');
@@ -3806,13 +4025,17 @@
     $('#save-tool-paths').addEventListener('click', function (event) {
       runWithButton(event.currentTarget, async function () {
         try {
-          const paths = {};
-          ['nmap', 'nuclei', 'testssl', 'trivy', 'subfinder', 'osv-scanner', 'gitleaks', 'semgrep', 'git'].forEach(function (name) {
-            const input = $('#tool-path-' + name);
-            if (input) paths[name] = input.value.trim();
-          });
-          await post('/settings/tools', { paths: paths });
-          toast('Tool paths saved');
+          const rows = $$('[data-tool-source]');
+          for (const row of rows) {
+            const name = row.getAttribute('data-tool-source');
+            const mode = (row.querySelector('[data-tool-mode]') || {}).value || 'system';
+            const input = row.querySelector('#tool-path-' + name);
+            await patch('/tools/' + encodeURIComponent(name), {
+              mode: mode,
+              path: input ? input.value.trim() : ''
+            });
+          }
+          toast('Tool sources saved');
           router();
         } catch (error) { toast(errorText(error), 'error'); }
       });
@@ -3991,6 +4214,31 @@
         } catch (error) { toast(errorText(error), 'error'); }
       });
     });
+    const rotateKey = $('#rotate-credential-key');
+    if (rotateKey) rotateKey.addEventListener('click', function () {
+      openModal({
+        title: 'Rotate credential encryption key',
+        content: '<form id="rotate-key-form"><p class="muted small" style="margin-top:0">Every saved credential, web session and encrypted secret is re-encrypted. Back up the database and <span class="mono">credential.key</span> first. The old key is kept as <span class="mono">credential.key.old</span>.</p>' +
+          (settings.admin_auth_enabled ? '<label class="field full"><span>Current admin password</span><input class="input" id="rotate-key-password" type="password" autocomplete="current-password" maxlength="128"></label>' : '') +
+          '<label class="field full"><span>Type <span class="mono">ROTATE</span> to confirm</span><input class="input mono" id="rotate-key-confirm" autocomplete="off" spellcheck="false"></label>' +
+          '<div class="form-error"></div></form>',
+        actions: [
+          { label: 'Cancel', onClick: function (ctx) { ctx.close(); } },
+          { label: 'Rotate key', class: 'btn-danger', onClick: function (ctx) {
+            runWithButton(ctx.button, async function () {
+              try {
+                const payload = { confirm: ($('#rotate-key-confirm', ctx.overlay) || {}).value || '' };
+                if (settings.admin_auth_enabled) payload.password = ($('#rotate-key-password', ctx.overlay) || {}).value || '';
+                const result = await post('/settings/rotate-credential-key', payload);
+                ctx.close();
+                toast('Credential key rotated. Old key: ' + result.backup_key);
+                router();
+              } catch (error) { formError(ctx.overlay, errorText(error)); }
+            });
+          } }
+        ]
+      });
+    });
     const storageDataInput = $('#storage-data-dir');
     const storageDbInput = $('#storage-db-path');
     if (storageDataInput && storageDbInput) {
@@ -4093,6 +4341,15 @@
         } catch (error) { toast(errorText(error), 'error'); }
       });
     });
+    $('#sync-vulnerability-data').addEventListener('click', function (event) {
+      runWithButton(event.currentTarget, async function () {
+        try {
+          await post('/vulnerability-data/sync', { targets: ['nvd', 'epss', 'kev'] });
+          toast('Vulnerability data sync started; it runs in the background');
+          router();
+        } catch (error) { toast(errorText(error), 'error'); }
+      });
+    });
     $('#sync-kev').addEventListener('click', function (event) {
       runWithButton(event.currentTarget, async function () {
         try {
@@ -4104,6 +4361,19 @@
     });
     $('#add-policy').addEventListener('click', function () { policyModal(null); });
     view.addEventListener('click', function (event) {
+      const install = event.target.closest('[data-tool-install]');
+      if (install) {
+        event.preventDefault();
+        const name = install.getAttribute('data-tool-install');
+        runWithButton(install, async function () {
+          try {
+            await post('/tools/' + encodeURIComponent(name) + '/install', {});
+            toast('Installation started for ' + name + '. The release checksum is verified before use.');
+            setTimeout(function () { router(); }, 1500);
+          } catch (error) { toast(errorText(error), 'error'); }
+        });
+        return;
+      }
       const add = event.target.closest('[data-action="add-credential"]');
       if (add) { event.preventDefault(); credentialModal(null, customers); return; }
       const edit = event.target.closest('[data-action="edit-credential"]');
