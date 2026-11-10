@@ -58,12 +58,6 @@ jobs:
         if: matrix.python-version == '3.11'
         run: uv run --python ${{ matrix.python-version }} pip-audit -r requirements.txt --progress-spinner off
 
-      - name: Secret scanning
-        if: matrix.python-version == '3.11'
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: JavaScript syntax
         run: |
           node --check app/static/app.js
